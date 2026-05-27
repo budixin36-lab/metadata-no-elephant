@@ -1,0 +1,228 @@
+#基于 剔除非洲草原象后的新 metadata 重新绘制 图 2-1 采样国家-样本数量分布图。
+#这版代码已经按你的要求处理了：
+#使用 no_elephant 新数据
+#图中国家名改为中文
+#图例标题改为 “样本数量”
+#不加图标题
+#输出 高清 PNG + PDF + SVG
+#白底、无灰色网格线
+#方便后期在 PowerPoint / AI / Inkscape 继续编辑
+#一、输入文件与输出目录
+#输入文件/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#输出目录/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map
+#二、直接可运行的 R 代码
+#你可以在 WSL 终端里先进入 R：
+R
+#然后把下面整段粘贴进去运行。
+## =========================
+## 图2-1 采样国家-样本数量分布图（no_elephant版）
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(ggrepel)
+library(readr)
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 读取metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+## 检查必要列
+need_cols <- c("sampleid", "country")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+## ---- 统计各国家样本数 ----
+country_counts <- meta %>%
+  filter(!is.na(country), trimws(country) != "") %>%
+  count(country, name = "samples") %>%
+  arrange(desc(samples))
+
+## ---- 国家英文名 -> 中文名 + 标注坐标 ----
+## 如果你的metadata里的国家名称写法和这里不完全一致，按实际名称改左边country这一列
+country_info <- data.frame(
+  country = c(
+    "China", "Spain", "United Kingdom", "Finland", "USA", "United States",
+    "Canada", "South Africa", "Netherlands", "Italy", "Germany",
+    "Hungary", "Argentina", "Brazil", "Denmark"
+  ),
+  country_cn = c(
+    "中国", "西班牙", "英国", "芬兰", "美国", "美国",
+    "加拿大", "南非", "荷兰", "意大利", "德国",
+    "匈牙利", "阿根廷", "巴西", "丹麦"
+  ),
+  lon = c(
+    104, -3.5, -2.5, 26, -98, -98,
+    -106, 24, 5.3, 12.5, 10.5,
+    19.3, -64, -52, 10
+  ),
+  lat = c(
+    35, 40, 54.5, 64.5, 39, 39,
+    57, -29, 52.3, 42.5, 51,
+    47.2, -38, -10, 56
+  ),
+  label_nudge_x = c(
+    10, -8, 2, 7, -10, -10,
+    -10, 8, 1, 6, 7,
+    7, 8, 8, 6
+  ),
+  label_nudge_y = c(
+    3, -4, 3, 3, -2, -2,
+    3, -2, 2, -3, 2,
+    -2, -2, -2, 3
+  ),
+  stringsAsFactors = FALSE
+)
+
+## 去掉重复映射（USA / United States 都映射成美国）
+country_plot <- country_counts %>%
+  left_join(country_info, by = "country")
+
+## 检查是否有国家没匹配上
+if (any(is.na(country_plot$country_cn))) {
+  unmatched <- unique(country_plot$country[is.na(country_plot$country_cn)])
+  warning("以下国家未在country_info中匹配到，请补充中文名和坐标：\n",
+          paste(unmatched, collapse = ", "))
+}
+
+## 仅保留已匹配国家
+country_plot <- country_plot %>%
+  filter(!is.na(country_cn))
+
+## ---- 标签内容：中文国家名 + 样本数 ----
+country_plot <- country_plot %>%
+  mutate(
+    label = paste0(country_cn, ": ", samples),
+    label_lon = lon + label_nudge_x,
+    label_lat = lat + label_nudge_y
+  )
+
+## ---- 世界地图底图 ----
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+## ---- 绘图 ----
+p <- ggplot() +
+  geom_sf(data = world, fill = "#D9D9D9", color = "white", linewidth = 0.2) +
+
+  ## 气泡
+  geom_point(
+    data = country_plot,
+    aes(x = lon, y = lat, size = samples),
+    shape = 21,
+    fill = "#F0D96C",
+    color = "#9E8B2F",
+    stroke = 0.5,
+    alpha = 0.95
+  ) +
+
+  ## 标签连接线
+  geom_segment(
+    data = country_plot,
+    aes(x = lon, y = lat, xend = label_lon, yend = label_lat),
+    linewidth = 0.35,
+    color = "grey40"
+  ) +
+
+  ## 标签框
+  geom_label(
+    data = country_plot,
+    aes(x = label_lon, y = label_lat, label = label),
+    size = 3.6,
+    family = "sans",
+    label.size = 0.25,
+    fill = "white",
+    color = "black"
+  ) +
+
+  scale_size_continuous(
+    name = "样本数量",
+    range = c(3, 15),
+    breaks = c(500, 1000, 1500)
+  ) +
+
+  coord_sf(
+    xlim = c(-170, 160),
+    ylim = c(-58, 78),
+    expand = FALSE
+  ) +
+
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    legend.title = element_text(size = 12, face = "plain"),
+    legend.text = element_text(size = 10),
+    legend.position = c(0.09, 0.17),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA)
+  )
+
+## ---- 保存国家计数表 ----
+write.csv(
+  country_plot %>% select(country, country_cn, samples),
+  file.path(out_dir, "country_sample_counts_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 保存高清图片 ----
+ggsave(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.png"),
+  plot = p,
+  width = 12,
+  height = 5.3,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.pdf"),
+  plot = p,
+  width = 12,
+  height = 5.3,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.svg"),
+  plot = p,
+  width = 12,
+  height = 5.3,
+  bg = "white"
+)
+
+cat("Done!\n")
+cat("Country counts saved to: ", file.path(out_dir, "country_sample_counts_no_elephant.csv"), "\n", sep = "")
+cat("PNG saved to: ", file.path(out_dir, "country_sample_map_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "country_sample_map_no_elephant.pdf"), "\n", sep = "")
+cat("SVG saved to: ", file.path(out_dir, "country_sample_map_no_elephant.svg"), "\n", sep = "")
+#把完整代码保存成脚本再运行，避免复制到 R 里时断行出错。你可以在 WSL 终端运行：
+nano /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#把完整 R 代码粘进去，保存退出后运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#如果现在 R 里已经卡在 +，一定先 Ctrl + C，不要继续粘贴代码。
