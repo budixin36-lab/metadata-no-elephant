@@ -1507,6 +1507,526 @@ cat("Intersection summary saved to: ", file.path(out_dir, "host_family_SH_inters
 EOF
 #运行：
 Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
-#跑完后可以先看两个文件确认顺序和正文数据：
-cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/host_family_SH_summary_no_elephant.txt
-cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/host_family_upset_display_order_no_elephant.csv
+#在 WSL 终端整段运行：
+cd /mnt/d/ITS_SH_pipeline
+
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables
+
+# 如果 SH abundance table 不存在，就从 no_elephant BIOM 一次性导出
+if [ ! -f /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv ]; then
+  biom convert \
+    -i /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom \
+    -o /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv \
+    --to-tsv
+fi
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/03_host_family_upset_no_elephant.R <<'EOF'
+## ============================================================
+## 图3-1 宿主科水平共享/独有 SH UpSet 图
+## no_elephant 版
+##
+## 说明：
+## 1. 复用原版 UpSetR 标准布局；
+## 2. 不使用 biomformat，直接读取 biom convert 导出的 SH abundance TSV；
+## 3. 排序：5科共有 -> 4科共有 -> 3科共有 -> 2科共有 -> 1科特有；
+## 4. 5科共有标红；
+## 5. PNG 输出 600 dpi。
+## ============================================================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(UpSetR)
+})
+
+## -----------------------------
+## 1. Paths
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/host_family_upset"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## -----------------------------
+## 2. Read metadata
+## -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列，请检查列名。")
+}
+
+possible_sample_cols <- c("sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID")
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("没有找到样本 ID 列。请检查 metadata 中样本 ID 列名。")
+}
+
+meta <- meta %>%
+  mutate(
+    sample_id = .data[[sample_col]],
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family != "NA",
+    host_family != "missing",
+    host_family != "not_recorded",
+    host_family != "not reported"
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+cat("Metadata samples after filtering host_family:", nrow(meta), "\n")
+cat("Host families:\n")
+print(sort(table(meta$host_family), decreasing = TRUE))
+
+## -----------------------------
+## 3. Read SH abundance table
+## -----------------------------
+if (!file.exists(sh_table_file)) {
+  stop("找不到 SH abundance table：", sh_table_file)
+}
+
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+## biom convert --to-tsv 第一行通常是说明行，第二行才是 #OTU ID 表头
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+  stop(
+    "SH abundance table 表头异常。文件前几行是：\n",
+    paste(head(sh_lines, 5), collapse = "\n")
+  )
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(sh_raw)[1] <- "SH_ID"
+
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(mat) <- "numeric"
+
+cat("SH abundance matrix dimension:", nrow(mat), "SHs x", ncol(mat), "samples\n")
+
+## -----------------------------
+## 4. Match samples
+## -----------------------------
+common_samples <- intersect(colnames(mat), meta$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 样本名和 metadata 样本名没有交集，请检查 sample_id 列。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta2 <- meta %>%
+  filter(sample_id %in% common_samples) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2 <- meta2[match(colnames(mat), meta2$sample_id), ]
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("Matched host families:\n")
+print(sort(table(meta2$host_family), decreasing = TRUE))
+
+## -----------------------------
+## 5. Build SH presence/absence by host family
+## -----------------------------
+host_families <- sort(unique(meta2$host_family))
+
+presence_list <- list()
+
+for (hf in host_families) {
+  samples_hf <- meta2$sample_id[meta2$host_family == hf]
+  sub_mat <- mat[, samples_hf, drop = FALSE]
+  present_sh <- rownames(sub_mat)[rowSums(sub_mat > 0) > 0]
+  presence_list[[hf]] <- present_sh
+}
+
+set_size_df <- tibble(
+  host_family = names(presence_list),
+  SH_number = lengths(presence_list)
+) %>%
+  arrange(desc(SH_number))
+
+write.csv(
+  set_size_df,
+  file.path(out_dir, "host_family_SH_set_size_no_elephant.csv"),
+  row.names = FALSE
+)
+
+all_sh <- sort(unique(unlist(presence_list)))
+
+upset_df <- tibble(SH_ID = all_sh)
+
+for (hf in host_families) {
+  upset_df[[hf]] <- as.integer(upset_df$SH_ID %in% presence_list[[hf]])
+}
+
+write.csv(
+  upset_df,
+  file.path(out_dir, "host_family_SH_presence_absence_matrix_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## -----------------------------
+## 6. Shared SHs among all host families
+## -----------------------------
+shared_sh <- Reduce(intersect, presence_list)
+
+cat("Number of SHs shared by all host families:", length(shared_sh), "\n")
+
+write.table(
+  shared_sh,
+  file.path(out_dir, "shared_SHs_all_host_families_no_elephant.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE,
+  sep = "\t"
+)
+
+## -----------------------------
+## 7. Summary tables for text
+## -----------------------------
+upset_input <- as.data.frame(upset_df)
+rownames(upset_input) <- upset_input$SH_ID
+upset_input$SH_ID <- NULL
+
+pa_mat <- as.matrix(upset_input)
+
+family_sample_counts <- meta2 %>%
+  count(host_family, name = "sample_n") %>%
+  arrange(desc(sample_n))
+
+family_unique_counts <- tibble(
+  host_family = colnames(pa_mat),
+  unique_SH_number = sapply(colnames(pa_mat), function(hf) {
+    sum(pa_mat[, hf] == 1 & rowSums(pa_mat) == 1)
+  })
+) %>%
+  arrange(desc(unique_SH_number))
+
+pattern_df <- as.data.frame(pa_mat)
+pattern_df$pattern <- apply(pattern_df, 1, paste0, collapse = "")
+
+intersection_summary <- pattern_df %>%
+  count(pattern, name = "SH_number") %>%
+  mutate(
+    pattern = as.character(pattern),
+    pattern = sprintf("%0*s", length(host_families), pattern),
+    pattern = gsub(" ", "0", pattern)
+  )
+
+pattern_mat <- do.call(rbind, strsplit(as.character(intersection_summary$pattern), ""))
+pattern_mat <- matrix(as.integer(pattern_mat), ncol = length(host_families), byrow = FALSE)
+colnames(pattern_mat) <- host_families
+
+intersection_summary$degree <- rowSums(pattern_mat == 1)
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  paste(host_families[x == 1], collapse = " & ")
+})
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_number))
+
+write.csv(
+  intersection_summary,
+  file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_number_total = sum(SH_number), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(out_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_file <- file.path(out_dir, "host_family_upset_summary_no_elephant.txt")
+
+sink(summary_file)
+cat("Host family-level UpSet summary, no_elephant version\n")
+cat("====================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input SH abundance table:\n", sh_table_file, "\n\n")
+cat("Matched samples:", ncol(mat), "\n")
+cat("Total SHs:", nrow(mat), "\n")
+cat("Host family number:", length(host_families), "\n\n")
+cat("Host family sample numbers:\n")
+print(family_sample_counts)
+cat("\nHost family SH set sizes:\n")
+print(set_size_df)
+cat("\nHost family unique SH numbers:\n")
+print(family_unique_counts)
+cat("\nNumber of SHs shared by all host families:", length(shared_sh), "\n\n")
+cat("Degree summary:\n")
+print(degree_summary)
+sink()
+
+## -----------------------------
+## 8. UpSet plot
+## -----------------------------
+set_order <- set_size_df$host_family
+
+## 5科共有高亮为红色
+all5_query <- list(
+  query = intersects,
+  params = list("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae"),
+  color = "#D73027",
+  active = TRUE
+)
+
+out_pdf <- file.path(out_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant.pdf")
+out_png <- file.path(out_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant.png")
+
+pdf(
+  out_pdf,
+  width = 12,
+  height = 7.6,
+  family = "Times"
+)
+
+upset(
+  upset_input,
+  sets = set_order,
+  nsets = length(set_order),
+  nintersects = 60,
+
+  ## 按共享宿主科数量排序：5科共有 -> 4科共有 -> 3科共有 -> 2科共有 -> 1科特有
+  ## 同一层级内按交集数目从大到小排列
+  order.by = c("degree", "freq"),
+  decreasing = c(TRUE, TRUE),
+
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+
+  text.scale = c(1.35, 1.20, 1.20, 1.10, 1.25, 1.05),
+  point.size = 2.5,
+  line.size = 0.75,
+  mb.ratio = c(0.62, 0.38),
+
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+
+  queries = list(all5_query)
+)
+
+dev.off()
+
+png(
+  out_png,
+  width = 4800,
+  height = 3000,
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+
+upset(
+  upset_input,
+  sets = set_order,
+  nsets = length(set_order),
+  nintersects = 60,
+
+  ## 按共享宿主科数量排序：5科共有 -> 4科共有 -> 3科共有 -> 2科共有 -> 1科特有
+  ## 同一层级内按交集数目从大到小排列
+  order.by = c("degree", "freq"),
+  decreasing = c(TRUE, TRUE),
+
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+
+  text.scale = c(1.35, 1.20, 1.20, 1.10, 1.25, 1.05),
+  point.size = 2.5,
+  line.size = 0.75,
+  mb.ratio = c(0.62, 0.38),
+
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+
+  queries = list(all5_query)
+)
+
+dev.off()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("PDF:\n", out_pdf, "\n")
+cat("PNG:\n", out_png, "\n")
+cat("Summary:\n", summary_file, "\n")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/03_host_family_upset_no_elephant.R
+#直接在 WSL 终端运行：
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/03_host_family_upset_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+pattern = re.compile(
+    r"## -----------------------------\n## 8\. UpSet plot\n## -----------------------------.*?cat\(\"Summary:\\n\", summary_file, \"\\n\"\)\n",
+    re.S
+)
+
+new_block = r'''## -----------------------------
+## 8. UpSet plot
+## -----------------------------
+set_order <- set_size_df$host_family
+
+## 5科共有高亮为红色
+all5_query <- list(
+  query = intersects,
+  params = list("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae"),
+  color = "#D73027",
+  active = TRUE
+)
+
+out_pdf <- file.path(out_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant.pdf")
+out_png <- file.path(out_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant.png")
+
+pdf(
+  out_pdf,
+  width = 12,
+  height = 8.0,
+  family = "Times"
+)
+
+upset(
+  upset_input,
+  sets = set_order,
+  nsets = length(set_order),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.25, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query)
+)
+
+dev.off()
+
+png(
+  out_png,
+  width = 5000,
+  height = 3400,
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+
+upset(
+  upset_input,
+  sets = set_order,
+  nsets = length(set_order),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.25, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query)
+)
+
+dev.off()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("PDF:\n", out_pdf, "\n")
+cat("PNG:\n", out_png, "\n")
+cat("Summary:\n", summary_file, "\n")
+'''
+
+new_txt, n = pattern.subn(new_block, txt)
+if n != 1:
+    raise SystemExit("没有成功定位到第8部分，请检查脚本内容。")
+script.write_text(new_txt, encoding="utf-8")
+print("已更新脚本：", script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/03_host_family_upset_no_elephant.R
