@@ -1,0 +1,415 @@
+#用 no_elephant 数据；
+#做 5 个宿主科共有 SH（381 个） 的真菌门水平饼图；
+#不把低丰度门合并为 Others；
+#所有门都保留；
+#输出 600 dpi PNG；
+#同时导出完整统计表，后面正文可直接用。
+#一、先新建脚本
+#你直接在 WSL 终端运行下面整段：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/04_shared_SH_phylum_pie_no_elephant.R <<'EOF'
+## ============================================================
+## 图3-2 5个宿主科共有SH在真菌门水平上的分布饼图
+## no_elephant 版
+##
+## 说明：
+## 1. 沿用原第三章代码逻辑；
+## 2. 使用5个宿主科共有SH在所有样本中的 total reads 计算门水平相对丰度；
+## 3. 不合并低丰度门，所有门全部保留；
+## 4. 输出 full csv + pie png/pdf + summary txt。
+## ============================================================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(stringr)
+  library(scales)
+})
+
+## -----------------------------
+## 1. Paths
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+taxonomy_file <- file.path(
+  base_dir,
+  "taxonomy/SH_taxonomy_matched.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/host_family_upset"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## -----------------------------
+## 2. Read metadata
+## -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_sample_cols <- c("sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID")
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("没有找到样本 ID 列，请检查 metadata。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+meta <- meta %>%
+  mutate(
+    sample_id = .data[[sample_col]],
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family != "NA",
+    host_family != "missing",
+    host_family != "not_recorded",
+    host_family != "not reported"
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+## -----------------------------
+## 3. Read SH abundance table
+## -----------------------------
+if (!file.exists(sh_table_file)) {
+  stop("找不到 SH abundance table：", sh_table_file)
+}
+
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(sh_raw)[1] <- "SH_ID"
+
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(mat) <- "numeric"
+
+## -----------------------------
+## 4. Match samples
+## -----------------------------
+common_samples <- intersect(colnames(mat), meta$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("丰度表样本名与 metadata 没有交集。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta2 <- meta %>%
+  filter(sample_id %in% common_samples) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2 <- meta2[match(colnames(mat), meta2$sample_id), ]
+
+## -----------------------------
+## 5. Get SHs shared by all host families
+## -----------------------------
+host_families <- sort(unique(meta2$host_family))
+
+presence_list <- list()
+for (hf in host_families) {
+  samples_hf <- meta2$sample_id[meta2$host_family == hf]
+  sub_mat <- mat[, samples_hf, drop = FALSE]
+  present_sh <- rownames(sub_mat)[rowSums(sub_mat > 0) > 0]
+  presence_list[[hf]] <- present_sh
+}
+
+shared_sh <- Reduce(intersect, presence_list)
+
+cat("Number of SHs shared by all host families:", length(shared_sh), "\n")
+
+write.table(
+  shared_sh,
+  file.path(out_dir, "shared_SHs_all_host_families_no_elephant.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE,
+  sep = "\t"
+)
+
+if (length(shared_sh) == 0) {
+  stop("5个宿主科共有 SH 数为 0，无法作图。")
+}
+
+## -----------------------------
+## 6. Read taxonomy and parse phylum
+## -----------------------------
+tax_raw <- read.delim(
+  taxonomy_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_id_cols <- c("SH", "SH_ID", "Feature.ID", "FeatureID", "feature_id", "ID", "id", "#OTUID", "OTUID")
+id_col <- possible_id_cols[possible_id_cols %in% colnames(tax_raw)][1]
+if (is.na(id_col)) {
+  id_col <- colnames(tax_raw)[1]
+}
+
+possible_tax_cols <- c("taxonomy", "Taxon", "taxon", "Taxonomy", "UNITE_taxonomy")
+tax_col <- possible_tax_cols[possible_tax_cols %in% colnames(tax_raw)][1]
+
+if (is.na(tax_col)) {
+  if ("phylum" %in% colnames(tax_raw)) {
+    tax_df <- tax_raw %>%
+      transmute(
+        SH_ID = .data[[id_col]],
+        phylum = as.character(phylum)
+      )
+  } else {
+    stop("taxonomy 文件中没有识别到 taxonomy 或 phylum 列。")
+  }
+} else {
+  tax_df <- tax_raw %>%
+    transmute(
+      SH_ID = .data[[id_col]],
+      taxonomy = as.character(.data[[tax_col]])
+    ) %>%
+    mutate(
+      phylum = str_extract(taxonomy, "p__[^;|]+"),
+      phylum = str_replace(phylum, "^p__", ""),
+      phylum = ifelse(is.na(phylum) | phylum == "" | phylum == "unidentified", "Unclassified", phylum)
+    )
+}
+
+tax_df <- tax_df %>%
+  mutate(
+    phylum = str_replace_all(phylum, "^p_", ""),
+    phylum = str_replace_all(phylum, "^p__", ""),
+    phylum = str_replace_all(phylum, "_", " "),
+    phylum = ifelse(is.na(phylum) | phylum == "", "Unclassified", phylum)
+  ) %>%
+  distinct(SH_ID, .keep_all = TRUE)
+
+## -----------------------------
+## 7. Phylum composition of shared SHs
+## -----------------------------
+shared_mat <- mat[shared_sh, , drop = FALSE]
+
+## 与原代码一致：用 shared SH 在所有样本中的 total reads 计算门水平相对丰度
+shared_abund <- tibble(
+  SH_ID = rownames(shared_mat),
+  total_reads = rowSums(shared_mat)
+) %>%
+  left_join(tax_df, by = "SH_ID") %>%
+  mutate(
+    phylum = ifelse(is.na(phylum) | phylum == "", "Unclassified", phylum)
+  )
+
+shared_phylum <- shared_abund %>%
+  group_by(phylum) %>%
+  summarise(
+    SH_number = n(),
+    total_reads = sum(total_reads),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    relative_abundance = total_reads / sum(total_reads) * 100
+  ) %>%
+  arrange(desc(relative_abundance))
+
+## 不合并低丰度门，全部保留
+shared_phylum_plot <- shared_phylum %>%
+  mutate(
+    phylum_plot = factor(phylum, levels = phylum),
+    label_pct = ifelse(relative_abundance >= 1, sprintf("%.1f%%", relative_abundance), "")
+  )
+
+write.csv(
+  shared_phylum,
+  file.path(out_dir, "shared_SHs_all_host_families_phylum_composition_full_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## -----------------------------
+## 8. Pie chart
+## -----------------------------
+n_phyla <- nrow(shared_phylum_plot)
+
+pie_colors <- hcl.colors(n_phyla, palette = "Set 3")
+if (n_phyla > 12) {
+  pie_colors <- grDevices::colorRampPalette(hcl.colors(12, "Set 3"))(n_phyla)
+}
+
+p_pie <- ggplot(shared_phylum_plot, aes(x = "", y = relative_abundance, fill = phylum_plot)) +
+  geom_col(width = 1, color = "white", linewidth = 0.3) +
+  coord_polar(theta = "y") +
+  geom_text(
+    aes(label = label_pct),
+    position = position_stack(vjust = 0.5),
+    size = 4,
+    family = "Times"
+  ) +
+  scale_fill_manual(values = pie_colors) +
+  labs(
+    x = NULL,
+    y = NULL,
+    fill = "Phylum"
+  ) +
+  theme_void(base_family = "Times") +
+  theme(
+    legend.title = element_text(size = 12, colour = "black"),
+    legend.text = element_text(size = 11, colour = "black"),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+ggsave(
+  file.path(out_dir, "Fig3_2_shared_SHs_all_host_families_phylum_pie_no_elephant.pdf"),
+  p_pie,
+  width = 7,
+  height = 5.5,
+  device = cairo_pdf
+)
+
+ggsave(
+  file.path(out_dir, "Fig3_2_shared_SHs_all_host_families_phylum_pie_no_elephant.png"),
+  p_pie,
+  width = 7,
+  height = 5.5,
+  dpi = 600
+)
+
+## -----------------------------
+## 9. Summary
+## -----------------------------
+summary_txt <- file.path(out_dir, "host_family_shared_phylum_summary_no_elephant.txt")
+
+sink(summary_txt)
+cat("Shared SH phylum composition summary, no_elephant version\n")
+cat("========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input SH abundance table:\n", sh_table_file, "\n\n")
+cat("Input taxonomy file:\n", taxonomy_file, "\n\n")
+cat("Host family number:", length(host_families), "\n")
+cat("Shared SH number:", length(shared_sh), "\n\n")
+cat("Phylum composition of shared SHs:\n")
+print(shared_phylum)
+sink()
+
+cat("\nDone!\n")
+cat("Shared SH number:", length(shared_sh), "\n")
+cat("Pie PNG:\n", file.path(out_dir, "Fig3_2_shared_SHs_all_host_families_phylum_pie_no_elephant.png"), "\n")
+cat("Pie PDF:\n", file.path(out_dir, "Fig3_2_shared_SHs_all_host_families_phylum_pie_no_elephant.pdf"), "\n")
+cat("Full CSV:\n", file.path(out_dir, "shared_SHs_all_host_families_phylum_composition_full_no_elephant.csv"), "\n")
+cat("Summary TXT:\n", summary_txt, "\n")
+EOF
+#二、运行脚本：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/04_shared_SH_phylum_pie_no_elephant.R
+#三、输出文件位置
+#主要看这几个：
+#饼图/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/Fig3_2_shared_SHs_all_host_families_phylum_pie_no_elephant.png
+#完整门水平组成表/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/shared_SHs_all_host_families_phylum_composition_full_no_elephant.csv
+#summary /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/host_family_shared_phylum_summary_no_elephant.txt
+#四、说明一下这次的统计口径
+#这版是沿用你原第三章对应代码的口径：
+#先找出 5 个宿主科共有的 381 个 SH
+#再用这 381 个 SH 在所有样本中的 total reads
+#聚合到 phylum
+#计算门水平 relative abundance (%)
+#no_elephant 目录下没有 taxonomy/SH_taxonomy_matched.tsv。
+#但这不是大问题，也不需要重新做 taxonomy。因为 no_elephant 只是从最终数据里剔除了非洲草原象样本，SH 的 taxonomy 注释本身还是之前那套结果，可以直接用原始最终目录里的 taxonomy 文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv
+#也就是说，脚本里这行路径写得太死了：
+#taxonomy_file <- file.path(
+#  base_dir,
+#  "taxonomy/SH_taxonomy_matched.tsv"
+#)
+#应该改成：优先找 no_elephant 目录下的 taxonomy 文件；如果没有，就自动回退到原 globalfungi_style_test 目录下的 taxonomy 文件。
+#直接修脚本，在 WSL 终端运行：
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/04_shared_SH_phylum_pie_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+old = '''taxonomy_file <- file.path(
+  base_dir,
+  "taxonomy/SH_taxonomy_matched.tsv"
+)'''
+
+new = '''## taxonomy 注释文件：
+## no_elephant 目录可能没有单独复制 SH_taxonomy_matched.tsv；
+## 因为 no_elephant 只是剔除样本，SH taxonomy 注释仍可使用原 globalfungi_style_test 的最终 taxonomy 文件。
+taxonomy_candidates <- c(
+  file.path(base_dir, "taxonomy/SH_taxonomy_matched.tsv"),
+  "/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv"
+)
+
+taxonomy_file <- taxonomy_candidates[file.exists(taxonomy_candidates)][1]
+
+if (is.na(taxonomy_file)) {
+  stop(
+    "找不到 SH_taxonomy_matched.tsv。已尝试以下路径：\\n",
+    paste(taxonomy_candidates, collapse = "\\n")
+  )
+}
+
+cat("Using taxonomy file:", taxonomy_file, "\\n")'''
+
+if old not in txt:
+    raise SystemExit("没有找到 taxonomy_file 原始代码块，请检查脚本内容。")
+
+txt = txt.replace(old, new)
+script.write_text(txt, encoding="utf-8")
+
+print("已修复 taxonomy_file 路径自动回退：")
+print(script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/04_shared_SH_phylum_pie_no_elephant.R
+#这次修正后的逻辑
+#脚本会按顺序找：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/SH_taxonomy_matched.tsv
+#如果没有，就自动用：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv
+#这是合理的，因为 SH 的分类注释不会因为剔除象样本而改变；剔除象样本只是改变了最终保留的样本、SH 丰度和共有 SH 组合。
