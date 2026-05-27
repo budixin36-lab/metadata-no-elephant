@@ -1,0 +1,1512 @@
+#基于 no_elephant 数据
+#做 宿主科间共有/独有 SH 的 UpSet 图
+#左下角轴名：SH数目
+#左上方纵轴名：交集数目
+#不显示图例
+#仅将 5 科共有 SH 标记为红色
+#其余所有交集柱统一为深灰色
+#交集顺序按：5科共有 → 4科共有 → 3科共有 → 2科共有 → 1科特有
+#输出 高清 PNG + PDF
+#同时输出 summary 文件，方便你后面改正文
+#输入文件
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom
+#输出目录
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset
+#直接覆盖脚本
+#你在 WSL 终端 里整段复制运行：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R <<'EOF'
+## =========================
+## 图3-1 宿主科间共有/独有 SH 的 UpSet 图（no_elephant版）
+## 仅5科共有标红；其余为深灰色；无图例
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(biomformat)
+  library(ComplexHeatmap)
+  library(grid)
+})
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+biom_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 宿主科顺序 ----
+## 统计顺序（用于summary）
+family_order <- c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae")
+
+## 图中左侧从上到下顺序
+set_order_plot <- c("Rhinocerotidae", "Suidae", "Cervidae", "Equidae", "Bovidae")
+
+## ---- 颜色 ----
+col_5_shared <- "#D73027"   # 5科共有：红色
+col_other    <- "#4D4D4D"   # 其余：深灰色
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_family")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+meta_use <- meta %>%
+  filter(host_family %in% family_order)
+
+## ---- 读取 BIOM ----
+biom_obj <- read_biom(biom_file)
+sh_mat <- as.matrix(biom_data(biom_obj))
+
+## 补行列名并判断方向
+obs_ids  <- observation_names(biom_obj)
+samp_ids <- sample_names(biom_obj)
+
+if (nrow(sh_mat) == length(obs_ids) && ncol(sh_mat) == length(samp_ids)) {
+  rownames(sh_mat) <- obs_ids
+  colnames(sh_mat) <- samp_ids
+} else if (ncol(sh_mat) == length(obs_ids) && nrow(sh_mat) == length(samp_ids)) {
+  sh_mat <- t(sh_mat)
+  rownames(sh_mat) <- obs_ids
+  colnames(sh_mat) <- samp_ids
+} else {
+  stop("无法确定 BIOM 矩阵方向，请检查 biom 文件。")
+}
+
+## ---- 对齐样本 ----
+common_samples <- intersect(colnames(sh_mat), meta_use$sampleid)
+if (length(common_samples) == 0) {
+  stop("metadata 与 BIOM 没有共同样本。")
+}
+
+meta_use <- meta_use %>%
+  filter(sampleid %in% common_samples)
+
+sh_mat <- sh_mat[, common_samples, drop = FALSE]
+
+## ---- 计算每个宿主科检出的 SH 集合 ----
+family_list <- lapply(family_order, function(fam) {
+  fam_samples <- meta_use$sampleid[meta_use$host_family == fam]
+
+  if (length(fam_samples) == 0) {
+    character(0)
+  } else if (length(fam_samples) == 1) {
+    rownames(sh_mat)[sh_mat[, fam_samples] > 0]
+  } else {
+    rownames(sh_mat)[rowSums(sh_mat[, fam_samples, drop = FALSE] > 0) > 0]
+  }
+})
+names(family_list) <- family_order
+
+## ---- 构建 presence/absence 表 ----
+all_sh <- sort(unique(unlist(family_list)))
+
+pa <- sapply(family_list, function(x) as.integer(all_sh %in% x))
+pa <- as.matrix(pa)
+rownames(pa) <- all_sh
+colnames(pa) <- family_order
+
+## ---- 统计 summary，用于正文 ----
+family_sample_counts <- meta_use %>%
+  count(host_family, name = "sample_n") %>%
+  mutate(host_family = factor(host_family, levels = family_order)) %>%
+  arrange(host_family)
+
+family_sh_counts <- data.frame(
+  host_family = family_order,
+  SH_n = colSums(pa),
+  stringsAsFactors = FALSE
+)
+
+family_unique_counts <- data.frame(
+  host_family = family_order,
+  unique_SH_n = sapply(family_order, function(fam) {
+    sum(pa[, fam] == 1 & rowSums(pa) == 1)
+  }),
+  stringsAsFactors = FALSE
+)
+
+## 所有 5 科共有 SH 数目
+all_5_shared <- sum(rowSums(pa) == 5)
+
+## 交集模式统计
+pa_df <- as.data.frame(pa)
+pa_df$pattern <- apply(pa_df[, family_order, drop = FALSE], 1, paste0, collapse = "")
+
+intersection_summary <- pa_df %>%
+  count(pattern, name = "SH_n") %>%
+  filter(SH_n > 0)
+
+pattern_mat <- do.call(rbind, strsplit(intersection_summary$pattern, split = ""))
+pattern_mat <- matrix(pattern_mat, ncol = length(family_order), byrow = FALSE)
+colnames(pattern_mat) <- family_order
+
+intersection_summary$degree <- rowSums(pattern_mat == "1")
+
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  fams <- family_order[x == "1"]
+  paste(fams, collapse = " & ")
+})
+
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+## 交集排序：5科共有 -> 4科共有 -> 3科共有 -> 2科共有 -> 1科特有
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_n))
+
+write.csv(
+  intersection_summary,
+  file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_n_total = sum(SH_n), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(out_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## summary 文本
+summary_lines <- c(
+  paste0("total_samples\t", nrow(meta_use)),
+  paste0("total_SH\t", nrow(pa)),
+  "",
+  "family_sample_counts:"
+)
+
+for (i in seq_len(nrow(family_sample_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(
+      family_sample_counts$host_family[i], "\t",
+      family_sample_counts$sample_n[i]
+    )
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_SH_counts:")
+for (i in seq_len(nrow(family_sh_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(
+      family_sh_counts$host_family[i], "\t",
+      family_sh_counts$SH_n[i]
+    )
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_unique_SH_counts:")
+for (i in seq_len(nrow(family_unique_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(
+      family_unique_counts$host_family[i], "\t",
+      family_unique_counts$unique_SH_n[i]
+    )
+  )
+}
+
+summary_lines <- c(
+  summary_lines,
+  "",
+  paste0("all_5_families_shared_SH\t", all_5_shared),
+  "",
+  "degree_summary:"
+)
+
+for (i in seq_len(nrow(degree_summary))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(
+      degree_summary$share_type[i], "\t",
+      degree_summary$SH_n_total[i]
+    )
+  )
+}
+
+writeLines(
+  summary_lines,
+  file.path(out_dir, "host_family_SH_summary_no_elephant.txt")
+)
+
+## ---- 绘制 UpSet 图 ----
+m <- make_comb_mat(family_list, mode = "distinct")
+
+comb_degree_vec <- comb_degree(m)
+comb_size_vec   <- comb_size(m)
+
+## 排序：先按 degree（5->1），再按交集大小降序
+comb_order <- order(-comb_degree_vec, -comb_size_vec)
+
+## 仅 5 科共有标红，其余深灰
+comb_col <- ifelse(comb_degree_vec == 5, col_5_shared, col_other)
+
+top_anno <- upset_top_annotation(
+  m,
+  gp = gpar(fill = comb_col, col = comb_col),
+  add_numbers = TRUE,
+  numbers_gp = gpar(fontsize = 7),
+  height = unit(8.2, "cm"),
+  annotation_name = "交集数目",
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+left_anno <- upset_left_annotation(
+  m,
+  gp = gpar(fill = col_other),
+  width = unit(5.3, "cm"),
+  annotation_name = "SH数目",
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+ht <- UpSet(
+  m,
+  comb_order = comb_order,
+  set_order = set_order_plot,
+  comb_col = comb_col,
+  top_annotation = top_anno,
+  left_annotation = left_anno,
+  pt_size = unit(3, "mm"),
+  lwd = 1.5
+)
+
+## ---- 输出高清 PNG ----
+png(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.png"),
+  width = 16,
+  height = 9,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+dev.off()
+
+## ---- 输出 PDF ----
+cairo_pdf(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.pdf"),
+  width = 16,
+  height = 9,
+  bg = "white"
+)
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+dev.off()
+
+cat("Done!\n")
+cat("PNG saved to: ", file.path(out_dir, "host_family_upset_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "host_family_upset_no_elephant.pdf"), "\n", sep = "")
+cat("Summary saved to: ", file.path(out_dir, "host_family_SH_summary_no_elephant.txt"), "\n", sep = "")
+cat("Intersection summary saved to: ", file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
+#R 包版本冲突：
+#namespace ‘Matrix’ 1.6-5 is being loaded, but >= 1.7.0 is required
+#package ‘biomformat’ was built under R version 4.5.3
+#意思是：你当前运行 Rscript 用的是较旧的 R 环境，里面 Matrix 是 1.6-5；但你现在加载到的 biomformat 是按更新的 R 版本装出来的，它要求 Matrix >= 1.7.0。这类问题不要急着更新，因为 Matrix 1.7.x 对 R 版本有要求，你现在盲目更新可能又引出新的 R 版本依赖问题。
+#更稳妥的做法是：不要再让 R 读取 BIOM。你之前已经在 QIIME2 环境里用 Python/BIOM 成功处理过 BIOM，所以这次应该先把 no_elephant BIOM 转成一个可复用的 SH abundance TSV，以后 UpSet、alpha、beta 都可以直接读这个表，不要每次都用 biomformat 重新读 BIOM。
+#第一步：一次性生成可复用的 SH abundance table
+#在 WSL 终端运行：
+conda activate qiime2-amplicon-2026.1
+
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables
+
+biom convert \
+  -i /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom \
+  -o /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv \
+  --to-tsv
+#生成的文件是：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#这个文件以后可以一直用，不需要反复从 BIOM 读取。
+#第二步：重新写 UpSet 脚本，避开 biomformat
+#下面这版脚本 不再使用 biomformat，而是直接读取刚生成的 SH_abundance_table_no_elephant.tsv。
+#直接覆盖脚本：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R <<'EOF'
+## =========================
+## 图3-1 宿主科间共有/独有 SH 的 UpSet 图（no_elephant版）
+## 不使用 biomformat，直接读取 SH abundance TSV
+## 仅5科共有标红；其余深灰；无图例
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ComplexHeatmap)
+  library(grid)
+})
+
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+sh_table_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+out_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+family_order <- c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae")
+set_order_plot <- c("Rhinocerotidae", "Suidae", "Cervidae", "Equidae", "Bovidae")
+
+col_5_shared <- "#D73027"
+col_other <- "#4D4D4D"
+
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_family")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+meta_use <- meta %>%
+  filter(host_family %in% family_order)
+
+## ---- 读取 biom convert 导出的 SH abundance table ----
+## 第一行通常是说明行：# Constructed from biom file
+sh_raw <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\t",
+  comment.char = "",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+## 如果第一列列名是 #OTU ID，改成 SH_ID
+colnames(sh_raw)[1] <- "SH_ID"
+
+## 去掉可能存在的 taxonomy 列
+taxonomy_cols <- grep("taxonomy", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+sh_mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(sh_mat) <- "numeric"
+
+common_samples <- intersect(colnames(sh_mat), meta_use$sampleid)
+if (length(common_samples) == 0) {
+  stop("metadata 与 SH abundance table 没有共同样本。")
+}
+
+meta_use <- meta_use %>%
+  filter(sampleid %in% common_samples)
+
+sh_mat <- sh_mat[, common_samples, drop = FALSE]
+
+family_list <- lapply(family_order, function(fam) {
+  fam_samples <- meta_use$sampleid[meta_use$host_family == fam]
+
+  if (length(fam_samples) == 0) {
+    character(0)
+  } else if (length(fam_samples) == 1) {
+    rownames(sh_mat)[sh_mat[, fam_samples] > 0]
+  } else {
+    rownames(sh_mat)[rowSums(sh_mat[, fam_samples, drop = FALSE] > 0) > 0]
+  }
+})
+names(family_list) <- family_order
+
+all_sh <- sort(unique(unlist(family_list)))
+
+pa <- sapply(family_list, function(x) as.integer(all_sh %in% x))
+pa <- as.matrix(pa)
+rownames(pa) <- all_sh
+colnames(pa) <- family_order
+
+family_sample_counts <- meta_use %>%
+  count(host_family, name = "sample_n") %>%
+  mutate(host_family = factor(host_family, levels = family_order)) %>%
+  arrange(host_family)
+
+family_sh_counts <- data.frame(
+  host_family = family_order,
+  SH_n = colSums(pa),
+  stringsAsFactors = FALSE
+)
+
+family_unique_counts <- data.frame(
+  host_family = family_order,
+  unique_SH_n = sapply(family_order, function(fam) {
+    sum(pa[, fam] == 1 & rowSums(pa) == 1)
+  }),
+  stringsAsFactors = FALSE
+)
+
+all_5_shared <- sum(rowSums(pa) == 5)
+
+pa_df <- as.data.frame(pa)
+pa_df$pattern <- apply(pa_df[, family_order, drop = FALSE], 1, paste0, collapse = "")
+
+intersection_summary <- pa_df %>%
+  count(pattern, name = "SH_n") %>%
+  filter(SH_n > 0)
+
+pattern_mat <- do.call(rbind, strsplit(intersection_summary$pattern, split = ""))
+pattern_mat <- matrix(pattern_mat, ncol = length(family_order), byrow = FALSE)
+colnames(pattern_mat) <- family_order
+
+intersection_summary$degree <- rowSums(pattern_mat == "1")
+
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  fams <- family_order[x == "1"]
+  paste(fams, collapse = " & ")
+})
+
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_n))
+
+write.csv(
+  intersection_summary,
+  file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_n_total = sum(SH_n), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(out_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_lines <- c(
+  paste0("total_samples\t", nrow(meta_use)),
+  paste0("total_SH\t", nrow(pa)),
+  "",
+  "family_sample_counts:"
+)
+
+for (i in seq_len(nrow(family_sample_counts))) {
+  summary_lines <- c(summary_lines, paste0(family_sample_counts$host_family[i], "\t", family_sample_counts$sample_n[i]))
+}
+
+summary_lines <- c(summary_lines, "", "family_SH_counts:")
+for (i in seq_len(nrow(family_sh_counts))) {
+  summary_lines <- c(summary_lines, paste0(family_sh_counts$host_family[i], "\t", family_sh_counts$SH_n[i]))
+}
+
+summary_lines <- c(summary_lines, "", "family_unique_SH_counts:")
+for (i in seq_len(nrow(family_unique_counts))) {
+  summary_lines <- c(summary_lines, paste0(family_unique_counts$host_family[i], "\t", family_unique_counts$unique_SH_n[i]))
+}
+
+summary_lines <- c(
+  summary_lines,
+  "",
+  paste0("all_5_families_shared_SH\t", all_5_shared),
+  "",
+  "degree_summary:"
+)
+
+for (i in seq_len(nrow(degree_summary))) {
+  summary_lines <- c(summary_lines, paste0(degree_summary$share_type[i], "\t", degree_summary$SH_n_total[i]))
+}
+
+writeLines(
+  summary_lines,
+  file.path(out_dir, "host_family_SH_summary_no_elephant.txt")
+)
+
+m <- make_comb_mat(family_list, mode = "distinct")
+
+comb_degree_vec <- comb_degree(m)
+comb_size_vec <- comb_size(m)
+
+comb_order <- order(-comb_degree_vec, -comb_size_vec)
+comb_col <- ifelse(comb_degree_vec == 5, col_5_shared, col_other)
+
+top_anno <- upset_top_annotation(
+  m,
+  gp = gpar(fill = comb_col, col = comb_col),
+  add_numbers = TRUE,
+  numbers_gp = gpar(fontsize = 7),
+  height = unit(8.2, "cm"),
+  annotation_name = "交集数目",
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+left_anno <- upset_left_annotation(
+  m,
+  gp = gpar(fill = col_other),
+  width = unit(5.3, "cm"),
+  annotation_name = "SH数目",
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+ht <- UpSet(
+  m,
+  comb_order = comb_order,
+  set_order = set_order_plot,
+  comb_col = comb_col,
+  top_annotation = top_anno,
+  left_annotation = left_anno,
+  pt_size = unit(3, "mm"),
+  lwd = 1.5
+)
+
+png(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.png"),
+  width = 16,
+  height = 9,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+draw(ht)
+dev.off()
+
+cairo_pdf(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.pdf"),
+  width = 16,
+  height = 9,
+  bg = "white"
+)
+draw(ht)
+dev.off()
+
+cat("Done!\n")
+cat("PNG saved to: ", file.path(out_dir, "host_family_upset_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "host_family_upset_no_elephant.pdf"), "\n", sep = "")
+cat("Summary saved to: ", file.path(out_dir, "host_family_SH_summary_no_elephant.txt"), "\n", sep = "")
+cat("Intersection summary saved to: ", file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
+#以后凡是需要 SH 丰度表，优先用这个：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#不要再反复让 R 读取 BIOM。这样更稳，也能避免 biomformat / Matrix / R版本 这类包冲突。
+#真正错误是：Error in read.table(...) :  more columns than column names
+#这说明 R 在读这个文件时：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#把第一行说明文字当成了表头。
+#biom convert --to-tsv 导出的表通常开头长这样：
+# Constructed from biom file
+#OTU ID    sample1    sample2 ...
+#SH_xxx     0          3 ...
+#也就是说，第一行不是正式表头，第二行 #OTU ID 才是真正的表头。
+#我上一版脚本没有跳过第一行，所以 R 误读，导致“列数比列名多”。
+#这个问题不用重做 BIOM，也不用重新生成 abundance table，只要把 UpSet 脚本里的读表方式改稳就行。
+#3. 直接用代码修改脚本，不用你手动粘贴缩进
+#在 WSL 终端运行下面整段。它只会修改 plot_host_family_upset_no_elephant.R 中读取 SH 表的部分，不会动你的数据文件。
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+start_marker = "## ---- 读取 biom convert 导出的 SH abundance table ----"
+end_marker = "common_samples <- intersect(colnames(sh_mat), meta_use$sampleid)"
+
+start = txt.index(start_marker)
+end = txt.index(end_marker)
+
+new_block = r'''## ---- 读取 biom convert 导出的 SH abundance table ----
+## biom convert --to-tsv 导出的文件第一行通常是说明行：
+## # Constructed from biom file
+## 第二行 #OTU ID 才是真正表头，所以这里做稳健读取。
+
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+
+## 去掉空行
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+## 如果第一行是 biom 说明行，则跳过
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+## 现在第一行应为 #OTU ID 开头的表头
+if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+  stop("SH abundance table 表头异常。请检查文件前几行：\n",
+       paste(head(sh_lines, 5), collapse = "\n"))
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+## 第一列通常是 #OTU ID，改名为 SH_ID
+colnames(sh_raw)[1] <- "SH_ID"
+
+## 去掉可能存在的 taxonomy/metadata 列，只保留样本列
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+sh_mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(sh_mat) <- "numeric"
+
+'''
+
+txt2 = txt[:start] + new_block + txt[end:]
+script.write_text(txt2, encoding="utf-8")
+
+print("已修改脚本中的 SH abundance table 读取部分：")
+print(script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
+#现在这几个文件会作为后续基准：
+#SH 丰度表：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#宿主科 UpSet 结果目录：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset
+#里面后续会有：
+#host_family_upset_no_elephant.png
+#host_family_upset_no_elephant.pdf
+#host_family_SH_summary_no_elephant.txt
+#host_family_SH_intersection_summary_no_elephant.csv
+#host_family_SH_degree_summary_no_elephant.csv
+#其中 host_family_SH_summary_no_elephant.txt 后面用于改正文，host_family_SH_intersection_summary_no_elephant.csv 后面可复查具体哪些交集组合，不需要再重复计算。
+#ComplexHeatmap 版本/API 不兼容：Error in upset_top_annotation(...) :  argument 6 matches multiple formal arguments
+#意思是：你当前这个 ComplexHeatmap 版本里，upset_top_annotation() 函数的参数写法和我给的脚本不完全兼容，尤其是 annotation_name = "交集数目" 这一类参数容易触发“参数匹配到多个位置”的错误。
+#我们直接绕开这个容易出错的函数，改用 ComplexHeatmap 底层的 HeatmapAnnotation() / rowAnnotation() 来画 UpSet 注释条。
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R <<'EOF'
+## =========================
+## 图3-1 宿主科间共有/独有 SH 的 UpSet 图（no_elephant版）
+## 稳定版：不使用 biomformat；不使用 upset_top_annotation/upset_left_annotation
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ComplexHeatmap)
+  library(grid)
+})
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+sh_table_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+out_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 宿主科顺序 ----
+family_order <- c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae")
+set_order_plot <- c("Rhinocerotidae", "Suidae", "Cervidae", "Equidae", "Bovidae")
+
+## ---- 颜色 ----
+col_5_shared <- "#D73027"
+col_other <- "#4D4D4D"
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_family")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+meta_use <- meta %>%
+  filter(host_family %in% family_order)
+
+## ---- 稳健读取 SH abundance table ----
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+  stop("SH abundance table 表头异常。文件前几行是：\n",
+       paste(head(sh_lines, 5), collapse = "\n"))
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(sh_raw)[1] <- "SH_ID"
+
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+sh_mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(sh_mat) <- "numeric"
+
+## ---- 对齐样本 ----
+common_samples <- intersect(colnames(sh_mat), meta_use$sampleid)
+if (length(common_samples) == 0) {
+  stop("metadata 与 SH abundance table 没有共同样本。")
+}
+
+meta_use <- meta_use %>%
+  filter(sampleid %in% common_samples)
+
+sh_mat <- sh_mat[, common_samples, drop = FALSE]
+
+## ---- 每个宿主科的 SH 集合 ----
+family_list <- lapply(family_order, function(fam) {
+  fam_samples <- meta_use$sampleid[meta_use$host_family == fam]
+
+  if (length(fam_samples) == 0) {
+    character(0)
+  } else if (length(fam_samples) == 1) {
+    rownames(sh_mat)[sh_mat[, fam_samples] > 0]
+  } else {
+    rownames(sh_mat)[rowSums(sh_mat[, fam_samples, drop = FALSE] > 0) > 0]
+  }
+})
+names(family_list) <- family_order
+
+## ---- presence/absence 表 ----
+all_sh <- sort(unique(unlist(family_list)))
+
+pa <- sapply(family_list, function(x) as.integer(all_sh %in% x))
+pa <- as.matrix(pa)
+rownames(pa) <- all_sh
+colnames(pa) <- family_order
+
+## ---- summary 统计 ----
+family_sample_counts <- meta_use %>%
+  count(host_family, name = "sample_n") %>%
+  mutate(host_family = factor(host_family, levels = family_order)) %>%
+  arrange(host_family)
+
+family_sh_counts <- data.frame(
+  host_family = family_order,
+  SH_n = colSums(pa),
+  stringsAsFactors = FALSE
+)
+
+family_unique_counts <- data.frame(
+  host_family = family_order,
+  unique_SH_n = sapply(family_order, function(fam) {
+    sum(pa[, fam] == 1 & rowSums(pa) == 1)
+  }),
+  stringsAsFactors = FALSE
+)
+
+all_5_shared <- sum(rowSums(pa) == 5)
+
+pa_df <- as.data.frame(pa)
+pa_df$pattern <- apply(pa_df[, family_order, drop = FALSE], 1, paste0, collapse = "")
+
+intersection_summary <- pa_df %>%
+  count(pattern, name = "SH_n") %>%
+  filter(SH_n > 0)
+
+pattern_mat <- do.call(rbind, strsplit(intersection_summary$pattern, split = ""))
+pattern_mat <- matrix(pattern_mat, ncol = length(family_order), byrow = FALSE)
+colnames(pattern_mat) <- family_order
+
+intersection_summary$degree <- rowSums(pattern_mat == "1")
+
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  fams <- family_order[x == "1"]
+  paste(fams, collapse = " & ")
+})
+
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_n))
+
+write.csv(
+  intersection_summary,
+  file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_n_total = sum(SH_n), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(out_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_lines <- c(
+  paste0("total_samples\t", nrow(meta_use)),
+  paste0("total_SH\t", nrow(pa)),
+  "",
+  "family_sample_counts:"
+)
+
+for (i in seq_len(nrow(family_sample_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_sample_counts$host_family[i], "\t", family_sample_counts$sample_n[i])
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_SH_counts:")
+for (i in seq_len(nrow(family_sh_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_sh_counts$host_family[i], "\t", family_sh_counts$SH_n[i])
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_unique_SH_counts:")
+for (i in seq_len(nrow(family_unique_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_unique_counts$host_family[i], "\t", family_unique_counts$unique_SH_n[i])
+  )
+}
+
+summary_lines <- c(
+  summary_lines,
+  "",
+  paste0("all_5_families_shared_SH\t", all_5_shared),
+  "",
+  "degree_summary:"
+)
+
+for (i in seq_len(nrow(degree_summary))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(degree_summary$share_type[i], "\t", degree_summary$SH_n_total[i])
+  )
+}
+
+writeLines(
+  summary_lines,
+  file.path(out_dir, "host_family_SH_summary_no_elephant.txt")
+)
+
+## ---- 绘制 UpSet 图 ----
+m <- make_comb_mat(family_list, mode = "distinct")
+
+comb_degree_vec <- comb_degree(m)
+comb_size_vec <- comb_size(m)
+
+comb_order <- order(-comb_degree_vec, -comb_size_vec)
+comb_col <- ifelse(comb_degree_vec == 5, col_5_shared, col_other)
+
+## 顶部交集柱状图：不用 upset_top_annotation，避免版本不兼容
+top_anno <- HeatmapAnnotation(
+  "交集数目" = anno_barplot(
+    comb_size_vec,
+    gp = gpar(fill = comb_col, col = comb_col),
+    border = FALSE,
+    height = unit(8.2, "cm"),
+    axis_param = list(side = "left")
+  ),
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+## 左侧宿主科 SH 数目：不用 upset_left_annotation
+set_size_vec <- set_size(m)
+set_size_vec <- set_size_vec[set_order_plot]
+
+left_anno <- rowAnnotation(
+  "SH数目" = anno_barplot(
+    set_size_vec,
+    gp = gpar(fill = col_other, col = col_other),
+    border = FALSE,
+    width = unit(5.3, "cm"),
+    axis_param = list(side = "bottom")
+  ),
+  annotation_name_gp = gpar(fontsize = 12, fontface = "plain")
+)
+
+ht <- UpSet(
+  m,
+  comb_order = comb_order,
+  set_order = set_order_plot,
+  comb_col = comb_col,
+  top_annotation = top_anno,
+  left_annotation = left_anno,
+  pt_size = unit(3, "mm"),
+  lwd = 1.5
+)
+
+## ---- 输出高清 PNG ----
+png(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.png"),
+  width = 16,
+  height = 9,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+draw(ht, show_heatmap_legend = FALSE, show_annotation_legend = FALSE)
+dev.off()
+
+## ---- 输出 PDF ----
+cairo_pdf(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.pdf"),
+  width = 16,
+  height = 9,
+  bg = "white"
+)
+draw(ht, show_heatmap_legend = FALSE, show_annotation_legend = FALSE)
+dev.off()
+
+cat("Done!\n")
+cat("PNG saved to: ", file.path(out_dir, "host_family_upset_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "host_family_upset_no_elephant.pdf"), "\n", sep = "")
+cat("Summary saved to: ", file.path(out_dir, "host_family_SH_summary_no_elephant.txt"), "\n", sep = "")
+cat("Intersection summary saved to: ", file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
+#我重新整理一版脚本，保留你前面要求：
+#不用 biomformat
+#不用 ComplexHeatmap
+#直接读固定基准文件：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#左上 y 轴名：交集数目
+#左下 x 轴名：SH数目
+#仅 5 科共有标红，其余深灰
+#不要图例
+#交集顺序：5科共有 → 4科共有 → 3科共有 → 2科共有 → 1科特有
+#左下角科名紧挨柱状图右侧，不放在点线矩阵最右侧
+#输出高清 PNG + PDF
+#同时保存 summary 文件，后面正文复用
+#直接覆盖脚本：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R <<'EOF'
+## =========================
+## 图3-1 宿主科间共有/独有 SH 的 UpSet 图（no_elephant版）
+## base R 稳定版：不用 biomformat，不用 ComplexHeatmap
+## 版式参照标准 UpSet 图：
+## 左下角集合大小柱状图从下到上按 SH 数目由多到少排列；
+## 宿主科名位于左下角柱状图右侧，与点线矩阵行对应；
+## 仅5科共有标红，其余深灰；无图例。
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(dplyr)
+})
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+sh_table_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+out_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 字体 ----
+base_family <- "Times"
+
+## ---- 宿主科 ----
+family_order <- c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae")
+
+## ---- 颜色 ----
+col_5_shared <- "#D73027"
+col_other <- "#4D4D4D"
+col_empty <- "#D9D9D9"
+col_band <- "#F0F0F0"
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_family")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+meta_use <- meta %>%
+  filter(host_family %in% family_order)
+
+## ---- 读取 SH abundance table ----
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+  stop("SH abundance table 表头异常。文件前几行是：\n",
+       paste(head(sh_lines, 5), collapse = "\n"))
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(sh_raw)[1] <- "SH_ID"
+
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+sh_mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(sh_mat) <- "numeric"
+
+## ---- 对齐样本 ----
+common_samples <- intersect(colnames(sh_mat), meta_use$sampleid)
+if (length(common_samples) == 0) {
+  stop("metadata 与 SH abundance table 没有共同样本。")
+}
+
+meta_use <- meta_use %>%
+  filter(sampleid %in% common_samples)
+
+sh_mat <- sh_mat[, common_samples, drop = FALSE]
+
+## ---- 每个宿主科的 SH 集合 ----
+family_list <- lapply(family_order, function(fam) {
+  fam_samples <- meta_use$sampleid[meta_use$host_family == fam]
+
+  if (length(fam_samples) == 0) {
+    character(0)
+  } else if (length(fam_samples) == 1) {
+    rownames(sh_mat)[sh_mat[, fam_samples] > 0]
+  } else {
+    rownames(sh_mat)[rowSums(sh_mat[, fam_samples, drop = FALSE] > 0) > 0]
+  }
+})
+names(family_list) <- family_order
+
+## ---- presence/absence 表 ----
+all_sh <- sort(unique(unlist(family_list)))
+
+pa <- sapply(family_list, function(x) as.integer(all_sh %in% x))
+pa <- as.matrix(pa)
+rownames(pa) <- all_sh
+colnames(pa) <- family_order
+
+## ---- summary 统计 ----
+family_sample_counts <- meta_use %>%
+  count(host_family, name = "sample_n") %>%
+  mutate(host_family = factor(host_family, levels = family_order)) %>%
+  arrange(host_family)
+
+family_sh_counts <- data.frame(
+  host_family = family_order,
+  SH_n = colSums(pa),
+  stringsAsFactors = FALSE
+)
+
+family_unique_counts <- data.frame(
+  host_family = family_order,
+  unique_SH_n = sapply(family_order, function(fam) {
+    sum(pa[, fam] == 1 & rowSums(pa) == 1)
+  }),
+  stringsAsFactors = FALSE
+)
+
+all_5_shared <- sum(rowSums(pa) == 5)
+
+pa_df <- as.data.frame(pa)
+pa_df$pattern <- apply(pa_df[, family_order, drop = FALSE], 1, paste0, collapse = "")
+
+intersection_summary <- pa_df %>%
+  count(pattern, name = "SH_n") %>%
+  filter(SH_n > 0)
+
+pattern_mat <- do.call(rbind, strsplit(intersection_summary$pattern, split = ""))
+pattern_mat <- matrix(pattern_mat, ncol = length(family_order), byrow = FALSE)
+colnames(pattern_mat) <- family_order
+
+intersection_summary$degree <- rowSums(pattern_mat == "1")
+
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  fams <- family_order[x == "1"]
+  paste(fams, collapse = " & ")
+})
+
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+## 交集排序：5科共有 -> 4科共有 -> 3科共有 -> 2科共有 -> 1科特有；
+## 同一共享层级内按 SH 数目从大到小。
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_n))
+
+write.csv(
+  intersection_summary,
+  file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_n_total = sum(SH_n), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(out_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_lines <- c(
+  paste0("total_samples\t", nrow(meta_use)),
+  paste0("total_SH\t", nrow(pa)),
+  "",
+  "family_sample_counts:"
+)
+
+for (i in seq_len(nrow(family_sample_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_sample_counts$host_family[i], "\t", family_sample_counts$sample_n[i])
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_SH_counts:")
+for (i in seq_len(nrow(family_sh_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_sh_counts$host_family[i], "\t", family_sh_counts$SH_n[i])
+  )
+}
+
+summary_lines <- c(summary_lines, "", "family_unique_SH_counts:")
+for (i in seq_len(nrow(family_unique_counts))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(family_unique_counts$host_family[i], "\t", family_unique_counts$unique_SH_n[i])
+  )
+}
+
+summary_lines <- c(
+  summary_lines,
+  "",
+  paste0("all_5_families_shared_SH\t", all_5_shared),
+  "",
+  "degree_summary:"
+)
+
+for (i in seq_len(nrow(degree_summary))) {
+  summary_lines <- c(
+    summary_lines,
+    paste0(degree_summary$share_type[i], "\t", degree_summary$SH_n_total[i])
+  )
+}
+
+writeLines(
+  summary_lines,
+  file.path(out_dir, "host_family_SH_summary_no_elephant.txt")
+)
+
+## ---- 准备作图数据 ----
+plot_df <- intersection_summary
+n_comb <- nrow(plot_df)
+
+plot_mat <- do.call(rbind, strsplit(plot_df$pattern, split = ""))
+plot_mat <- matrix(as.integer(plot_mat), ncol = length(family_order), byrow = FALSE)
+colnames(plot_mat) <- family_order
+
+## 左下角集合大小顺序：从下到上为 SH 数目由多到少
+set_sizes <- family_sh_counts$SH_n
+names(set_sizes) <- family_sh_counts$host_family
+
+set_order_bottom_to_top <- names(sort(set_sizes, decreasing = TRUE))
+set_order_top_to_bottom <- rev(set_order_bottom_to_top)
+
+## 点线矩阵显示顺序必须与左下角柱状图从下到上对应
+plot_mat_display <- plot_mat[, set_order_bottom_to_top, drop = FALSE]
+
+bar_cols <- ifelse(plot_df$degree == 5, col_5_shared, col_other)
+line_cols <- ifelse(plot_df$degree == 5, col_5_shared, col_other)
+
+set_sizes_display <- set_sizes[set_order_bottom_to_top]
+
+## 保存用于检查的绘图顺序
+write.csv(
+  data.frame(
+    display_order_bottom_to_top = set_order_bottom_to_top,
+    SH_n = as.integer(set_sizes_display),
+    row_y = seq_along(set_order_bottom_to_top)
+  ),
+  file.path(out_dir, "host_family_upset_display_order_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 画图函数 ----
+draw_upset_base <- function() {
+  oldpar <- par(no.readonly = TRUE)
+  on.exit(par(oldpar))
+
+  layout(
+    matrix(c(0, 1,
+             2, 3), nrow = 2, byrow = TRUE),
+    widths = c(1.70, 8.20),
+    heights = c(3.10, 4.05)
+  )
+
+  ## ---------- 顶部交集柱状图 ----------
+  par(mar = c(0.15, 4.8, 0.35, 1.0), family = base_family)
+  ylim_top <- max(plot_df$SH_n) * 1.18
+
+  plot(
+    x = seq_len(n_comb),
+    y = plot_df$SH_n,
+    type = "n",
+    xlim = c(0.5, n_comb + 0.5),
+    ylim = c(0, ylim_top),
+    xaxt = "n",
+    xlab = "",
+    ylab = "交集数目",
+    cex.lab = 1.25,
+    cex.axis = 1.0,
+    bty = "l"
+  )
+
+  rect(
+    xleft = seq_len(n_comb) - 0.32,
+    ybottom = 0,
+    xright = seq_len(n_comb) + 0.32,
+    ytop = plot_df$SH_n,
+    col = bar_cols,
+    border = bar_cols
+  )
+
+  text(
+    x = seq_len(n_comb),
+    y = plot_df$SH_n + ylim_top * 0.018,
+    labels = plot_df$SH_n,
+    cex = 0.55,
+    xpd = NA
+  )
+
+  ## ---------- 左下角集合大小柱状图 ----------
+  par(mar = c(4.8, 0.6, 0.15, 0.10), family = base_family)
+  y_pos <- seq_along(set_order_bottom_to_top)
+  max_set <- max(set_sizes_display)
+
+  plot(
+    x = c(max_set * 1.12, -max_set * 0.04),
+    y = c(0.5, length(set_order_bottom_to_top) + 0.5),
+    type = "n",
+    xaxt = "n",
+    yaxt = "n",
+    xlab = "",
+    ylab = "",
+    bty = "n"
+  )
+
+  rect(
+    xleft = 0,
+    ybottom = y_pos - 0.22,
+    xright = set_sizes_display,
+    ytop = y_pos + 0.22,
+    col = col_other,
+    border = col_other
+  )
+
+  ## 横轴：左侧为大值，右侧靠近 0，参照标准 UpSet 图
+  axis(
+    side = 1,
+    at = pretty(c(0, max_set)),
+    labels = pretty(c(0, max_set)),
+    cex.axis = 0.9,
+    las = 1
+  )
+
+  mtext("SH数目", side = 1, line = 3.0, cex = 1.15)
+
+  ## 宿主科名放在左下柱状图右边，紧贴点线矩阵左侧
+  ## 这里用 xpd 允许文字伸到右侧 panel 边界外
+  text(
+    x = -max_set * 0.025,
+    y = y_pos,
+    labels = set_order_bottom_to_top,
+    adj = 1,
+    xpd = NA,
+    cex = 1.05
+  )
+
+  ## ---------- 点线矩阵 ----------
+  par(mar = c(4.8, 0.05, 0.15, 0.8), family = base_family)
+
+  plot(
+    x = c(0.5, n_comb + 0.5),
+    y = c(0.5, length(set_order_bottom_to_top) + 0.5),
+    type = "n",
+    xaxt = "n",
+    yaxt = "n",
+    xlab = "",
+    ylab = "",
+    bty = "n"
+  )
+
+  ## 背景交替浅灰带
+  for (i in seq_along(set_order_bottom_to_top)) {
+    if (i %% 2 == 1) {
+      rect(
+        xleft = 0.5,
+        ybottom = i - 0.5,
+        xright = n_comb + 0.5,
+        ytop = i + 0.5,
+        col = col_band,
+        border = NA
+      )
+    }
+  }
+
+  ## 所有浅灰点
+  for (j in seq_len(n_comb)) {
+    points(
+      rep(j, length(set_order_bottom_to_top)),
+      y_pos,
+      pch = 16,
+      col = col_empty,
+      cex = 0.75
+    )
+  }
+
+  ## 连线和实心点
+  for (j in seq_len(n_comb)) {
+    active <- which(plot_mat_display[j, ] == 1)
+
+    if (length(active) > 1) {
+      segments(
+        x0 = j,
+        y0 = min(active),
+        x1 = j,
+        y1 = max(active),
+        col = line_cols[j],
+        lwd = 1.4
+      )
+    }
+
+    points(
+      rep(j, length(active)),
+      active,
+      pch = 16,
+      col = line_cols[j],
+      cex = 0.85
+    )
+  }
+}
+
+## ---- 保存 PNG ----
+png(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.png"),
+  width = 16,
+  height = 9,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+draw_upset_base()
+dev.off()
+
+## ---- 保存 PDF ----
+cairo_pdf(
+  filename = file.path(out_dir, "host_family_upset_no_elephant.pdf"),
+  width = 16,
+  height = 9,
+  bg = "white",
+  family = base_family
+)
+draw_upset_base()
+dev.off()
+
+cat("Done!\n")
+cat("PNG saved to: ", file.path(out_dir, "host_family_upset_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "host_family_upset_no_elephant.pdf"), "\n", sep = "")
+cat("Summary saved to: ", file.path(out_dir, "host_family_SH_summary_no_elephant.txt"), "\n", sep = "")
+cat("Display order saved to: ", file.path(out_dir, "host_family_upset_display_order_no_elephant.csv"), "\n", sep = "")
+cat("Intersection summary saved to: ", file.path(out_dir, "host_family_SH_intersection_summary_no_elephant.csv"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_host_family_upset_no_elephant.R
+#跑完后可以先看两个文件确认顺序和正文数据：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/host_family_SH_summary_no_elephant.txt
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/host_family_upset_display_order_no_elephant.csv
