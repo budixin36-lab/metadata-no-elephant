@@ -1,0 +1,171 @@
+#一、这一步的输入文件、输出目录
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/metadata/metadata_valid_globalfungi_SH_nozero.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/merged_SH_globalfungi_style_nozero_with_taxonomy.biom
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/phylum_abundance_table.tsv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/genus_abundance_table.tsv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/species_abundance_table.tsv
+#输出目录：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+#会生成新的 metadata、样本 ID 文件、过滤后的 BIOM、过滤后的 taxonomy abundance tables 和 summary，不会覆盖旧目录。
+#二、在 WSL 终端直接运行
+#先进入主目录：
+cd /mnt/d/ITS_SH_pipeline
+#然后运行下面整段：
+mkdir -p globalfungi_style_test_no_elephant/{metadata,taxonomy,summary,scripts}
+
+cat > globalfungi_style_test_no_elephant/scripts/01_filter_no_elephant.R <<'EOF'
+old_base <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test"
+new_base <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+meta_in <- file.path(old_base, "metadata/metadata_valid_globalfungi_SH_nozero.csv")
+
+meta_out <- file.path(new_base, "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv")
+removed_out <- file.path(new_base, "metadata/removed_Loxodonta_africana_samples.csv")
+sample_ids_out <- file.path(new_base, "metadata/no_elephant_sample_ids.txt")
+summary_out <- file.path(new_base, "summary/no_elephant_metadata_summary.txt")
+
+meta <- read.csv(meta_in, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_species", "host_family", "host_order")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata 缺少这些必要列：", paste(missing_cols, collapse = ", "))
+}
+
+remove_flag <- meta$host_species == "Loxodonta africana" |
+  meta$host_family == "Elephantidae" |
+  meta$host_order == "Proboscidea"
+
+removed <- meta[remove_flag, , drop = FALSE]
+meta_no_elephant <- meta[!remove_flag, , drop = FALSE]
+
+write.csv(removed, removed_out, row.names = FALSE, quote = TRUE)
+write.csv(meta_no_elephant, meta_out, row.names = FALSE, quote = TRUE)
+writeLines(meta_no_elephant$sampleid, sample_ids_out)
+
+summary_lines <- c(
+  paste0("old_metadata_samples\t", nrow(meta)),
+  paste0("removed_samples\t", nrow(removed)),
+  paste0("new_metadata_samples\t", nrow(meta_no_elephant)),
+  paste0("old_host_order_number\t", length(unique(meta$host_order))),
+  paste0("new_host_order_number\t", length(unique(meta_no_elephant$host_order))),
+  paste0("old_host_family_number\t", length(unique(meta$host_family))),
+  paste0("new_host_family_number\t", length(unique(meta_no_elephant$host_family))),
+  paste0("old_host_species_number\t", length(unique(meta$host_species))),
+  paste0("new_host_species_number\t", length(unique(meta_no_elephant$host_species))),
+  paste0("old_country_number\t", length(unique(meta$country))),
+  paste0("new_country_number\t", length(unique(meta_no_elephant$country))),
+  "",
+  "removed_host_species:",
+  paste(sort(unique(removed$host_species)), collapse = "; "),
+  "",
+  "remaining_host_orders:",
+  paste(sort(unique(meta_no_elephant$host_order)), collapse = "; "),
+  "",
+  "remaining_host_families:",
+  paste(sort(unique(meta_no_elephant$host_family)), collapse = "; "),
+  "",
+  "remaining_host_species:",
+  paste(sort(unique(meta_no_elephant$host_species)), collapse = "; ")
+)
+
+writeLines(summary_lines, summary_out)
+
+cat("Done metadata filtering.\n")
+cat("Removed samples:", nrow(removed), "\n")
+cat("New samples:", nrow(meta_no_elephant), "\n")
+cat("Output metadata:", meta_out, "\n")
+cat("Summary:", summary_out, "\n")
+EOF
+
+Rscript globalfungi_style_test_no_elephant/scripts/01_filter_no_elephant.R
+#三、过滤 BIOM 和 taxonomy abundance tables
+#继续在 WSL 终端运行：
+cat > globalfungi_style_test_no_elephant/scripts/02_filter_no_elephant_biom_and_tables.py <<'EOF'
+from biom import load_table
+import pandas as pd
+from pathlib import Path
+
+old_base = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test")
+new_base = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant")
+
+sample_ids_file = new_base / "metadata/no_elephant_sample_ids.txt"
+
+biom_in = old_base / "taxonomy/merged_SH_globalfungi_style_nozero_with_taxonomy.biom"
+biom_out = new_base / "taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom"
+
+summary_out = new_base / "summary/no_elephant_biom_taxonomy_summary.txt"
+
+sample_ids = [x.strip() for x in open(sample_ids_file, encoding="utf-8") if x.strip()]
+sample_set = set(sample_ids)
+
+table = load_table(str(biom_in))
+
+missing_samples = sorted(sample_set - set(table.ids(axis="sample")))
+if missing_samples:
+    raise ValueError(f"这些 metadata 样本在 BIOM 中找不到，前10个为：{missing_samples[:10]}")
+
+table_f = table.filter(sample_ids, axis="sample", inplace=False)
+table_f = table_f.remove_empty(axis="observation", inplace=False)
+
+with open(biom_out, "w", encoding="utf-8") as f:
+    table_f.to_json("no_elephant_filter", f)
+
+taxonomy_files = [
+    "phylum_abundance_table.tsv",
+    "family_abundance_table.tsv",
+    "genus_abundance_table.tsv",
+    "species_abundance_table.tsv"
+]
+
+summary_lines = []
+summary_lines.append(f"old_biom_samples\t{len(table.ids(axis='sample'))}")
+summary_lines.append(f"old_biom_SHs\t{len(table.ids(axis='observation'))}")
+summary_lines.append(f"new_biom_samples\t{len(table_f.ids(axis='sample'))}")
+summary_lines.append(f"new_biom_SHs\t{len(table_f.ids(axis='observation'))}")
+
+for fn in taxonomy_files:
+    in_path = old_base / "taxonomy" / fn
+    out_path = new_base / "taxonomy" / fn.replace(".tsv", "_no_elephant.tsv")
+
+    df = pd.read_csv(in_path, sep="\t", dtype=str)
+    tax_col = df.columns[0]
+
+    keep_cols = [tax_col] + [c for c in df.columns[1:] if c in sample_set]
+    df2 = df[keep_cols].copy()
+
+    # 删除所有 no_elephant 样本中丰度均为 0 的分类行
+    abundance = df2.iloc[:, 1:].apply(pd.to_numeric, errors="coerce").fillna(0)
+    df2 = df2.loc[abundance.sum(axis=1) > 0, :]
+
+    df2.to_csv(out_path, sep="\t", index=False)
+
+    summary_lines.append(f"{fn}_old_taxa\t{df.shape[0]}")
+    summary_lines.append(f"{fn}_new_taxa\t{df2.shape[0]}")
+    summary_lines.append(f"{fn}_new_samples\t{df2.shape[1] - 1}")
+
+with open(summary_out, "w", encoding="utf-8") as f:
+    f.write("\n".join(summary_lines) + "\n")
+
+print("Done BIOM and taxonomy table filtering.")
+print("Output BIOM:", biom_out)
+print("Summary:", summary_out)
+EOF
+
+# 如果你当前不在 qiime2 环境，先激活：
+conda activate qiime2-amplicon-2026.1
+
+python globalfungi_style_test_no_elephant/scripts/02_filter_no_elephant_biom_and_tables.py
+#运行完后看 summary：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/summary/no_elephant_metadata_summary.txt
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/summary/no_elephant_biom_taxonomy_summary.txt
+#四、更新物种分类层级树状图需要给新窗口的原始数据表
+#你要新开窗口做图 2-2 的话，最关键的数据表是这个新生成的 metadata：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#树状图主要用它里面这些列：
+#sampleid
+#host_order
+#host_family
+#host_species
+#status
+#country
