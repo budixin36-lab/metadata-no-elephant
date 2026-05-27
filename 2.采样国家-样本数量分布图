@@ -226,3 +226,1003 @@ nano /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_coun
 #把完整 R 代码粘进去，保存退出后运行：
 Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
 #如果现在 R 里已经卡在 +，一定先 Ctrl + C，不要继续粘贴代码。
+#中文显示不出来，核心原因几乎可以确定是字体问题，不是数据问题。
+#你前面的代码里用了：family = "sans"
+#在 WSL/Ubuntu 的 R 环境 下，sans 往往不会自动回退到支持中文的字体，所以中文标签和图例标题就会显示成方框/空框。
+#也就是说：
+#国家中文名已经正确传进去了
+#但 当前绘图设备找不到能显示中文的字体
+#所以导出的 PNG/PDF 里中文显示失败
+#一、先解决中文字体问题
+#1）在 WSL 安装中文字体
+#先在 WSL 终端 运行：
+#这个包比较稳，通常能解决中文显示问题。
+#2）在 R 代码里显式指定中文字体
+#为了避免再踩坑，这次建议你直接用 showtext + Noto Sans CJK，不要再依赖 "sans" 自动识别。
+#修正后的完整代码
+#这版代码解决两个问题：
+#中文正常显示
+#标签尽量不压住气泡，连线稍微拉长
+#你直接把原脚本替换成这版即可。
+## =========================
+## 图2-1 采样国家-样本数量分布图（no_elephant版）
+## 中文字体修正版
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(readr)
+library(showtext)
+
+## ---- 中文字体设置 ----
+font_add(
+  family = "CN",
+  regular = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+)
+showtext_auto()
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "country")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+## ---- 统计各国家样本数 ----
+country_counts <- meta %>%
+  filter(!is.na(country), trimws(country) != "") %>%
+  count(country, name = "samples") %>%
+  arrange(desc(samples))
+
+## ---- 国家英文名 -> 中文名 + 气泡坐标 + 标签偏移 ----
+country_info <- data.frame(
+  country = c(
+    "China", "Spain", "United Kingdom", "Finland", "USA", "United States",
+    "Canada", "South Africa", "Netherlands", "Italy", "Germany",
+    "Hungary", "Argentina", "Brazil", "Denmark"
+  ),
+  country_cn = c(
+    "中国", "西班牙", "英国", "芬兰", "美国", "美国",
+    "加拿大", "南非", "荷兰", "意大利", "德国",
+    "匈牙利", "阿根廷", "巴西", "丹麦"
+  ),
+  lon = c(
+    104, -3.5, -2.5, 26, -98, -98,
+    -106, 24, 5.3, 12.5, 10.5,
+    19.3, -64, -52, 10
+  ),
+  lat = c(
+    35, 40, 54.5, 64.5, 39, 39,
+    57, -29, 52.3, 42.5, 51,
+    47.2, -38, -10, 56
+  ),
+
+  ## 这里把标签整体拉远一点，尽量减少压住圆圈
+  label_nudge_x = c(
+    12, -16, 2, 8, -16, -16,
+    -14, 10, -3, 8, 8,
+    8, 10, 10, 8
+  ),
+  label_nudge_y = c(
+    3, -3, 2, 3, -2, -2,
+    3, -3, 3, -3, 2,
+    -2, -2, -2, 3
+  ),
+  stringsAsFactors = FALSE
+)
+
+country_plot <- country_counts %>%
+  left_join(country_info, by = "country")
+
+if (any(is.na(country_plot$country_cn))) {
+  unmatched <- unique(country_plot$country[is.na(country_plot$country_cn)])
+  warning("以下国家未在country_info中匹配到，请补充中文名和坐标：\n",
+          paste(unmatched, collapse = ", "))
+}
+
+country_plot <- country_plot %>%
+  filter(!is.na(country_cn)) %>%
+  mutate(
+    label = paste0(country_cn, ": ", samples),
+    label_lon = lon + label_nudge_x,
+    label_lat = lat + label_nudge_y
+  )
+
+## ---- 世界地图 ----
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+## ---- 作图 ----
+p <- ggplot() +
+  geom_sf(data = world, fill = "#D9D9D9", color = "white", linewidth = 0.2) +
+
+  ## 气泡
+  geom_point(
+    data = country_plot,
+    aes(x = lon, y = lat, size = samples),
+    shape = 21,
+    fill = "#E8D56A",
+    color = "#9C8830",
+    stroke = 0.5,
+    alpha = 0.95
+  ) +
+
+  ## 连接线（标签与圆圈之间）
+  geom_segment(
+    data = country_plot,
+    aes(x = lon, y = lat, xend = label_lon, yend = label_lat),
+    linewidth = 0.35,
+    color = "grey40"
+  ) +
+
+  ## 标签
+  geom_label(
+    data = country_plot,
+    aes(x = label_lon, y = label_lat, label = label),
+    size = 5.2,
+    family = "CN",
+    linewidth = 0.25,
+    fill = "white",
+    color = "black",
+    label.padding = unit(0.15, "lines")
+  ) +
+
+  scale_size_continuous(
+    name = "样本数量",
+    range = c(3, 15),
+    breaks = c(500, 1000, 1500)
+  ) +
+
+  coord_sf(
+    xlim = c(-170, 160),
+    ylim = c(-58, 78),
+    expand = FALSE
+  ) +
+
+  theme_bw(base_size = 14, base_family = "CN") +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+
+    legend.title = element_text(size = 16, family = "CN"),
+    legend.text  = element_text(size = 14, family = "CN"),
+    legend.position = c(0.10, 0.16),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA)
+  )
+
+## ---- 保存国家计数表 ----
+write.csv(
+  country_plot %>% select(country, country_cn, samples),
+  file.path(out_dir, "country_sample_counts_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 保存图片 ----
+ggsave(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.png"),
+  plot = p,
+  width = 12,
+  height = 5.3,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.pdf"),
+  plot = p,
+  width = 12,
+  height = 5.3,
+  bg = "white"
+)
+
+## 可选：如果装了 svglite 就输出 SVG
+if (requireNamespace("svglite", quietly = TRUE)) {
+  ggsave(
+    filename = file.path(out_dir, "country_sample_map_no_elephant.svg"),
+    plot = p,
+    width = 12,
+    height = 5.3,
+    bg = "white"
+  )
+  cat("SVG saved to: ", file.path(out_dir, "country_sample_map_no_elephant.svg"), "\n", sep = "")
+} else {
+  cat("svglite 未安装，已跳过 SVG 输出；PNG 和 PDF 不受影响。\n")
+}
+
+cat("Done!\n")
+cat("Country counts saved to: ", file.path(out_dir, "country_sample_counts_no_elephant.csv"), "\n", sep = "")
+cat("PNG saved to: ", file.path(out_dir, "country_sample_map_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ", file.path(out_dir, "country_sample_map_no_elephant.pdf"), "\n", sep = "")
+运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#在 WSL 终端安装这个 R 包：
+Rscript -e 'install.packages(c("showtext", "sysfonts", "showtextdb"), repos="https://cloud.r-project.org")'
+#装完后再运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#这次要同时解决的点
+#“南非”的“非”、“芬兰”的“芬”字形怪
+#原因不是“没显示中文”，而是前一版实际上用了泛 CJK 字体/字体集合中的非简体字形。
+#这次改成明确指定简体中文字体族：Noto Sans CJK SC，不用之前那种容易跑到别的字形变体的写法。
+#字体稍微调小
+#图例挪到最左下角
+#标签尽量不压住圆圈
+#英国、荷兰及欧洲几个国家标签彼此不要遮挡
+#不再依赖 showtext，减少中断风险
+#这次直接用 Cairo 设备 输出 PNG/PDF
+#前提是你已经装好了 fonts-noto-cjk（你已经装过了）
+#直接替换脚本的完整代码
+#把你现在的/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#整个替换为下面这一版。
+## =========================
+## 图2-1 采样国家-样本数量分布图（no_elephant版）
+## 最终修正版：简体中文字体 + 标签避让 + 左下角图例
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(grid)   # unit()
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 字体设置 ----
+## 这里明确使用“简体中文”字体族，避免出现“非”“芬”等字形怪异
+base_family_cn <- "Noto Sans CJK SC"
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "country")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+## ---- 统计各国家样本数 ----
+country_counts <- meta %>%
+  filter(!is.na(country), trimws(country) != "") %>%
+  count(country, name = "samples") %>%
+  arrange(desc(samples))
+
+## ---- 国家英文名 -> 中文名 + 圆点坐标 + 标签坐标 ----
+## 直接手动给每个国家设置标签坐标，减少遮挡和重叠
+country_info <- data.frame(
+  country = c(
+    "China", "Spain", "United Kingdom", "Finland", "USA", "United States",
+    "Canada", "South Africa", "Netherlands", "Italy", "Germany",
+    "Hungary", "Argentina", "Brazil", "Denmark"
+  ),
+  country_cn = c(
+    "中国", "西班牙", "英国", "芬兰", "美国", "美国",
+    "加拿大", "南非", "荷兰", "意大利", "德国",
+    "匈牙利", "阿根廷", "巴西", "丹麦"
+  ),
+
+  ## 圆点位置（国家中心附近）
+  lon = c(
+    104.0, -3.5, -2.5, 26.0, -98.0, -98.0,
+    -106.0, 24.0, 5.3, 12.5, 10.5,
+    19.3, -64.0, -52.0, 10.0
+  ),
+  lat = c(
+    35.0, 40.0, 54.5, 64.5, 39.0, 39.0,
+    57.0, -29.0, 52.3, 42.5, 51.0,
+    47.2, -38.0, -10.0, 56.0
+  ),
+
+  ## 标签位置（专门调过，尽量避开圆圈和彼此重叠）
+  label_lon = c(
+    115.5,   # 中国
+    -18.0,   # 西班牙
+    -16.0,   # 英国
+    34.0,    # 芬兰
+    -112.0,  # 美国
+    -112.0,  # 美国（兼容写法）
+    -122.0,  # 加拿大
+    33.0,    # 南非
+    14.5,    # 荷兰
+    21.0,    # 意大利
+    20.5,    # 德国
+    29.0,    # 匈牙利
+    -55.0,   # 阿根廷
+    -42.5,   # 巴西
+    18.0     # 丹麦
+  ),
+  label_lat = c(
+    38.0,    # 中国
+    36.0,    # 西班牙
+    57.5,    # 英国
+    69.0,    # 芬兰
+    37.0,    # 美国
+    37.0,    # 美国（兼容写法）
+    60.5,    # 加拿大
+    -32.0,   # 南非
+    55.0,    # 荷兰
+    39.5,    # 意大利
+    51.8,    # 德国
+    46.0,    # 匈牙利
+    -41.0,   # 阿根廷
+    -13.0,   # 巴西
+    58.8     # 丹麦
+  ),
+  stringsAsFactors = FALSE
+)
+
+country_plot <- country_counts %>%
+  left_join(country_info, by = "country")
+
+## 检查是否有国家没匹配到
+if (any(is.na(country_plot$country_cn))) {
+  unmatched <- unique(country_plot$country[is.na(country_plot$country_cn)])
+  stop("以下国家未在 country_info 中匹配到，请补充：",
+       paste(unmatched, collapse = ", "))
+}
+
+country_plot <- country_plot %>%
+  mutate(
+    label = paste0(country_cn, ": ", samples)
+  )
+
+## ---- 世界地图 ----
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+## ---- 作图 ----
+p <- ggplot() +
+  geom_sf(
+    data = world,
+    fill = "#D3D3D3",
+    color = "white",
+    linewidth = 0.2
+  ) +
+
+  ## 样本气泡
+  geom_point(
+    data = country_plot,
+    aes(x = lon, y = lat, size = samples),
+    shape = 21,
+    fill = "#E8D56A",
+    color = "#9C8830",
+    stroke = 0.6,
+    alpha = 0.97
+  ) +
+
+  ## 圆圈到标签的连接线
+  geom_segment(
+    data = country_plot,
+    aes(x = lon, y = lat, xend = label_lon, yend = label_lat),
+    linewidth = 0.35,
+    color = "grey30"
+  ) +
+
+  ## 标签框
+  geom_label(
+    data = country_plot,
+    aes(x = label_lon, y = label_lat, label = label),
+    family = base_family_cn,
+    size = 3.2,                 # 比上一版更小
+    fill = "white",
+    color = "black",
+    linewidth = 0.25,
+    label.size = NA,
+    label.padding = unit(0.10, "lines"),
+    label.r = unit(0.12, "lines"),
+    lineheight = 0.9
+  ) +
+
+  scale_size_continuous(
+    name = "样本数量",
+    range = c(3.5, 15),
+    breaks = c(500, 1000, 1500)
+  ) +
+
+  coord_sf(
+    xlim = c(-170, 160),
+    ylim = c(-58, 78),
+    expand = FALSE
+  ) +
+
+  theme_bw(base_size = 12, base_family = base_family_cn) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+
+    ## 图例放到最左下角
+    legend.position = c(0.035, 0.08),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+
+    legend.title = element_text(size = 11, family = base_family_cn),
+    legend.text  = element_text(size = 9.5, family = base_family_cn),
+
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    size = guide_legend(
+      title.position = "top",
+      label.position = "right",
+      byrow = TRUE,
+      override.aes = list(
+        fill = "#E8D56A",
+        color = "#9C8830",
+        alpha = 0.97
+      )
+    )
+  )
+
+## ---- 保存国家样本统计表 ----
+write.csv(
+  country_plot %>% select(country, country_cn, samples),
+  file.path(out_dir, "country_sample_counts_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 保存高清 PNG（使用 Cairo，中文更稳）----
+png(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.png"),
+  width = 12,
+  height = 5.3,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+## ---- 保存 PDF（使用 Cairo）----
+cairo_pdf(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.pdf"),
+  width = 12,
+  height = 5.3,
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+cat("Done!\n")
+cat("Country counts saved to: ",
+    file.path(out_dir, "country_sample_counts_no_elephant.csv"), "\n", sep = "")
+cat("PNG saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.pdf"), "\n", sep = "")
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#第一步：直接覆盖脚本
+#在 WSL 终端运行下面整段：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R <<'EOF'
+## =========================
+## 图2-1 采样国家-样本数量分布图（no_elephant版）
+## 最终修正版：简体中文字体 + 标签避让 + 左下角图例
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(grid)
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 字体设置 ----
+base_family_cn <- "Noto Sans CJK SC"
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "country")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+## ---- 统计各国家样本数 ----
+country_counts <- meta %>%
+  filter(!is.na(country), trimws(country) != "") %>%
+  count(country, name = "samples") %>%
+  arrange(desc(samples))
+
+## ---- 国家信息：中文名、圆点坐标、标签坐标 ----
+country_info <- data.frame(
+  country = c(
+    "China", "Spain", "United Kingdom", "Finland", "USA", "United States",
+    "Canada", "South Africa", "Netherlands", "Italy", "Germany",
+    "Hungary", "Argentina", "Brazil", "Denmark"
+  ),
+  country_cn = c(
+    "中国", "西班牙", "英国", "芬兰", "美国", "美国",
+    "加拿大", "南非", "荷兰", "意大利", "德国",
+    "匈牙利", "阿根廷", "巴西", "丹麦"
+  ),
+  lon = c(
+    104.0, -3.5, -2.5, 26.0, -98.0, -98.0,
+    -106.0, 24.0, 5.3, 12.5, 10.5,
+    19.3, -64.0, -52.0, 10.0
+  ),
+  lat = c(
+    35.0, 40.0, 54.5, 64.5, 39.0, 39.0,
+    57.0, -29.0, 52.3, 42.5, 51.0,
+    47.2, -38.0, -10.0, 56.0
+  ),
+
+  ## 标签位置：已针对欧洲拥挤区、丹麦、荷兰单独修正
+  label_lon = c(
+    115.5,   # 中国
+    -18.0,   # 西班牙
+    -16.0,   # 英国
+    34.0,    # 芬兰
+    -112.0,  # 美国
+    -112.0,  # 美国（兼容写法）
+    -122.0,  # 加拿大
+    33.0,    # 南非
+    16.8,    # 荷兰（右移）
+    21.0,    # 意大利
+    20.5,    # 德国
+    29.0,    # 匈牙利
+    -55.0,   # 阿根廷
+    -42.5,   # 巴西
+    21.0     # 丹麦（右移）
+  ),
+  label_lat = c(
+    38.0,    # 中国
+    36.0,    # 西班牙
+    57.5,    # 英国
+    69.0,    # 芬兰
+    37.0,    # 美国
+    37.0,    # 美国（兼容写法）
+    60.5,    # 加拿大
+    -32.0,   # 南非
+    56.0,    # 荷兰（上移）
+    39.5,    # 意大利
+    51.8,    # 德国
+    46.0,    # 匈牙利
+    -41.0,   # 阿根廷
+    -13.0,   # 巴西
+    60.3     # 丹麦（上移）
+  ),
+  stringsAsFactors = FALSE
+)
+
+country_plot <- country_counts %>%
+  left_join(country_info, by = "country")
+
+if (any(is.na(country_plot$country_cn))) {
+  unmatched <- unique(country_plot$country[is.na(country_plot$country_cn)])
+  stop("以下国家未在 country_info 中匹配到，请补充：",
+       paste(unmatched, collapse = ", "))
+}
+
+country_plot <- country_plot %>%
+  mutate(label = paste0(country_cn, ": ", samples))
+
+## ---- 世界地图 ----
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+## ---- 作图 ----
+p <- ggplot() +
+  geom_sf(
+    data = world,
+    fill = "#D3D3D3",
+    color = "white",
+    linewidth = 0.2
+  ) +
+  geom_point(
+    data = country_plot,
+    aes(x = lon, y = lat, size = samples),
+    shape = 21,
+    fill = "#E8D56A",
+    color = "#9C8830",
+    stroke = 0.6,
+    alpha = 0.97
+  ) +
+  geom_segment(
+    data = country_plot,
+    aes(x = lon, y = lat, xend = label_lon, yend = label_lat),
+    linewidth = 0.35,
+    color = "grey30"
+  ) +
+  geom_label(
+    data = country_plot,
+    aes(x = label_lon, y = label_lat, label = label),
+    family = base_family_cn,
+    size = 3.2,
+    fill = "white",
+    color = "black",
+    linewidth = 0.25,
+    label.padding = unit(0.10, "lines"),
+    label.r = unit(0.12, "lines"),
+    lineheight = 0.9
+  ) +
+  scale_size_continuous(
+    name = "样本数量",
+    range = c(3.5, 15),
+    breaks = c(500, 1000, 1500)
+  ) +
+  coord_sf(
+    xlim = c(-170, 160),
+    ylim = c(-58, 78),
+    expand = FALSE
+  ) +
+  theme_bw(base_size = 12, base_family = base_family_cn) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = c(0.035, 0.08),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+    legend.title = element_text(size = 11, family = base_family_cn),
+    legend.text  = element_text(size = 9.5, family = base_family_cn),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    size = guide_legend(
+      title.position = "top",
+      label.position = "right",
+      byrow = TRUE,
+      override.aes = list(
+        fill = "#E8D56A",
+        color = "#9C8830",
+        alpha = 0.97
+      )
+    )
+  )
+
+## ---- 保存国家样本统计表 ----
+write.csv(
+  country_plot %>% select(country, country_cn, samples),
+  file.path(out_dir, "country_sample_counts_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 保存 PNG ----
+png(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.png"),
+  width = 12,
+  height = 5.3,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+## ---- 保存 PDF ----
+cairo_pdf(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.pdf"),
+  width = 12,
+  height = 5.3,
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+cat("Done!\n")
+cat("Country counts saved to: ",
+    file.path(out_dir, "country_sample_counts_no_elephant.csv"), "\n", sep = "")
+cat("PNG saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.pdf"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
+#1）覆盖脚本
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R <<'EOF'
+## =========================
+## 图2-1 采样国家-样本数量分布图（no_elephant版）
+## 最终修正版 v3：字体较大 + 标签整体外拉 + 欧洲拥挤区再错开
+## =========================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(grid)
+
+## ---- 输入输出路径 ----
+meta_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+out_dir   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/country_sample_map"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 字体设置 ----
+base_family_cn <- "Noto Sans CJK SC"
+
+## ---- 读取 metadata ----
+meta <- read.csv(meta_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "country")
+missing_cols <- setdiff(need_cols, colnames(meta))
+if (length(missing_cols) > 0) {
+  stop("metadata缺少必要列：", paste(missing_cols, collapse = ", "))
+}
+
+## ---- 统计各国家样本数 ----
+country_counts <- meta %>%
+  filter(!is.na(country), trimws(country) != "") %>%
+  count(country, name = "samples") %>%
+  arrange(desc(samples))
+
+## ---- 国家信息：中文名、圆点坐标、标签坐标 ----
+## 本版重点：把欧洲拥挤区标签整体外拉，让连接线更长，减少相互遮挡
+country_info <- data.frame(
+  country = c(
+    "China", "Spain", "United Kingdom", "Finland", "USA", "United States",
+    "Canada", "South Africa", "Netherlands", "Italy", "Germany",
+    "Hungary", "Argentina", "Brazil", "Denmark"
+  ),
+  country_cn = c(
+    "中国", "西班牙", "英国", "芬兰", "美国", "美国",
+    "加拿大", "南非", "荷兰", "意大利", "德国",
+    "匈牙利", "阿根廷", "巴西", "丹麦"
+  ),
+  lon = c(
+    104.0, -3.5, -2.5, 26.0, -98.0, -98.0,
+    -106.0, 24.0, 5.3, 12.5, 10.5,
+    19.3, -64.0, -52.0, 10.0
+  ),
+  lat = c(
+    35.0, 40.0, 54.5, 64.5, 39.0, 39.0,
+    57.0, -29.0, 52.3, 42.5, 51.0,
+    47.2, -38.0, -10.0, 56.0
+  ),
+
+  ## 标签位置：明显拉远，避免大字体遮挡
+  label_lon = c(
+    116.5,   # 中国：右移一点
+    -20.5,   # 西班牙：更向左
+    -18.5,   # 英国：更向左
+    37.0,    # 芬兰：更向右上
+    -114.5,  # 美国：更向左
+    -114.5,  # 美国（兼容写法）
+    -124.5,  # 加拿大：更向左
+    34.5,    # 南非：更向右
+    5.3,     # 荷兰：正上方
+    24.5,    # 意大利：右下
+    23.8,    # 德国：右侧
+    31.5,    # 匈牙利：更向右下
+    -53.5,   # 阿根廷：右上少许
+    -41.0,   # 巴西：右侧
+    23.5     # 丹麦：右上
+  ),
+  label_lat = c(
+    38.2,    # 中国
+    35.2,    # 西班牙
+    57.8,    # 英国
+    70.8,    # 芬兰
+    36.5,    # 美国
+    36.5,    # 美国（兼容写法）
+    60.7,    # 加拿大
+    -32.3,   # 南非
+    57.9,    # 荷兰：明显上移
+    38.8,    # 意大利
+    51.4,    # 德国
+    45.4,    # 匈牙利
+    -40.3,   # 阿根廷
+    -13.2,   # 巴西
+    60.8     # 丹麦
+  ),
+  stringsAsFactors = FALSE
+)
+
+country_plot <- country_counts %>%
+  left_join(country_info, by = "country")
+
+if (any(is.na(country_plot$country_cn))) {
+  unmatched <- unique(country_plot$country[is.na(country_plot$country_cn)])
+  stop("以下国家未在 country_info 中匹配到，请补充：",
+       paste(unmatched, collapse = ", "))
+}
+
+country_plot <- country_plot %>%
+  mutate(label = paste0(country_cn, ": ", samples))
+
+## ---- 世界地图 ----
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+## ---- 作图 ----
+p <- ggplot() +
+  geom_sf(
+    data = world,
+    fill = "#D3D3D3",
+    color = "white",
+    linewidth = 0.2
+  ) +
+  geom_point(
+    data = country_plot,
+    aes(x = lon, y = lat, size = samples),
+    shape = 21,
+    fill = "#E8D56A",
+    color = "#9C8830",
+    stroke = 0.6,
+    alpha = 0.97
+  ) +
+  geom_segment(
+    data = country_plot,
+    aes(x = lon, y = lat, xend = label_lon, yend = label_lat),
+    linewidth = 0.38,
+    color = "grey30"
+  ) +
+  geom_label(
+    data = country_plot,
+    aes(x = label_lon, y = label_lat, label = label),
+    family = base_family_cn,
+    size = 3.8,   # 比上一版略收一点，但仍明显大于早期版本
+    fill = "white",
+    color = "black",
+    linewidth = 0.25,
+    label.padding = unit(0.12, "lines"),
+    label.r = unit(0.12, "lines"),
+    lineheight = 0.9
+  ) +
+  scale_size_continuous(
+    name = "样本数量",
+    range = c(3.5, 15),
+    breaks = c(500, 1000, 1500)
+  ) +
+  coord_sf(
+    xlim = c(-170, 160),
+    ylim = c(-58, 78),
+    expand = FALSE
+  ) +
+  theme_bw(base_size = 14, base_family = base_family_cn) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+
+    legend.position = c(0.035, 0.08),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+
+    legend.title = element_text(size = 14, family = base_family_cn),
+    legend.text  = element_text(size = 12, family = base_family_cn),
+
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    size = guide_legend(
+      title.position = "top",
+      label.position = "right",
+      byrow = TRUE,
+      override.aes = list(
+        fill = "#E8D56A",
+        color = "#9C8830",
+        alpha = 0.97
+      )
+    )
+  )
+
+## ---- 保存国家样本统计表 ----
+write.csv(
+  country_plot %>% select(country, country_cn, samples),
+  file.path(out_dir, "country_sample_counts_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## ---- 保存 PNG ----
+png(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.png"),
+  width = 12,
+  height = 5.3,
+  units = "in",
+  res = 600,
+  type = "cairo",
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+## ---- 保存 PDF ----
+cairo_pdf(
+  filename = file.path(out_dir, "country_sample_map_no_elephant.pdf"),
+  width = 12,
+  height = 5.3,
+  bg = "white",
+  family = base_family_cn
+)
+print(p)
+dev.off()
+
+cat("Done!\n")
+cat("Country counts saved to: ",
+    file.path(out_dir, "country_sample_counts_no_elephant.csv"), "\n", sep = "")
+cat("PNG saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.png"), "\n", sep = "")
+cat("PDF saved to: ",
+    file.path(out_dir, "country_sample_map_no_elephant.pdf"), "\n", sep = "")
+EOF
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/plot_country_sample_map_no_elephant.R
