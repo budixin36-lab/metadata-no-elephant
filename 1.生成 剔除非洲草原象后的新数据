@@ -169,3 +169,629 @@ cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/summary/no_elephan
 #host_species
 #status
 #country
+#可直接在 WSL 的 R 里运行的一键脚本，它会按你的要求自动生成：
+#树文件（.nwk）
+#物种标签文件（用于把右侧物种名显示为拉丁学名）
+#Samples 列文本数据集
+#Status 饼图数据集
+#Country 饼图数据集
+#物种名斜体样式文件
+#汇总检查文件（验证是否为 3237 样本、2 目、5 科、23 物种、14 国家）
+#这样你直接上传到 iTOL 就能画。
+#一、建议输出目录
+#建议把结果输出到：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+#二、直接可运行的 R 脚本
+#先运行这个：
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results
+#下面这版已经把图例改成中文：
+#Status → 驯化属性
+#Country → 国家
+#Domesticated → 家养动物
+#Captive → 圈养野生动物
+#Wild → 野生动物
+#国家名称也改为中文
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/prepare_itol_fig2_2_no_elephant.R <<'EOF'
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+})
+
+infile <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+outdir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+df <- read.csv(infile, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_order", "host_family", "host_species", "status", "country")
+miss_cols <- setdiff(need_cols, colnames(df))
+if (length(miss_cols) > 0) {
+  stop("缺少列: ", paste(miss_cols, collapse = ", "))
+}
+
+dat <- df[, need_cols] %>%
+  mutate(across(everything(), ~ trimws(as.character(.)))) %>%
+  filter(
+    host_species != "Loxodonta africana",
+    host_family  != "Elephantidae",
+    host_order   != "Proboscidea"
+  )
+
+dat$status[dat$status == "" | is.na(dat$status)] <- "Unknown"
+dat$status <- recode(
+  dat$status,
+  "domesticated" = "Domesticated",
+  "captive" = "Captive",
+  "wild" = "Wild",
+  .default = dat$status
+)
+
+status_levels <- c("Domesticated", "Captive", "Wild", "Unknown")
+status_labels_cn <- c(
+  "Domesticated" = "家养动物",
+  "Captive" = "圈养野生动物",
+  "Wild" = "野生动物",
+  "Unknown" = "未知"
+)
+
+dat$status[!(dat$status %in% status_levels)] <- "Unknown"
+
+country_levels <- c(
+  "China", "Spain", "United Kingdom", "Finland", "USA", "Canada",
+  "South Africa", "Netherlands", "Italy", "Germany", "Hungary",
+  "Argentina", "Brazil", "Denmark"
+)
+
+country_labels_cn <- c(
+  "China" = "中国",
+  "Spain" = "西班牙",
+  "United Kingdom" = "英国",
+  "Finland" = "芬兰",
+  "USA" = "美国",
+  "Canada" = "加拿大",
+  "South Africa" = "南非",
+  "Netherlands" = "荷兰",
+  "Italy" = "意大利",
+  "Germany" = "德国",
+  "Hungary" = "匈牙利",
+  "Argentina" = "阿根廷",
+  "Brazil" = "巴西",
+  "Denmark" = "丹麦"
+)
+
+real_countries <- sort(unique(dat$country))
+if (!setequal(real_countries, country_levels)) {
+  warning("metadata 中的国家与预设国家列表不完全一致，将按实际国家修正。")
+  country_levels <- c(country_levels[country_levels %in% real_countries],
+                      setdiff(real_countries, country_levels))
+  for (cc in setdiff(country_levels, names(country_labels_cn))) {
+    country_labels_cn[cc] <- cc
+  }
+}
+
+summary_df <- data.frame(
+  item = c("samples", "orders", "families", "species", "countries"),
+  value = c(
+    n_distinct(dat$sampleid),
+    n_distinct(dat$host_order),
+    n_distinct(dat$host_family),
+    n_distinct(dat$host_species),
+    n_distinct(dat$country)
+  ),
+  expected = c(3237, 2, 5, 23, 14)
+)
+
+write.csv(
+  summary_df,
+  file.path(outdir, "Fig2_2_no_elephant_summary_check.csv"),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+print(summary_df)
+
+if (summary_df$value[summary_df$item == "samples"] != 3237) stop("样本数不是 3237")
+if (summary_df$value[summary_df$item == "orders"] != 2) stop("目数不是 2")
+if (summary_df$value[summary_df$item == "families"] != 5) stop("科数不是 5")
+if (summary_df$value[summary_df$item == "species"] != 23) stop("物种数不是 23")
+if (summary_df$value[summary_df$item == "countries"] != 14) stop("国家数不是 14")
+
+species_order <- c(
+  "Bos taurus",
+  "Bos bonasus",
+  "Bos grunniens",
+  "Bos grunniens x Bos taurus",
+  "Bos indicus",
+  "Bos indicus x Bos taurus",
+  "Bos mutus",
+  "Bubalus bubalis",
+  "Capra hircus",
+  "Ovis aries",
+  "Pantholops hodgsonii",
+  "Procapra picticaudata",
+  "Cervus canadensis",
+  "Cervus nippon",
+  "Muntiacus crinifrons",
+  "Muntiacus reevesi",
+  "Dama dama",
+  "Rangifer tarandus",
+  "Sus domesticus",
+  "Sus scrofa",
+  "Equus caballus",
+  "Equus kiang",
+  "Diceros bicornis"
+)
+
+real_species <- sort(unique(dat$host_species))
+if (!setequal(real_species, species_order)) {
+  cat("metadata 中实际物种如下：\n")
+  print(real_species)
+  stop("metadata 中的物种集合与脚本中的 species_order 不一致。")
+}
+
+species_meta <- data.frame(
+  species_id = sprintf("sp%02d", seq_along(species_order)),
+  host_species = species_order,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(dat %>% select(host_order, host_family, host_species) %>% distinct(),
+            by = "host_species")
+
+write.csv(
+  species_meta,
+  file.path(outdir, "Fig2_2_species_id_mapping.csv"),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+species_samples <- dat %>%
+  count(host_species, name = "Samples") %>%
+  right_join(species_meta, by = "host_species") %>%
+  arrange(match(host_species, species_order)) %>%
+  select(species_id, host_order, host_family, host_species, Samples)
+
+write.csv(
+  species_samples,
+  file.path(outdir, "Fig2_2_species_sample_counts.csv"),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+species_status <- dat %>%
+  count(host_species, status, name = "n") %>%
+  complete(host_species = species_order, status = status_levels, fill = list(n = 0)) %>%
+  pivot_wider(names_from = status, values_from = n) %>%
+  left_join(species_meta, by = "host_species") %>%
+  arrange(match(host_species, species_order)) %>%
+  select(species_id, host_species, all_of(status_levels))
+
+write.csv(
+  species_status,
+  file.path(outdir, "Fig2_2_species_status_counts.csv"),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+species_country <- dat %>%
+  count(host_species, country, name = "n") %>%
+  complete(host_species = species_order, country = country_levels, fill = list(n = 0)) %>%
+  pivot_wider(names_from = country, values_from = n) %>%
+  left_join(species_meta, by = "host_species") %>%
+  arrange(match(host_species, species_order)) %>%
+  select(species_id, host_species, all_of(country_levels))
+
+write.csv(
+  species_country,
+  file.path(outdir, "Fig2_2_species_country_counts.csv"),
+  row.names = FALSE,
+  quote = TRUE
+)
+
+sid <- setNames(species_meta$species_id, species_meta$host_species)
+
+bovidae <- paste(sid[c(
+  "Bos taurus",
+  "Bos bonasus",
+  "Bos grunniens",
+  "Bos grunniens x Bos taurus",
+  "Bos indicus",
+  "Bos indicus x Bos taurus",
+  "Bos mutus",
+  "Bubalus bubalis",
+  "Capra hircus",
+  "Ovis aries",
+  "Pantholops hodgsonii",
+  "Procapra picticaudata"
+)], collapse = ",")
+
+cervidae <- paste(sid[c(
+  "Cervus canadensis",
+  "Cervus nippon",
+  "Muntiacus crinifrons",
+  "Muntiacus reevesi",
+  "Dama dama",
+  "Rangifer tarandus"
+)], collapse = ",")
+
+suidae <- paste(sid[c("Sus domesticus", "Sus scrofa")], collapse = ",")
+equidae <- paste(sid[c("Equus caballus", "Equus kiang")], collapse = ",")
+rhinocerotidae <- paste(sid[c("Diceros bicornis")], collapse = ",")
+
+newick <- paste0(
+  "(((",
+  bovidae, ")Bovidae,(",
+  cervidae, ")Cervidae,(",
+  suidae, ")Suidae)Artiodactyla,((",
+  equidae, ")Equidae,(",
+  rhinocerotidae, ")Rhinocerotidae)Perissodactyla);"
+)
+
+writeLines(newick, file.path(outdir, "Fig2_2_no_elephant_tree.nwk"), useBytes = TRUE)
+
+label_lines <- c(
+  "LABELS",
+  "SEPARATOR TAB",
+  "DATA",
+  paste(species_meta$species_id, species_meta$host_species, sep = "\t")
+)
+
+writeLines(label_lines, file.path(outdir, "Fig2_2_labels.txt"), useBytes = TRUE)
+
+style_lines <- c(
+  "DATASET_STYLE",
+  "SEPARATOR TAB",
+  "DATASET_LABEL\tSpecies_label_style",
+  "COLOR\t#000000",
+  "DATA",
+  paste(species_meta$species_id, "label", "node", "#000000", "1", "italic", sep = "\t")
+)
+
+writeLines(style_lines, file.path(outdir, "Fig2_2_species_italic_style.txt"), useBytes = TRUE)
+
+sample_text_lines <- c(
+  "DATASET_TEXT",
+  "SEPARATOR TAB",
+  "DATASET_LABEL\tSamples",
+  "COLOR\t#000000",
+  "MARGIN\t5",
+  "SHOW_INTERNAL\t0",
+  "ALL_LABELS_ROTATION\t0",
+  "LABELS_BELOW\t1",
+  "STRAIGHT_LABELS\t1",
+  "ALIGN_TO_TREE\t0",
+  "SIZE_FACTOR\t1",
+  "EXTERNAL_LABEL_SHIFT\t0",
+  "SHOW_LABELS\t1",
+  "LABEL_SIZE_FACTOR\t1",
+  "LABEL_ROTATION\t270",
+  "DATA",
+  paste(
+    species_samples$species_id,
+    species_samples$Samples,
+    "-1",
+    "#000000",
+    "normal",
+    "1",
+    "0",
+    sep = "\t"
+  )
+)
+
+writeLines(sample_text_lines, file.path(outdir, "Fig2_2_samples_text.txt"), useBytes = TRUE)
+
+status_colors <- c(
+  "Domesticated" = "#14BFC6",
+  "Captive" = "#F26B6B",
+  "Wild" = "#FDB45C",
+  "Unknown" = "#BDBDBD"
+)
+
+status_pie_lines <- c(
+  "DATASET_PIECHART",
+  "SEPARATOR TAB",
+  "DATASET_LABEL\t驯化属性",
+  "COLOR\t#000000",
+  paste("FIELD_COLORS", paste(status_colors[status_levels], collapse = "\t"), sep = "\t"),
+  paste("FIELD_LABELS", paste(status_labels_cn[status_levels], collapse = "\t"), sep = "\t"),
+  "LEGEND_TITLE\t驯化属性",
+  paste("LEGEND_SHAPES", paste(rep(1, length(status_levels)), collapse = "\t"), sep = "\t"),
+  paste("LEGEND_COLORS", paste(status_colors[status_levels], collapse = "\t"), sep = "\t"),
+  paste("LEGEND_LABELS", paste(status_labels_cn[status_levels], collapse = "\t"), sep = "\t"),
+  "MARGIN\t10",
+  "SHOW_INTERNAL\t0",
+  "HEIGHT_FACTOR\t1",
+  "BORDER_WIDTH\t0",
+  "DATA"
+)
+
+status_data_lines <- apply(
+  species_status[, c("species_id", status_levels)],
+  1,
+  function(x) paste(c(x[1], "-1", "10", as.numeric(x[-1])), collapse = "\t")
+)
+
+writeLines(
+  c(status_pie_lines, status_data_lines),
+  file.path(outdir, "Fig2_2_status_pie_cn.txt"),
+  useBytes = TRUE
+)
+
+country_colors <- c(
+  "China" = "#8ECFC9",
+  "Spain" = "#D7E8A3",
+  "United Kingdom" = "#D4D0D0",
+  "Finland" = "#D99CA5",
+  "USA" = "#C98F97",
+  "Canada" = "#A7BCC7",
+  "South Africa" = "#F0B35A",
+  "Netherlands" = "#B1D45A",
+  "Italy" = "#E4CEC7",
+  "Germany" = "#D9CCD8",
+  "Hungary" = "#C3A4C9",
+  "Argentina" = "#C7A6CB",
+  "Brazil" = "#C5DFA8",
+  "Denmark" = "#F1E265"
+)
+
+extra_country <- setdiff(country_levels, names(country_colors))
+if (length(extra_country) > 0) {
+  add_cols <- rep("#CCCCCC", length(extra_country))
+  names(add_cols) <- extra_country
+  country_colors <- c(country_colors, add_cols)
+}
+
+country_pie_lines <- c(
+  "DATASET_PIECHART",
+  "SEPARATOR TAB",
+  "DATASET_LABEL\t国家",
+  "COLOR\t#000000",
+  paste("FIELD_COLORS", paste(country_colors[country_levels], collapse = "\t"), sep = "\t"),
+  paste("FIELD_LABELS", paste(country_labels_cn[country_levels], collapse = "\t"), sep = "\t"),
+  "LEGEND_TITLE\t国家",
+  paste("LEGEND_SHAPES", paste(rep(1, length(country_levels)), collapse = "\t"), sep = "\t"),
+  paste("LEGEND_COLORS", paste(country_colors[country_levels], collapse = "\t"), sep = "\t"),
+  paste("LEGEND_LABELS", paste(country_labels_cn[country_levels], collapse = "\t"), sep = "\t"),
+  "MARGIN\t10",
+  "SHOW_INTERNAL\t0",
+  "HEIGHT_FACTOR\t1",
+  "BORDER_WIDTH\t0",
+  "DATA"
+)
+
+country_data_lines <- apply(
+  species_country[, c("species_id", country_levels)],
+  1,
+  function(x) paste(c(x[1], "-1", "10", as.numeric(x[-1])), collapse = "\t")
+)
+
+writeLines(
+  c(country_pie_lines, country_data_lines),
+  file.path(outdir, "Fig2_2_country_pie_cn.txt"),
+  useBytes = TRUE
+)
+
+guide <- c(
+  "iTOL 上传顺序建议：",
+  "1. Fig2_2_no_elephant_tree.nwk",
+  "2. Fig2_2_labels.txt",
+  "3. Fig2_2_species_italic_style.txt",
+  "4. Fig2_2_samples_text.txt",
+  "5. Fig2_2_status_pie_cn.txt",
+  "6. Fig2_2_country_pie_cn.txt",
+  "",
+  "说明：",
+  "树中已经去除 Proboscidea、Elephantidae、Loxodonta africana。",
+  "右侧数据集顺序为 Samples、驯化属性、国家。",
+  "驯化属性图例中文为：家养动物、圈养野生动物、野生动物、未知。",
+  "国家图例使用中文国家名。",
+  "物种名通过 Fig2_2_species_italic_style.txt 设置为斜体。",
+  "iTOL 中建议将字体设置为 Times New Roman 或相近 serif 字体。",
+  "导出时建议优先导出 SVG 或 PDF，再放入 PowerPoint 编辑。"
+)
+
+writeLines(
+  guide,
+  file.path(outdir, "Fig2_2_iTOL_upload_guide.txt"),
+  useBytes = TRUE
+)
+
+cat("\n全部文件已输出到：\n", outdir, "\n")
+EOF
+#然后运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/prepare_itol_fig2_2_no_elephant.R
+#成功后，上传这 6 个文件到 iTOL：
+#Fig2_2_no_elephant_tree.nwk
+#Fig2_2_labels.txt
+#Fig2_2_species_italic_style.txt
+#Fig2_2_samples_text.txt
+#Fig2_2_status_pie_cn.txt
+#Fig2_2_country_pie_cn.txt
+#改 Fig2_2_labels.txt 这个标签文件，不用改 Newick 树文件。
+#原因是树文件里的 sp04、sp06 只是节点 ID，真正显示在图上的物种名来自 Fig2_2_labels.txt。
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+
+cp Fig2_2_labels.txt Fig2_2_labels_backup.txt
+
+sed -i \
+  -e 's/Bos grunniens x Bos taurus/Bos grunniens × Bos taurus/g' \
+  -e 's/Bos indicus x Bos taurus/Bos indicus × Bos taurus/g' \
+  Fig2_2_labels.txt
+#检查一下是否改成功：
+grep "Bos .*taurus" Fig2_2_labels.txt
+#正常应该看到类似：
+#sp01    Bos taurus
+#sp04    Bos grunniens × Bos taurus
+#sp06    Bos indicus × Bos taurus
+#然后在 iTOL 里重新上传这个文件：Fig2_2_labels.txt
+#需要重新生成一个包含属层级的 Newick 树文件，然后重新上传树文件即可。
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+
+cp Fig2_2_no_elephant_tree.nwk Fig2_2_no_elephant_tree_no_genus_backup.nwk
+
+cat > Fig2_2_no_elephant_tree_with_genus.nwk <<'EOF'
+(((((((sp01,sp02,sp03,sp04,sp05,sp06,sp07)Bos,(sp08)Bubalus,(sp09)Capra,(sp10)Ovis,(sp11)Pantholops,(sp12)Procapra)Bovidae,(((sp13,sp14)Cervus,(sp15,sp16)Muntiacus,(sp17)Dama,(sp18)Rangifer)Cervidae),((sp19,sp20)Sus)Suidae)Artiodactyla),(((sp21,sp22)Equus)Equidae,((sp23)Diceros)Rhinocerotidae)Perissodactyla);
+EOF
+#然后在 iTOL 里重新上传这个文件：Fig2_2_no_elephant_tree_with_genus.nwk
+#上传后，再拖入原来的这些文件：
+#Fig2_2_labels.txt
+#Fig2_2_species_italic_style.txt
+#Fig2_2_samples_text.txt
+#Fig2_2_status_pie_cn.txt
+#Fig2_2_country_pie_cn.txt
+#保留属层级，同时让分支尽量规整，并显示目名、科名、属名。
+#1. 重新生成带“目-科-属-物种”的 Newick 文件
+#运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+
+cat > Fig2_2_no_elephant_tree_order_family_genus_species.nwk <<'EOF'
+(((((sp01:1,sp02:1,sp03:1,sp04:1,sp05:1,sp06:1,sp07:1)Bos:1,(sp08:1)Bubalus:1,(sp09:1)Capra:1,(sp10:1)Ovis:1,(sp11:1)Pantholops:1,(sp12:1)Procapra:1)Bovidae:1,((sp13:1,sp14:1)Cervus:1,(sp15:1,sp16:1)Muntiacus:1,(sp17:1)Dama:1,(sp18:1)Rangifer:1)Cervidae:1,((sp19:1,sp20:1)Sus:1)Suidae:1)Artiodactyla:1,(((sp21:1,sp22:1)Equus:1)Equidae:1,((sp23:1)Diceros:1)Rhinocerotidae:1)Perissodactyla:1)Ungulata;
+EOF
+#2. 上传顺序
+#建议重新上传这一套：
+#1. Fig2_2_no_elephant_tree_order_family_genus_species.nwk
+#2. Fig2_2_labels.txt
+#3. Fig2_2_species_italic_style.txt
+#4. Fig2_2_samples_text.txt
+#5. Fig2_2_status_pie_cn.txt
+#6. Fig2_2_country_pie_cn.txt
+#排序逻辑建议统一成：
+#目：按该目样本总数从大到小
+#科：在各目内按该科样本总数从大到小
+#属：在各科内按该属样本总数从大到小
+#物种：在各属内按该物种样本数从大到小
+#这样就会出现你说的那种效果，例如如果样本量是：
+#Bovidae > Suidae > Equidae > Cervidae > Rhinocerotidae
+#那么图里就按这个顺序展开。
+#你直接运行下面这段代码，它会基于你的 metadata 自动统计并生成一版按样本数排序的树。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+
+cat > make_tree_sorted_by_sample_size.R <<'EOF'
+suppressPackageStartupMessages({
+  library(dplyr)
+})
+
+metadata_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+mapping_file  <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant/Fig2_2_species_id_mapping.csv"
+out_file      <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant/Fig2_2_no_elephant_tree_sample_size_order.nwk"
+order_table   <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant/Fig2_2_sample_size_order_table.csv"
+
+df <- read.csv(metadata_file, stringsAsFactors = FALSE, check.names = FALSE)
+map <- read.csv(mapping_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+need_cols <- c("sampleid", "host_order", "host_family", "host_species")
+miss_cols <- setdiff(need_cols, colnames(df))
+if (length(miss_cols) > 0) {
+  stop("metadata 缺少列: ", paste(miss_cols, collapse = ", "))
+}
+
+df <- df %>%
+  mutate(across(all_of(need_cols), ~ trimws(as.character(.)))) %>%
+  filter(
+    host_species != "Loxodonta africana",
+    host_family  != "Elephantidae",
+    host_order   != "Proboscidea"
+  ) %>%
+  mutate(
+    host_genus = sub(" .*", "", host_species)
+  )
+
+sp_info <- df %>%
+  count(host_order, host_family, host_genus, host_species, name = "species_n") %>%
+  left_join(map[, c("species_id", "host_species")], by = "host_species")
+
+if (any(is.na(sp_info$species_id))) {
+  print(sp_info %>% filter(is.na(species_id)))
+  stop("有物种没有匹配到 species_id，请检查 Fig2_2_species_id_mapping.csv")
+}
+
+genus_n <- sp_info %>%
+  group_by(host_order, host_family, host_genus) %>%
+  summarise(genus_n = sum(species_n), .groups = "drop")
+
+family_n <- sp_info %>%
+  group_by(host_order, host_family) %>%
+  summarise(family_n = sum(species_n), .groups = "drop")
+
+order_n <- sp_info %>%
+  group_by(host_order) %>%
+  summarise(order_n = sum(species_n), .groups = "drop")
+
+sp_info2 <- sp_info %>%
+  left_join(genus_n, by = c("host_order", "host_family", "host_genus")) %>%
+  left_join(family_n, by = c("host_order", "host_family")) %>%
+  left_join(order_n, by = "host_order") %>%
+  arrange(
+    desc(order_n), host_order,
+    desc(family_n), host_family,
+    desc(genus_n), host_genus,
+    desc(species_n), host_species
+  )
+
+write.csv(sp_info2, order_table, row.names = FALSE, quote = TRUE)
+
+make_clade <- function(x, label) {
+  paste0("(", paste(x, collapse = ","), ")", label, ":1")
+}
+
+order_strings <- c()
+
+for (ord in unique(sp_info2$host_order)) {
+  d_ord <- sp_info2 %>% filter(host_order == ord)
+  family_strings <- c()
+
+  for (fam in unique(d_ord$host_family)) {
+    d_fam <- d_ord %>% filter(host_family == fam)
+    genus_strings <- c()
+
+    for (gen in unique(d_fam$host_genus)) {
+      d_gen <- d_fam %>% filter(host_genus == gen)
+      species_strings <- paste0(d_gen$species_id, ":1")
+      genus_strings <- c(genus_strings, make_clade(species_strings, gen))
+    }
+
+    family_strings <- c(family_strings, make_clade(genus_strings, fam))
+  }
+
+  order_strings <- c(order_strings, make_clade(family_strings, ord))
+}
+
+newick <- paste0("(", paste(order_strings, collapse = ","), ");")
+writeLines(newick, out_file, useBytes = TRUE)
+
+cat("已生成按样本量从大到小排序的树文件：\n")
+cat(out_file, "\n\n")
+cat("排序检查表：\n")
+cat(order_table, "\n")
+EOF
+
+Rscript make_tree_sorted_by_sample_size.R
+#运行后会生成两个文件：
+#Fig2_2_no_elephant_tree_sample_size_order.nwk
+#Fig2_2_sample_size_order_table.csv
+#其中真正要上传到 iTOL 的是：
+#Fig2_2_no_elephant_tree_sample_size_order.nwk
+#上传顺序建议仍然是：
+#1. Fig2_2_no_elephant_tree_sample_size_order.nwk
+#2. Fig2_2_labels.txt
+#3. Fig2_2_species_italic_style.txt
+#4. Fig2_2_samples_text.txt
+#5. Fig2_2_status_pie_cn.txt
+#6. Fig2_2_country_pie_cn.txt
+#1. 先生成“目和科名标签文件”
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/itol_fig2_2_no_elephant
+
+cat > Fig2_2_internal_order_family_labels_sample_size.txt <<'EOF'
+LABELS
+SEPARATOR TAB
+DATA
+sp01|sp20	Artiodactyla
+sp01|sp12	Bovidae
+sp19|sp20	Suidae
+sp13|sp18	Cervidae
+sp21|sp23	Perissodactyla
+sp21|sp22	Equidae
+sp23	Rhinocerotidae
+EOF
+#然后把这个文件拖到 iTOL 页面里：Fig2_2_internal_order_family_labels_sample_size.txt
