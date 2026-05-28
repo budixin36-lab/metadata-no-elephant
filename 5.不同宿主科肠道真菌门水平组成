@@ -1,0 +1,869 @@
+#重做 图3-3 不同宿主科肠道真菌门水平组成，并且：
+#使用 no_elephant 数据；
+#只保留 5 个宿主科：Bovidae、Suidae、Equidae、Cervidae、Rhinocerotidae；
+#不合并 Others，所有检出的门都保留；
+#计算逻辑沿用你原来的思路：
+#先按样本标准化为相对多度（%）→ 再按宿主科求平均相对多度；
+#输出：
+#PDF
+#600 dpi 白底 PNG
+#统计表 csv
+#summary txt
+#直接运行下面整段命令
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R <<'EOF'
+## ============================================================
+## 图3-3 不同宿主科肠道真菌门水平组成
+## no_elephant 版
+##
+## 说明：
+## 1. 使用 no_elephant 最终 metadata + SH abundance table；
+## 2. 每个样本先标准化为相对多度（%）；
+## 3. 再按 host_family 计算门水平平均相对多度；
+## 4. 不合并 Others，所有门全部保留；
+## 5. 输出 600 dpi 白底 PNG。
+## ============================================================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(stringr)
+  library(scales)
+})
+
+## -----------------------------
+## 0. Helper functions
+## -----------------------------
+clean_taxon_name <- function(x) {
+  x <- as.character(x)
+  x <- str_trim(x)
+  x <- str_replace_all(x, "^['\"]|['\"]$", "")
+  x <- str_replace(x, "^[a-z]__", "")
+  x <- str_replace_all(x, "_", " ")
+  x[is.na(x) | x == "" | tolower(x) %in% c("na", "unassigned", "unidentified", "uncultured")] <- "Unclassified"
+  x
+}
+
+extract_rank_from_taxonomy <- function(taxonomy, rank = "p") {
+  x <- str_extract(as.character(taxonomy), paste0(rank, "__[^;|]+"))
+  x <- str_replace(x, paste0("^", rank, "__"), "")
+  clean_taxon_name(x)
+}
+
+calc_group_mean <- function(abund_mat, meta_df, group_col = "host_family", group_levels = NULL) {
+  if (is.null(group_levels)) group_levels <- unique(meta_df[[group_col]])
+  out <- sapply(group_levels, function(g) {
+    samp <- meta_df$sample_id[meta_df[[group_col]] == g]
+    if (length(samp) == 1) {
+      abund_mat[, samp]
+    } else {
+      rowMeans(abund_mat[, samp, drop = FALSE])
+    }
+  })
+  out <- as.matrix(out)
+  colnames(out) <- group_levels
+  out
+}
+
+## -----------------------------
+## 1. Paths
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+## no_elephant 目录可能没有单独复制 taxonomy 文件，因此自动回退到原目录
+taxonomy_candidates <- c(
+  file.path(base_dir, "taxonomy/SH_taxonomy_matched.tsv"),
+  "/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv"
+)
+
+taxonomy_file <- taxonomy_candidates[file.exists(taxonomy_candidates)][1]
+
+if (is.na(taxonomy_file)) {
+  stop(
+    "找不到 SH_taxonomy_matched.tsv。已尝试：\n",
+    paste(taxonomy_candidates, collapse = "\n")
+  )
+}
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Using taxonomy file: ", taxonomy_file, "\n", sep = "")
+
+## -----------------------------
+## 2. Read metadata
+## -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_sample_cols <- c("sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID")
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("没有找到样本 ID 列，请检查 metadata。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+meta <- meta %>%
+  mutate(
+    sample_id = .data[[sample_col]],
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family != "NA",
+    host_family != "missing",
+    host_family != "not_recorded",
+    host_family != "not reported"
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+## -----------------------------
+## 3. Read SH abundance table
+## -----------------------------
+if (!file.exists(sh_table_file)) {
+  stop("找不到 SH abundance table：", sh_table_file)
+}
+
+sh_lines <- readLines(sh_table_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+  stop(
+    "SH abundance table 表头异常。文件前几行：\n",
+    paste(head(sh_lines, 5), collapse = "\n")
+  )
+}
+
+sh_raw <- read.delim(
+  text = paste(sh_lines, collapse = "\n"),
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(sh_raw)[1] <- "SH_ID"
+
+taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+if (length(taxonomy_cols) > 0) {
+  sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+}
+
+rownames(sh_raw) <- sh_raw$SH_ID
+mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+mode(mat) <- "numeric"
+
+## -----------------------------
+## 4. Match samples
+## -----------------------------
+common_samples <- intersect(colnames(mat), meta$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 样本名与 metadata 样本名没有交集。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta2 <- meta %>%
+  filter(sample_id %in% common_samples) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2 <- meta2[match(colnames(mat), meta2$sample_id), ]
+
+## 宿主科顺序：按样本数从大到小
+family_sample_counts <- meta2 %>%
+  count(host_family, name = "sample_n") %>%
+  arrange(desc(sample_n))
+
+host_families <- family_sample_counts$host_family
+
+cat("Matched samples: ", ncol(mat), "\n", sep = "")
+cat("Host family sample numbers:\n")
+print(family_sample_counts)
+
+## -----------------------------
+## 5. Convert to relative abundance (%)
+## -----------------------------
+sample_sums <- colSums(mat)
+
+if (any(sample_sums == 0)) {
+  stop("仍存在总 reads = 0 的样本，请检查。")
+}
+
+mat_rel <- sweep(mat, 2, sample_sums, FUN = "/") * 100
+
+## -----------------------------
+## 6. Read taxonomy and parse phylum
+## -----------------------------
+tax_raw <- read.delim(
+  taxonomy_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_id_cols <- c("SH", "SH_ID", "Feature.ID", "FeatureID", "feature_id", "ID", "id", "#OTUID", "OTUID")
+id_col <- possible_id_cols[possible_id_cols %in% colnames(tax_raw)][1]
+if (is.na(id_col)) {
+  id_col <- colnames(tax_raw)[1]
+  message("未识别标准 SH 列，默认使用第一列：", id_col)
+}
+
+possible_tax_cols <- c("taxonomy", "Taxon", "taxon", "Taxonomy", "UNITE_taxonomy")
+tax_col <- possible_tax_cols[possible_tax_cols %in% colnames(tax_raw)][1]
+
+if (!is.na(tax_col)) {
+  tax_df <- tax_raw %>%
+    transmute(
+      SH_ID = .data[[id_col]],
+      taxonomy = as.character(.data[[tax_col]])
+    ) %>%
+    mutate(
+      phylum = extract_rank_from_taxonomy(taxonomy, "p")
+    )
+} else {
+  if (!"phylum" %in% colnames(tax_raw)) {
+    stop("taxonomy 文件中既没有 taxonomy 列，也没有 phylum 列。")
+  }
+  tax_df <- tax_raw %>%
+    transmute(
+      SH_ID = .data[[id_col]],
+      phylum = clean_taxon_name(phylum)
+    )
+}
+
+tax_df <- tax_df %>%
+  mutate(
+    phylum = ifelse(is.na(phylum) | phylum == "", "Unclassified", phylum)
+  ) %>%
+  distinct(SH_ID, .keep_all = TRUE)
+
+tax_match <- tax_df[match(rownames(mat_rel), tax_df$SH_ID), ]
+
+if (nrow(tax_match) != nrow(mat_rel)) {
+  stop("taxonomy 与丰度表 feature 行数不匹配。")
+}
+
+tax_match$phylum[is.na(tax_match$phylum)] <- "Unclassified"
+
+## -----------------------------
+## 7. Aggregate to phylum
+## -----------------------------
+phylum_mat <- rowsum(mat_rel, group = tax_match$phylum, reorder = FALSE)
+
+## -----------------------------
+## 8. Mean composition by host_family
+## -----------------------------
+phylum_family_mean <- calc_group_mean(phylum_mat, meta2, "host_family", host_families)
+
+write.csv(
+  as.data.frame(phylum_family_mean) %>% rownames_to_column("phylum"),
+  file.path(out_dir, "host_family_phylum_mean_relative_abundance_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## -----------------------------
+## 9. Plot all phyla (no Others)
+## -----------------------------
+phylum_plot_df <- as.data.frame(phylum_family_mean) %>%
+  rownames_to_column("phylum") %>%
+  pivot_longer(
+    cols = all_of(host_families),
+    names_to = "host_family",
+    values_to = "relative_abundance"
+  )
+
+## 门顺序：按整体平均相对多度从高到低
+phylum_order <- phylum_plot_df %>%
+  group_by(phylum) %>%
+  summarise(mean_abund = mean(relative_abundance), .groups = "drop") %>%
+  arrange(desc(mean_abund)) %>%
+  pull(phylum)
+
+phylum_plot_df$phylum <- factor(phylum_plot_df$phylum, levels = phylum_order)
+phylum_plot_df$host_family <- factor(phylum_plot_df$host_family, levels = host_families)
+
+## 保存长表，便于后续写正文
+write.csv(
+  phylum_plot_df,
+  file.path(out_dir, "host_family_phylum_mean_relative_abundance_long_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## 配色
+n_phyla <- length(phylum_order)
+fill_cols <- setNames(hcl.colors(n_phyla, palette = "Dynamic"), phylum_order)
+
+p_phylum <- ggplot(phylum_plot_df, aes(x = host_family, y = relative_abundance, fill = phylum)) +
+  geom_col(width = 0.75, color = NA) +
+  scale_fill_manual(values = fill_cols) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "Mean relative abundance (%)",
+    fill = "Phylum"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1, colour = "black"),
+    axis.text.y = element_text(colour = "black"),
+    axis.title.y = element_text(colour = "black"),
+    legend.title = element_text(colour = "black", size = 11),
+    legend.text = element_text(colour = "black", size = 9),
+    legend.position = "right"
+  )
+
+ggsave(
+  file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.pdf"),
+  p_phylum,
+  width = 9,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+ggsave(
+  file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.png"),
+  p_phylum,
+  width = 9,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+## -----------------------------
+## 10. Summary for text
+## -----------------------------
+phylum_summary <- phylum_plot_df %>%
+  pivot_wider(
+    names_from = host_family,
+    values_from = relative_abundance
+  ) %>%
+  mutate(
+    overall_mean = rowMeans(across(all_of(host_families)))
+  ) %>%
+  arrange(desc(overall_mean))
+
+write.csv(
+  phylum_summary,
+  file.path(out_dir, "host_family_phylum_summary_table_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_txt <- file.path(out_dir, "host_family_phylum_summary_no_elephant.txt")
+
+sink(summary_txt)
+cat("Host family phylum composition summary, no_elephant version\n")
+cat("=========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input SH abundance table:\n", sh_table_file, "\n\n")
+cat("Input taxonomy file:\n", taxonomy_file, "\n\n")
+cat("Matched samples:", ncol(mat_rel), "\n\n")
+cat("Host family sample counts:\n")
+print(family_sample_counts)
+cat("\nHost family phylum mean relative abundance (%):\n")
+print(phylum_summary)
+sink()
+
+cat("\nDone!\n")
+cat("PNG:\n", file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.png"), "\n")
+cat("PDF:\n", file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.pdf"), "\n")
+cat("Summary TXT:\n", summary_txt, "\n")
+cat("Summary CSV:\n", file.path(out_dir, "host_family_phylum_summary_table_no_elephant.csv"), "\n")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R
+#直接覆盖并运行完整脚本
+#你在 WSL 终端整段运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-3 不同宿主科肠道真菌门水平组成
+## no_elephant 版
+##
+## 说明：
+## 1. 参考最终版 04d_plot_host_family_all_phylum_bar.R；
+## 2. 使用 no_elephant 的 phylum_abundance_table.tsv；
+## 3. 每个样本内重新计算门水平相对多度；
+## 4. 再计算各宿主科平均相对多度；
+## 5. 所有门全部保留，不合并 Others；
+## 6. 非渐变高区分度颜色；
+## 7. 输出 600 dpi 白底 PNG。
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(readr)
+  library(stringr)
+  library(grid)
+})
+
+## =========================
+## 1. 路径设置
+## =========================
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+
+base_dir <- file.path(
+  project_dir,
+  "globalfungi_style_test_no_elephant"
+)
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+phylum_table_file <- file.path(
+  base_dir,
+  "taxonomy/phylum_abundance_table.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (!file.exists(metadata_file)) {
+  stop("找不到 metadata 文件：", metadata_file)
+}
+
+if (!file.exists(phylum_table_file)) {
+  stop("找不到 no_elephant 门水平丰度表：", phylum_table_file)
+}
+
+## =========================
+## 2. 读取 metadata
+## =========================
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+sample_id_candidates <- c("#SampleID", "sample_id", "SampleID", "sampleid", "sample")
+sample_id_col <- sample_id_candidates[sample_id_candidates %in% colnames(meta)][1]
+
+if (is.na(sample_id_col)) {
+  stop("metadata 中未找到样本ID列。请检查是否包含 #SampleID / sample_id / SampleID / sampleid 等列名。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中未找到 host_family 列。")
+}
+
+meta2 <- meta %>%
+  dplyr::select(all_of(sample_id_col), host_family) %>%
+  dplyr::rename(sample_id = all_of(sample_id_col)) %>%
+  dplyr::mutate(
+    sample_id = as.character(sample_id),
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  dplyr::filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != ""
+  )
+
+## no_elephant 版只保留 5 个宿主科
+## 顺序按你的旧图和当前章节习惯：牛科、猪科、马科、鹿科、犀科
+family_order <- c("Bovidae", "Suidae", "Equidae", "Cervidae", "Rhinocerotidae")
+
+meta2 <- meta2 %>%
+  dplyr::filter(host_family %in% family_order) %>%
+  dplyr::mutate(host_family = factor(host_family, levels = family_order))
+
+## =========================
+## 3. 读取 phylum abundance table
+##    默认格式：第一列为 phylum，后面每列为样本
+## =========================
+phylum_tab <- read.delim(
+  phylum_table_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (ncol(phylum_tab) < 2) {
+  stop("phylum_abundance_table.tsv 列数异常，至少应为 2 列。")
+}
+
+colnames(phylum_tab)[1] <- "phylum"
+
+phylum_tab$phylum <- as.character(phylum_tab$phylum)
+phylum_tab$phylum[is.na(phylum_tab$phylum) | phylum_tab$phylum == ""] <- "Unclassified"
+
+## 转成长表
+phylum_long <- phylum_tab %>%
+  pivot_longer(
+    cols = -phylum,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    abundance = suppressWarnings(as.numeric(abundance)),
+    sample_id = as.character(sample_id),
+    phylum = as.character(phylum)
+  ) %>%
+  filter(!is.na(abundance))
+
+## 只保留共有样本
+common_samples <- intersect(meta2$sample_id, unique(phylum_long$sample_id))
+
+if (length(common_samples) == 0) {
+  stop("metadata 与 phylum_abundance_table.tsv 之间没有匹配到共同样本ID。")
+}
+
+meta2 <- meta2 %>% filter(sample_id %in% common_samples)
+phylum_long <- phylum_long %>% filter(sample_id %in% common_samples)
+
+cat("Matched samples:", length(common_samples), "\n")
+cat("Host family sample numbers:\n")
+print(table(meta2$host_family))
+
+## =========================
+## 4. 每个样本内重新计算相对丰度 (%)
+## =========================
+phylum_rel <- phylum_long %>%
+  group_by(sample_id) %>%
+  mutate(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  )
+
+## 合并宿主科信息
+plot_df <- phylum_rel %>%
+  left_join(meta2, by = "sample_id") %>%
+  filter(!is.na(host_family))
+
+## =========================
+## 5. 计算宿主科平均相对丰度
+## =========================
+family_phylum_mean <- plot_df %>%
+  group_by(host_family, phylum) %>%
+  summarise(
+    mean_rel_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 所有门都保留；按整体平均丰度从高到低排序
+phylum_order <- family_phylum_mean %>%
+  group_by(phylum) %>%
+  summarise(overall_mean = mean(mean_rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(overall_mean)) %>%
+  pull(phylum)
+
+family_phylum_mean <- family_phylum_mean %>%
+  complete(
+    host_family = family_order,
+    phylum = phylum_order,
+    fill = list(mean_rel_abundance = 0)
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order),
+    phylum = factor(phylum, levels = phylum_order)
+  )
+
+## =========================
+## 6. 检查每个宿主科合计是否为 100%
+## =========================
+family_total_check <- family_phylum_mean %>%
+  group_by(host_family) %>%
+  summarise(
+    total_mean_rel_abundance = sum(mean_rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write.csv(
+  family_total_check,
+  file.path(out_dir, "host_family_phylum_total_check_no_elephant.csv"),
+  row.names = FALSE
+)
+
+cat("Family total check:\n")
+print(family_total_check)
+
+if (any(abs(family_total_check$total_mean_rel_abundance - 100) > 0.01)) {
+  warning("有宿主科门水平平均相对多度合计明显不等于100%，请检查输出的 total_check 表。")
+}
+
+## 输出汇总表
+write.csv(
+  family_phylum_mean,
+  file.path(out_dir, "host_family_all_phylum_mean_relative_abundance_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## =========================
+## 7. 高区分度非渐变轮换配色
+##    按门整体丰度顺序配色；相邻高丰度门尽量区分明显
+## =========================
+cycle_cols <- c(
+  "#E64B35",  # 红
+  "#4DBBD5",  # 蓝青
+  "#00A087",  # 绿
+  "#F39B7F",  # 橙粉
+  "#3C5488",  # 深蓝
+  "#91D1C2",  # 浅青绿
+  "#DCB000",  # 金黄
+  "#7E6148",  # 棕
+  "#B24745",  # 酒红
+  "#7E57C2",  # 紫
+  "#00BFC4",  # 青
+  "#F8766D",  # 亮红粉
+  "#619CFF",  # 蓝
+  "#C77CFF",  # 紫粉
+  "#A3A500",  # 橄榄
+  "#00BA38",  # 鲜绿
+  "#FF61C3",  # 粉
+  "#B79F00"   # 黄褐
+)
+
+all_cols <- rep(cycle_cols, length.out = length(phylum_order))
+phylum_cols <- setNames(all_cols, phylum_order)
+
+## =========================
+## 8. 作图
+## =========================
+p <- ggplot(
+  family_phylum_mean,
+  aes(x = host_family, y = mean_rel_abundance, fill = phylum)
+) +
+  geom_bar(
+    stat = "identity",
+    width = 0.72,
+    color = "grey35",
+    linewidth = 0.18
+  ) +
+  scale_fill_manual(values = phylum_cols, drop = FALSE) +
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = "Phylum"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    plot.title = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 18, colour = "black"),
+    axis.text.x = element_text(size = 13, angle = 0, hjust = 0.5, vjust = 0.5, colour = "black"),
+    axis.text.y = element_text(size = 13, colour = "black"),
+    axis.line = element_line(linewidth = 0.8, colour = "black"),
+    axis.ticks = element_line(linewidth = 0.8, colour = "black"),
+    axis.ticks.length = unit(0.18, "cm"),
+    legend.position = "right",
+    legend.title = element_text(size = 16, colour = "black"),
+    legend.text = element_text(size = 11, colour = "black"),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA)
+  )
+
+## =========================
+## 9. 保存图片
+## =========================
+png_file <- file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.png")
+pdf_file <- file.path(out_dir, "Fig3_3_host_family_phylum_stacked_bar_no_elephant.pdf")
+
+ggsave(
+  filename = png_file,
+  plot = p,
+  width = 9.5,
+  height = 6.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = pdf_file,
+  plot = p,
+  width = 9.5,
+  height = 6.2,
+  bg = "white"
+)
+
+## 另存一份和最终版旧脚本类似的命名，方便你查找
+ggsave(
+  filename = file.path(out_dir, "host_family_all_phylum_barplot_no_elephant.png"),
+  plot = p,
+  width = 9.5,
+  height = 6.2,
+  dpi = 600,
+  bg = "white"
+)
+
+## =========================
+## 10. Summary for text
+## =========================
+summary_table <- family_phylum_mean %>%
+  pivot_wider(
+    names_from = host_family,
+    values_from = mean_rel_abundance
+  ) %>%
+  mutate(
+    overall_mean = rowMeans(across(all_of(family_order)), na.rm = TRUE)
+  ) %>%
+  arrange(desc(overall_mean))
+
+write.csv(
+  summary_table,
+  file.path(out_dir, "host_family_phylum_summary_table_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_txt <- file.path(out_dir, "host_family_phylum_summary_no_elephant.txt")
+
+sink(summary_txt)
+cat("Host family phylum composition summary, no_elephant version\n")
+cat("=========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input phylum abundance table:\n", phylum_table_file, "\n\n")
+cat("Matched samples:", length(common_samples), "\n\n")
+cat("Host family sample counts:\n")
+print(table(meta2$host_family))
+cat("\nFamily total check, should be close to 100:\n")
+print(family_total_check)
+cat("\nHost family phylum mean relative abundance (%):\n")
+print(summary_table)
+sink()
+
+cat("Done!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("PNG:\n", png_file, "\n")
+cat("PDF:\n", pdf_file, "\n")
+cat("CSV:\n", file.path(out_dir, "host_family_all_phylum_mean_relative_abundance_no_elephant.csv"), "\n")
+cat("Total check:\n", file.path(out_dir, "host_family_phylum_total_check_no_elephant.csv"), "\n")
+cat("Summary:\n", summary_txt, "\n")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R
+#这次你重点看两个文件
+#1. 图
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_3_host_family_phylum_stacked_bar_no_elephant.png
+#2. 检查每个宿主科是否合计 100
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/host_family_phylum_total_check_no_elephant.csv
+#如果 total_mean_rel_abundance 都接近 100，这次计算就没问题；如果图中还有柱子没到 100，那就是显示或绘图层面的问题，不是计算层面的问题。
+#我也补充检查出的问题
+#除了你列的 4 点，我还看到上一版还有这些需要改：
+#图例颜色是连续渐变感太强，已改成高区分度轮换色；
+#鹿科柱子异常，已用 coord_cartesian() 修复；
+#y 轴英文已改成中文；
+#横轴宿主科名已改为水平；
+#输出文件名同时保留 Fig3_3... 和 host_family_all_phylum...，方便你后面找；
+#结果目录单独放在 chapter3_family_composition_no_elephant，不覆盖旧版。
+#no_elephant 只是剔除象科样本，原始最终目录的门水平丰度表仍然可以用；脚本后面会根据 no_elephant metadata 只保留 3237 个样本，不会把象科样本算进去。
+#你不用重写脚本，直接运行下面这段自动修复命令。
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+old = '''phylum_table_file <- file.path(
+  base_dir,
+  "taxonomy/phylum_abundance_table.tsv"
+)'''
+
+new = '''## no_elephant 目录可能没有单独复制 phylum_abundance_table.tsv；
+## 因为 no_elephant 只是剔除样本，门水平丰度表可从原 globalfungi_style_test 目录读取，
+## 后续会用 no_elephant metadata 只保留剔除象科后的样本。
+phylum_table_candidates <- c(
+  file.path(base_dir, "taxonomy/phylum_abundance_table.tsv"),
+  file.path(base_dir, "abundance_tables/phylum_abundance_table.tsv"),
+  "/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/phylum_abundance_table.tsv"
+)
+
+phylum_table_file <- phylum_table_candidates[file.exists(phylum_table_candidates)][1]
+
+if (is.na(phylum_table_file)) {
+  stop(
+    "找不到 phylum_abundance_table.tsv。已尝试以下路径：\\n",
+    paste(phylum_table_candidates, collapse = "\\n")
+  )
+}
+
+cat("Using phylum abundance table: ", phylum_table_file, "\\n", sep = "")'''
+
+if old not in txt:
+    raise SystemExit("没有找到 phylum_table_file 原始代码块。可能脚本已经被改过，请把脚本开头路径设置部分发我。")
+
+txt = txt.replace(old, new)
+
+## 删除原来这段死板的检查，因为现在已经在候选路径里检查过
+old_check = '''if (!file.exists(phylum_table_file)) {
+  stop("找不到 no_elephant 门水平丰度表：", phylum_table_file)
+}
+
+'''
+txt = txt.replace(old_check, "")
+
+script.write_text(txt, encoding="utf-8")
+print("已修复 phylum_abundance_table.tsv 路径自动回退：")
+print(script)
+PY
+#重新运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/05_host_family_phylum_bar_no_elephant.R
