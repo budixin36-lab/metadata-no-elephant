@@ -1,0 +1,1500 @@
+#这次要做的是宿主科 × Top20 属水平弦图，不是国家/物种那一套批量图。你给的第四章弦图代码更适合作为版式参考：它包含外圈刻度、来源组成条、按属上色、600 dpi 输出等逻辑；第三章旧代码里也有“属侧宿主科贡献组成条”和 Fig3_4_host_family_top20_genus_chord_with_axis_and_source_bar_v2.png 这一版记录。
+#下面这版是完整脚本，不用你改已有脚本。它会生成你指定的文件名：
+#Fig3_4_host_family_top20_genus_chord_enhanced_final.png
+#它做的事情是：
+#使用 no_elephant metadata；
+#genus 表优先找 no_elephant，没有就自动回退到原 globalfungi_style_test/taxonomy/genus_abundance_table.tsv；
+#每个样本先转为属水平相对多度；
+#按宿主科计算平均相对多度；
+#筛选整体平均相对多度最高的 Top20 属；
+#弦宽表示该属在对应宿主科中的平均相对多度；
+#真菌属侧添加“宿主科来源组成条”；
+#外圈刻度按你说的规则：
+#扇区最大值 > 20：每 20 标一个刻度；
+#15–20：标 0、10、最大值；
+#<15：只标 0 和最大值；
+#宿主科名、属名与刻度距离尽量拉近；
+#宿主科名不设太大；
+#PNG 为 600 dpi 白底。
+#直接运行完整脚本
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-4 不同宿主科肠道真菌优势属水平组成弦图
+## no_elephant 版
+##
+## 输出：
+## Fig3_4_host_family_top20_genus_chord_enhanced_final.png
+## Fig3_4_host_family_top20_genus_chord_enhanced_final.pdf
+##
+## 统计口径：
+## 1. 每个样本内先转为属水平相对多度；
+## 2. 按宿主科计算各属平均相对多度；
+## 3. 按5个宿主科整体平均相对多度筛选Top20属；
+## 4. 弦宽表示属在对应宿主科中的平均相对多度。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "tidyr", "tibble", "circlize")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(circlize)
+})
+
+## =========================
+## 1. 路径
+## =========================
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+base_dir <- file.path(project_dir, "globalfungi_style_test_no_elephant")
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_table_candidates <- c(
+  file.path(base_dir, "taxonomy/genus_abundance_table.tsv"),
+  file.path(base_dir, "abundance_tables/genus_abundance_table.tsv"),
+  file.path(project_dir, "globalfungi_style_test/taxonomy/genus_abundance_table.tsv")
+)
+
+genus_table_file <- genus_table_candidates[file.exists(genus_table_candidates)][1]
+
+if (is.na(genus_table_file)) {
+  stop(
+    "找不到 genus_abundance_table.tsv。已尝试以下路径：\n",
+    paste(genus_table_candidates, collapse = "\n")
+  )
+}
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Using metadata file: ", metadata_file, "\n", sep = "")
+cat("Using genus abundance table: ", genus_table_file, "\n", sep = "")
+
+## =========================
+## 2. 参数
+## =========================
+top_n_genus <- 20
+
+## 过滤极小连接，仅用于作图；原始矩阵仍完整输出
+## 如果觉得弦太少，可改成 0；如果太乱，可改成 0.01
+min_link_value <- 0.001
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Equidae",
+  "Cervidae",
+  "Rhinocerotidae"
+)
+
+family_colors <- c(
+  Bovidae = "#D8AA00",
+  Suidae = "#E41A1C",
+  Equidae = "#00BFC4",
+  Cervidae = "#2CA02C",
+  Rhinocerotidae = "#619CFF"
+)
+
+## 高区分度属颜色，Top20循环使用
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 3. 工具函数
+## =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "not applicable", "Not applicable",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "Cannot find column for ", label,
+      ". Tried: ", paste(candidates, collapse = ", "),
+      "\nExisting columns:\n", paste(cols, collapse = ", ")
+    )
+  }
+  hit
+}
+
+clean_genus <- function(x) {
+  x <- trimws(as.character(x))
+  x <- sub("^.*g__", "g__", x)
+  x <- sub("^g__", "", x)
+  x <- sub("^Genus__", "", x)
+  x[x == "" | is.na(x)] <- "Unassigned"
+  x[x %in% c("NA", "N/A", "na", "n/a", "unknown", "Unknown")] <- "Unassigned"
+  x
+}
+
+fmt_tick <- function(x) {
+  ifelse(abs(x - round(x)) < 1e-6, as.character(round(x)), sprintf("%.1f", x))
+}
+
+nice_axis_at <- function(xmax) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  unique(at)
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 4. 读取 metadata
+## =========================
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  stringsAsFactors = FALSE
+)
+
+meta2 <- meta2[complete.cases(meta2), ]
+meta2 <- meta2[!duplicated(meta2$sample_id), ]
+meta2 <- meta2 %>%
+  filter(host_family %in% family_order) %>%
+  mutate(host_family = factor(host_family, levels = family_order))
+
+cat("Metadata samples after family filtering:\n")
+print(table(meta2$host_family))
+
+## =========================
+## 5. 读取 genus abundance table
+## =========================
+genus_tab <- read.delim(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table.tsv 列数异常，至少应为2列。")
+}
+
+colnames(genus_tab)[1] <- "genus"
+genus_tab$genus <- clean_genus(genus_tab$genus)
+
+sample_cols <- setdiff(colnames(genus_tab), "genus")
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(as.character(genus_tab[[cc]])))
+}
+genus_tab[is.na(genus_tab)] <- 0
+
+## 合并重复 genus
+genus_tab <- genus_tab %>%
+  group_by(genus) %>%
+  summarise(across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+## 转长表
+genus_long <- genus_tab %>%
+  pivot_longer(
+    cols = -genus,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    abundance = suppressWarnings(as.numeric(abundance))
+  ) %>%
+  filter(!is.na(abundance))
+
+## =========================
+## 6. 对齐样本并转相对多度
+## =========================
+common_samples <- intersect(meta2$sample_id, unique(genus_long$sample_id))
+
+if (length(common_samples) == 0) {
+  stop("metadata 与 genus 表没有匹配到共同样本。")
+}
+
+meta2 <- meta2 %>% filter(sample_id %in% common_samples)
+genus_long <- genus_long %>% filter(sample_id %in% common_samples)
+
+sample_total <- genus_long %>%
+  group_by(sample_id) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop")
+
+valid_samples <- sample_total$sample_id[sample_total$total_abundance > 0]
+
+meta2 <- meta2 %>% filter(sample_id %in% valid_samples)
+genus_long <- genus_long %>% filter(sample_id %in% valid_samples)
+
+genus_rel <- genus_long %>%
+  group_by(sample_id) %>%
+  mutate(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  ) %>%
+  left_join(meta2, by = "sample_id") %>%
+  filter(!is.na(host_family))
+
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n")
+cat("Matched host family samples:\n")
+print(table(genus_rel %>% distinct(sample_id, host_family) %>% pull(host_family)))
+
+## =========================
+## 7. 计算宿主科 × 属平均相对多度
+## =========================
+family_genus_mean_all <- genus_rel %>%
+  group_by(host_family, genus) %>%
+  summarise(
+    mean_rel_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    host_family = family_order,
+    genus,
+    fill = list(mean_rel_abundance = 0)
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order)
+  )
+
+genus_rank <- family_genus_mean_all %>%
+  group_by(genus) %>%
+  summarise(
+    overall_mean_rel_abundance = mean(mean_rel_abundance, na.rm = TRUE),
+    max_family_mean_rel_abundance = max(mean_rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(overall_mean_rel_abundance), genus)
+
+top_genera <- genus_rank %>%
+  filter(genus != "Unassigned") %>%
+  slice_head(n = top_n_genus) %>%
+  pull(genus)
+
+write.csv(
+  genus_rank,
+  file.path(out_dir, "host_family_all_genus_rank_by_mean_relative_abundance_no_elephant.csv"),
+  row.names = FALSE
+)
+
+top_summary <- genus_rank %>%
+  filter(genus %in% top_genera) %>%
+  mutate(top20_order = match(genus, top_genera)) %>%
+  arrange(top20_order)
+
+write.csv(
+  top_summary,
+  file.path(out_dir, "host_family_top20_genus_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mean_top20 <- family_genus_mean_all %>%
+  filter(genus %in% top_genera) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order),
+    genus = factor(genus, levels = top_genera)
+  )
+
+write.csv(
+  mean_top20,
+  file.path(out_dir, "host_family_top20_genus_mean_relative_abundance_long_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mat_df <- mean_top20 %>%
+  pivot_wider(
+    names_from = genus,
+    values_from = mean_rel_abundance,
+    values_fill = 0
+  ) %>%
+  arrange(host_family)
+
+mat_df$host_family <- as.character(mat_df$host_family)
+mat_df <- mat_df[match(family_order, mat_df$host_family), , drop = FALSE]
+
+mat <- as.matrix(mat_df[, top_genera, drop = FALSE])
+rownames(mat) <- mat_df$host_family
+
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 保存原始矩阵
+write.csv(
+  as.data.frame(mat) %>% rownames_to_column("host_family"),
+  file.path(out_dir, "host_family_top20_genus_chord_matrix_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## 过滤极小连接，仅用于作图
+mat_plot <- mat
+mat_plot[mat_plot < min_link_value] <- 0
+mat_plot <- mat_plot[, colSums(mat_plot) > 0, drop = FALSE]
+mat_plot <- mat_plot[rowSums(mat_plot) > 0, , drop = FALSE]
+
+## 属仍按整体丰度从高到低
+genus_order <- colnames(mat_plot)
+
+## 宿主科顺序
+family_order_plot <- rownames(mat_plot)
+
+## 属来源组成比例：每个属中各宿主科贡献比例
+genus_source_prop <- apply(mat_plot, 2, function(x) {
+  if (sum(x) == 0) {
+    rep(0, length(x))
+  } else {
+    x / sum(x)
+  }
+})
+genus_source_prop <- as.matrix(genus_source_prop)
+rownames(genus_source_prop) <- rownames(mat_plot)
+
+write.csv(
+  as.data.frame(t(genus_source_prop)) %>% rownames_to_column("genus"),
+  file.path(out_dir, "host_family_top20_genus_source_composition_for_chord_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  as.data.frame(mat_plot) %>% rownames_to_column("host_family"),
+  file.path(out_dir, "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## =========================
+## 8. 弦图绘制函数
+## =========================
+plot_chord <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(outfile, width = 10, height = 10, units = "in", res = 600, bg = "white")
+  } else {
+    pdf(outfile, width = 10, height = 10, bg = "white")
+  }
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order)),
+    genus_order
+  )
+
+  grid_cols <- c(
+    family_colors[family_order_plot],
+    genus_colors[genus_order]
+  )
+
+  ## 弦按真菌属上色
+  link_col_mat <- matrix(NA, nrow = nrow(mat_plot), ncol = ncol(mat_plot))
+  rownames(link_col_mat) <- rownames(mat_plot)
+  colnames(link_col_mat) <- colnames(mat_plot)
+
+  for (g in genus_order) {
+    link_col_mat[, g] <- circlize::add_transparency(genus_colors[g], transparency = 0.45)
+  }
+
+  n_family <- length(family_order_plot)
+  n_genus <- length(genus_order)
+
+  ## 宿主科放下半圈，属放上半圈
+  sector_order <- c(genus_order, family_order_plot)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4, n_family - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.26, 1.26),
+    canvas.ylim = c(-1.26, 1.26),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.035,
+    preAllocateTracks = list(
+      list(track.height = 0.145),  ## track 1: 标签和刻度
+      list(track.height = 0.030)   ## track 2: 属侧来源组成条
+    )
+  )
+
+  ## Track 1: 刻度 + 标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      ## 外圈刻度，位置贴近扇区
+      axis_h <- 0.22
+      at <- nice_axis_at(xlim[2])
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = nice_axis_lab(at),
+          labels.cex = 0.31,
+          major.tick.length = mm_y(0.55),
+          labels.niceFacing = TRUE,
+          col = "grey30",
+          labels.col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+      }
+
+      ## 标签尽量靠近外圈刻度
+      if (sector %in% family_order_plot) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.57,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.68,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.54,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.46,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧宿主科贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[prop > 0]
+
+        if (length(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (fam in names(prop)) {
+            w <- total_width * prop[fam]
+            circos.rect(
+              start,
+              0,
+              start + w,
+              1,
+              col = family_colors[fam],
+              border = NA
+            )
+            start <- start + w
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 9. 输出
+## =========================
+out_png <- file.path(out_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final.png")
+out_pdf <- file.path(out_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final.pdf")
+
+plot_chord(out_png, "png")
+plot_chord(out_pdf, "pdf")
+
+summary_txt <- file.path(out_dir, "host_family_top20_genus_chord_summary_no_elephant.txt")
+
+sink(summary_txt)
+cat("Host family Top20 genus chord summary, no_elephant version\n")
+cat("=========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input genus abundance table:\n", genus_table_file, "\n\n")
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n\n")
+cat("Host family sample counts:\n")
+print(table(meta2$host_family))
+cat("\nTop20 genera by overall mean relative abundance:\n")
+print(top_summary)
+cat("\nMatrix used for plot, after min link filtering:\n")
+print(as.data.frame(mat_plot) %>% rownames_to_column("host_family"))
+cat("\nmin_link_value:", min_link_value, "\n")
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("PNG:\n", out_png, "\n")
+cat("PDF:\n", out_pdf, "\n")
+cat("Summary:\n", summary_txt, "\n")
+cat("Matrix:\n", file.path(out_dir, "host_family_top20_genus_chord_matrix_no_elephant.csv"), "\n")
+cat("Filtered matrix:\n", file.path(out_dir, "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"), "\n")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R
+#下面这份是完整可运行最终脚本，已经合并你刚才要求的修改：
+#• 输出名仍为：Fig3_4_host_family_top20_genus_chord_enhanced_final.png
+#• PNG：600 dpi 白底
+#• 刻度线、刻度值、宿主科名、属名都比上一版更贴近外圈彩条
+#• 对 Equidae、Cervidae、Rhinocerotidae、Thelebolus、Ascochyta 删除倒数第二个刻度，避免和最大值重叠
+#• 宿主科名字号比图4小，不会太夸张
+#• genus 表仍然自动回退到原 globalfungi_style_test/taxonomy/genus_abundance_table.tsv
+#直接复制整段到 WSL 终端运行即可。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-4 不同宿主科肠道真菌优势属水平组成弦图
+## no_elephant 最终版
+##
+## 输出：
+## Fig3_4_host_family_top20_genus_chord_enhanced_final.png
+## Fig3_4_host_family_top20_genus_chord_enhanced_final.pdf
+##
+## 统计口径：
+## 1. 每个样本内先转为属水平相对多度；
+## 2. 按宿主科计算各属平均相对多度；
+## 3. 按5个宿主科整体平均相对多度筛选Top20属；
+## 4. 弦宽表示属在对应宿主科中的平均相对多度。
+##
+## 图形设置：
+## 1. 外圈刻度贴近彩条；
+## 2. 宿主科名、属名贴近刻度；
+## 3. Equidae / Cervidae / Rhinocerotidae / Thelebolus / Ascochyta
+##    删除倒数第二个刻度，避免最大值标签重叠；
+## 4. PNG 600 dpi 白底。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "tidyr", "tibble", "circlize")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(circlize)
+})
+
+## =========================
+## 1. 路径
+## =========================
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+base_dir <- file.path(project_dir, "globalfungi_style_test_no_elephant")
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_table_candidates <- c(
+  file.path(base_dir, "taxonomy/genus_abundance_table.tsv"),
+  file.path(base_dir, "abundance_tables/genus_abundance_table.tsv"),
+  file.path(project_dir, "globalfungi_style_test/taxonomy/genus_abundance_table.tsv")
+)
+
+genus_table_file <- genus_table_candidates[file.exists(genus_table_candidates)][1]
+
+if (is.na(genus_table_file)) {
+  stop(
+    "找不到 genus_abundance_table.tsv。已尝试以下路径：\n",
+    paste(genus_table_candidates, collapse = "\n")
+  )
+}
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Using metadata file: ", metadata_file, "\n", sep = "")
+cat("Using genus abundance table: ", genus_table_file, "\n", sep = "")
+
+## =========================
+## 2. 参数
+## =========================
+top_n_genus <- 20
+
+## 过滤极小连接，仅用于作图；原始矩阵仍完整输出
+min_link_value <- 0.001
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Equidae",
+  "Cervidae",
+  "Rhinocerotidae"
+)
+
+family_colors <- c(
+  Bovidae = "#D8AA00",
+  Suidae = "#E41A1C",
+  Equidae = "#00BFC4",
+  Cervidae = "#2CA02C",
+  Rhinocerotidae = "#619CFF"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## 这些扇区删除倒数第二个刻度，避免与最大值重叠
+drop_penultimate_tick_sectors <- c(
+  "Equidae", "Cervidae", "Rhinocerotidae",
+  "Thelebolus", "Ascochyta"
+)
+
+## =========================
+## 3. 工具函数
+## =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "not applicable", "Not applicable",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "Cannot find column for ", label,
+      ". Tried: ", paste(candidates, collapse = ", "),
+      "\nExisting columns:\n", paste(cols, collapse = ", ")
+    )
+  }
+  hit
+}
+
+clean_genus <- function(x) {
+  x <- trimws(as.character(x))
+  x <- sub("^.*g__", "g__", x)
+  x <- sub("^g__", "", x)
+  x <- sub("^Genus__", "", x)
+  x[x == "" | is.na(x)] <- "Unassigned"
+  x[x %in% c("NA", "N/A", "na", "n/a", "unknown", "Unknown")] <- "Unassigned"
+  x
+}
+
+fmt_tick <- function(x) {
+  ifelse(abs(x - round(x)) < 1e-6, as.character(round(x)), sprintf("%.1f", x))
+}
+
+nice_axis_at <- function(sector, xmax) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_penultimate_tick_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 4. 读取 metadata
+## =========================
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  stringsAsFactors = FALSE
+)
+
+meta2 <- meta2[complete.cases(meta2), ]
+meta2 <- meta2[!duplicated(meta2$sample_id), ]
+meta2 <- meta2 %>%
+  filter(host_family %in% family_order) %>%
+  mutate(host_family = factor(host_family, levels = family_order))
+
+cat("Metadata samples after family filtering:\n")
+print(table(meta2$host_family))
+
+## =========================
+## 5. 读取 genus abundance table
+## =========================
+genus_tab <- read.delim(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table.tsv 列数异常，至少应为2列。")
+}
+
+colnames(genus_tab)[1] <- "genus"
+genus_tab$genus <- clean_genus(genus_tab$genus)
+
+sample_cols <- setdiff(colnames(genus_tab), "genus")
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(as.character(genus_tab[[cc]])))
+}
+genus_tab[is.na(genus_tab)] <- 0
+
+genus_tab <- genus_tab %>%
+  group_by(genus) %>%
+  summarise(across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+genus_long <- genus_tab %>%
+  pivot_longer(
+    cols = -genus,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    abundance = suppressWarnings(as.numeric(abundance))
+  ) %>%
+  filter(!is.na(abundance))
+
+## =========================
+## 6. 对齐样本并转相对多度
+## =========================
+common_samples <- intersect(meta2$sample_id, unique(genus_long$sample_id))
+
+if (length(common_samples) == 0) {
+  stop("metadata 与 genus 表没有匹配到共同样本。")
+}
+
+meta2 <- meta2 %>% filter(sample_id %in% common_samples)
+genus_long <- genus_long %>% filter(sample_id %in% common_samples)
+
+sample_total <- genus_long %>%
+  group_by(sample_id) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop")
+
+valid_samples <- sample_total$sample_id[sample_total$total_abundance > 0]
+
+meta2 <- meta2 %>% filter(sample_id %in% valid_samples)
+genus_long <- genus_long %>% filter(sample_id %in% valid_samples)
+
+genus_rel <- genus_long %>%
+  group_by(sample_id) %>%
+  mutate(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  ) %>%
+  left_join(meta2, by = "sample_id") %>%
+  filter(!is.na(host_family))
+
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n")
+cat("Matched host family samples:\n")
+print(table(genus_rel %>% distinct(sample_id, host_family) %>% pull(host_family)))
+
+## =========================
+## 7. 计算宿主科 × 属平均相对多度
+## =========================
+family_genus_mean_all <- genus_rel %>%
+  group_by(host_family, genus) %>%
+  summarise(
+    mean_rel_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    host_family = family_order,
+    genus,
+    fill = list(mean_rel_abundance = 0)
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order)
+  )
+
+genus_rank <- family_genus_mean_all %>%
+  group_by(genus) %>%
+  summarise(
+    overall_mean_rel_abundance = mean(mean_rel_abundance, na.rm = TRUE),
+    max_family_mean_rel_abundance = max(mean_rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(overall_mean_rel_abundance), genus)
+
+top_genera <- genus_rank %>%
+  filter(genus != "Unassigned") %>%
+  slice_head(n = top_n_genus) %>%
+  pull(genus)
+
+write.csv(
+  genus_rank,
+  file.path(out_dir, "host_family_all_genus_rank_by_mean_relative_abundance_no_elephant.csv"),
+  row.names = FALSE
+)
+
+top_summary <- genus_rank %>%
+  filter(genus %in% top_genera) %>%
+  mutate(top20_order = match(genus, top_genera)) %>%
+  arrange(top20_order)
+
+write.csv(
+  top_summary,
+  file.path(out_dir, "host_family_top20_genus_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mean_top20 <- family_genus_mean_all %>%
+  filter(genus %in% top_genera) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order),
+    genus = factor(genus, levels = top_genera)
+  )
+
+write.csv(
+  mean_top20,
+  file.path(out_dir, "host_family_top20_genus_mean_relative_abundance_long_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mat_df <- mean_top20 %>%
+  pivot_wider(
+    names_from = genus,
+    values_from = mean_rel_abundance,
+    values_fill = 0
+  ) %>%
+  arrange(host_family)
+
+mat_df$host_family <- as.character(mat_df$host_family)
+mat_df <- mat_df[match(family_order, mat_df$host_family), , drop = FALSE]
+
+mat <- as.matrix(mat_df[, top_genera, drop = FALSE])
+rownames(mat) <- mat_df$host_family
+
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+write.csv(
+  as.data.frame(mat) %>% rownames_to_column("host_family"),
+  file.path(out_dir, "host_family_top20_genus_chord_matrix_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mat_plot <- mat
+mat_plot[mat_plot < min_link_value] <- 0
+mat_plot <- mat_plot[, colSums(mat_plot) > 0, drop = FALSE]
+mat_plot <- mat_plot[rowSums(mat_plot) > 0, , drop = FALSE]
+
+genus_order <- colnames(mat_plot)
+family_order_plot <- rownames(mat_plot)
+
+genus_source_prop <- apply(mat_plot, 2, function(x) {
+  if (sum(x) == 0) {
+    rep(0, length(x))
+  } else {
+    x / sum(x)
+  }
+})
+genus_source_prop <- as.matrix(genus_source_prop)
+rownames(genus_source_prop) <- rownames(mat_plot)
+
+write.csv(
+  as.data.frame(t(genus_source_prop)) %>% rownames_to_column("genus"),
+  file.path(out_dir, "host_family_top20_genus_source_composition_for_chord_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  as.data.frame(mat_plot) %>% rownames_to_column("host_family"),
+  file.path(out_dir, "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## =========================
+## 8. 弦图绘制函数
+## =========================
+plot_chord <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(outfile, width = 10, height = 10, units = "in", res = 600, bg = "white")
+  } else {
+    pdf(outfile, width = 10, height = 10, bg = "white")
+  }
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order)),
+    genus_order
+  )
+
+  grid_cols <- c(
+    family_colors[family_order_plot],
+    genus_colors[genus_order]
+  )
+
+  link_col_mat <- matrix(NA, nrow = nrow(mat_plot), ncol = ncol(mat_plot))
+  rownames(link_col_mat) <- rownames(mat_plot)
+  colnames(link_col_mat) <- colnames(mat_plot)
+
+  for (g in genus_order) {
+    link_col_mat[, g] <- circlize::add_transparency(genus_colors[g], transparency = 0.45)
+  }
+
+  n_family <- length(family_order_plot)
+  n_genus <- length(genus_order)
+
+  sector_order <- c(genus_order, family_order_plot)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4, n_family - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.0015, 0.0015),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.24, 1.24),
+    canvas.ylim = c(-1.24, 1.24),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.035,
+    preAllocateTracks = list(
+      list(track.height = 0.115),
+      list(track.height = 0.030)
+    )
+  )
+
+  ## Track 1: 刻度 + 标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      axis_h <- 0.08
+      at <- nice_axis_at(sector, xlim[2])
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = nice_axis_lab(at),
+          labels.cex = 0.30,
+          major.tick.length = mm_y(0.45),
+          labels.niceFacing = TRUE,
+          col = "grey30",
+          labels.col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+      }
+
+      if (sector %in% family_order_plot) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.36,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.62,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.34,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.44,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧宿主科贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[prop > 0]
+
+        if (length(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (fam in names(prop)) {
+            w <- total_width * prop[fam]
+            circos.rect(
+              start,
+              0,
+              start + w,
+              1,
+              col = family_colors[fam],
+              border = NA
+            )
+            start <- start + w
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 9. 输出
+## =========================
+out_png <- file.path(out_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final.png")
+out_pdf <- file.path(out_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final.pdf")
+
+plot_chord(out_png, "png")
+plot_chord(out_pdf, "pdf")
+
+summary_txt <- file.path(out_dir, "host_family_top20_genus_chord_summary_no_elephant.txt")
+
+sink(summary_txt)
+cat("Host family Top20 genus chord summary, no_elephant version\n")
+cat("=========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input genus abundance table:\n", genus_table_file, "\n\n")
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n\n")
+cat("Host family sample counts:\n")
+print(table(meta2$host_family))
+cat("\nTop20 genera by overall mean relative abundance:\n")
+print(top_summary)
+cat("\nMatrix used for plot, after min link filtering:\n")
+print(as.data.frame(mat_plot) %>% rownames_to_column("host_family"))
+cat("\nmin_link_value:", min_link_value, "\n")
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("PNG:\n", out_png, "\n")
+cat("PDF:\n", out_pdf, "\n")
+cat("Summary:\n", summary_txt, "\n")
+cat("Matrix:\n", file.path(out_dir, "host_family_top20_genus_chord_matrix_no_elephant.csv"), "\n")
+cat("Filtered matrix:\n", file.path(out_dir, "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"), "\n")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R
+#宿主科名和属名字体偏小：把 cex 调大。
+#有些最大刻度值消失：多半是刻度标签贴在扇区边界，被 circlize 自动裁掉或挤掉。处理办法是：让画布稍微放大一点，同时把刻度标签字号略微调大但不太大。
+#你直接运行下面这段自动修改命令，不用手动找位置。
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+repls = {
+    # 画布稍微放大，避免外圈最大刻度值被裁掉
+    'canvas.xlim = c(-1.24, 1.24),\n    canvas.ylim = c(-1.24, 1.24),':
+    'canvas.xlim = c(-1.30, 1.30),\n    canvas.ylim = c(-1.30, 1.30),',
+
+    # track 稍微加高一点，给刻度值和标签留空间
+    'list(track.height = 0.115),\n      list(track.height = 0.030)':
+    'list(track.height = 0.125),\n      list(track.height = 0.030)',
+
+    # 刻度值稍微调大一点
+    'labels.cex = 0.30,':
+    'labels.cex = 0.32,',
+
+    # 宿主科名调大
+    'cex = 0.62,\n          font = 2,':
+    'cex = 0.70,\n          font = 2,',
+
+    # 真菌属名调大
+    'cex = 0.44,\n          font = 1,':
+    'cex = 0.50,\n          font = 1,'
+}
+
+missing = []
+for old, new in repls.items():
+    if old not in txt:
+        missing.append(old)
+    txt = txt.replace(old, new)
+
+if missing:
+    print("以下内容没有匹配到，可能脚本已经被改过：")
+    for x in missing:
+        print("----")
+        print(x)
+    raise SystemExit("请把脚本里第8部分发我，我再精确改。")
+
+script.write_text(txt, encoding="utf-8")
+print("已完成字体和画布修正：", script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R
+#这次最大刻度值消失，主要是 circos.axis() 自动标注端点时，端点数字容易被挤到扇区边界外或被自动裁掉。解决办法是：不再让 circos.axis() 自动写刻度数字，只让它画刻度线；所有刻度数字改成用 circos.text() 手动写，并把最大值稍微往扇区内侧挪一点。这样最大值就不会再消失。
+#同时我把宿主科名、真菌属名再调大，并把名称位置往外放一点，给刻度数字留空间，避免重叠。
+#你直接运行下面这段自动修改脚本：
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+# 1. 画布再稍放大，避免外圈文字被裁剪
+txt = txt.replace(
+    'canvas.xlim = c(-1.30, 1.30),\n    canvas.ylim = c(-1.30, 1.30),',
+    'canvas.xlim = c(-1.42, 1.42),\n    canvas.ylim = c(-1.42, 1.42),'
+)
+
+txt = txt.replace(
+    'canvas.xlim = c(-1.24, 1.24),\n    canvas.ylim = c(-1.24, 1.24),',
+    'canvas.xlim = c(-1.42, 1.42),\n    canvas.ylim = c(-1.42, 1.42),'
+)
+
+# 2. 外圈track稍加高，给刻度数字和标签留空间
+txt = txt.replace(
+    'list(track.height = 0.125),\n      list(track.height = 0.030)',
+    'list(track.height = 0.165),\n      list(track.height = 0.030)'
+)
+
+txt = txt.replace(
+    'list(track.height = 0.115),\n      list(track.height = 0.030)',
+    'list(track.height = 0.165),\n      list(track.height = 0.030)'
+)
+
+# 3. 替换 Track 1：刻度 + 标签 整段
+pattern = re.compile(
+    r'  ## Track 1: 刻度 \+ 标签\n  circos\.trackPlotRegion\(\n    track\.index = 1,.*?\n  \)\n\n  ## Track 2: 属扇区内侧宿主科贡献组成条',
+    re.S
+)
+
+new_block = r'''  ## Track 1: 刻度 + 标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      ## 刻度线靠近外圈彩条
+      axis_h <- 0.065
+      at <- nice_axis_at(sector, xlim[2])
+
+      ## 画完整轴线
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        ## 只让 circos.axis 画刻度，不让它自动写数字；
+        ## 数字改为下面手动写，避免最大值消失。
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.42),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          ## 端点数字稍微往扇区内部挪，避免被裁掉
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.018 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.028 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.185,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.34,
+            col = "grey25"
+          )
+        }
+      }
+
+      ## 标签再稍调大；同时放到刻度数字外侧，避免重叠
+      if (sector %in% family_order_plot) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.62,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.76,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.58,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.56,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧宿主科贡献组成条'''
+
+new_txt, n = pattern.subn(new_block, txt)
+
+if n != 1:
+    raise SystemExit("没有成功定位到 Track 1 部分，请检查脚本是否和上一版一致。")
+
+script.write_text(new_txt, encoding="utf-8")
+print("已修复最大刻度值显示，并放大宿主科名和真菌属名：", script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_top20_genus_chord_no_elephant.R
