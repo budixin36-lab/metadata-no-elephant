@@ -1,0 +1,1431 @@
+#一、这张“不同宿主科真菌群落的营养型组成图”真正要用的文件
+#这次真正建议使用的 4 个文件
+#1）SH 丰度表（核心数据）
+#你截图里的这个：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#它表示：
+#行：SH
+#列：样本
+#单元格：这个样本里这个 SH 的丰度
+#这张图的计算起点就是它。
+#2）no_elephant 的 metadata（给每个样本标宿主科）
+#路径应该是你之前一直在用的这个：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#它的作用是：告诉我们每个样本属于哪个宿主科（host_family）
+#因为最后我们要画：
+#Bovidae
+#Suidae
+#Cervidae
+#Equidae
+#Rhinocerotidae
+#这 5 个宿主科的营养型组成。
+#3）SH 的 taxonomy 注释表
+#这一步最容易搞错，我明确说一下：
+#你 no_elephant 文件夹里没有单独的 SH_taxonomy_matched.tsv，
+#但原始最终版里有：/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv
+#这里用原始版是对的，不是用错数据。
+#因为：去掉非洲草原象，变的是样本，不变的是 SH 本身的分类注释
+#也就是说：同一个 SH 还是同一个 SH，它的 taxonomy 不会因为删掉 7 个样本就改变。
+#所以这一步：SH 丰度表用 no_elephant 版,SH taxonomy 注释表用原始 final 版的 SH_taxonomy_matched.tsv
+#这是逻辑连贯、正确的。
+#4）FungalTraits 的 trophic mode 文件
+#你现在想直接保留 FungalTraits 的营养型分类，所以要用：/mnt/d/fungal_ITS/FungalTraits_release/output/data/funToTheFun.csv
+#如果你的实际路径不同，只改这一行就行。
+#它的作用是：根据真菌的物种名 / 属名,匹配营养型（trophic mode）
+#三、这张图到底怎么算？
+#第 1 步：先给每个 SH 贴一个“营养型标签”
+#比如某个 SH 注释到：Kazachstania slooffiae
+#那就去 FungalTraits 里找它属于：
+#腐生营养型？
+#共生营养型？
+#病理营养型？
+#还是复合型？
+#如果这个 SH 没匹配上明确营养型，就归到：未分类
+#第 2 步：在每个样本里，把同一营养型的 SH 丰度加起来
+#比如样本 A 中：
+#属于“腐生营养型”的 SH 丰度加起来 = 300
+#属于“共生营养型”的 SH 丰度加起来 = 100
+#属于“病理营养型”的 SH 丰度加起来 = 50
+#第 3 步：把样本内这些值换成比例
+#比如样本 A 总真菌丰度 = 500
+#那：
+#腐生营养型 = 300 / 500 = 60%
+#共生营养型 = 100 / 500 = 20%
+#病理营养型 = 50 / 500 = 10%
+#其他 = 10%
+#这一步就是相对多度。
+#第 4 步：同一个宿主科内，对所有样本的比例求平均
+#比如牛科有很多样本，每个样本都有一组营养型比例。
+#那我们最后算的是：
+#牛科样本中，各营养型的平均相对多度
+#所以这张图的 Y 轴最合适写：平均相对多度（%）
+#五、给你一份完整可运行脚本
+#下面这份脚本是按你现在的思路写的：
+#以 SH 丰度表 为起点
+#用 SH_taxonomy_matched.tsv 提取 species / genus
+#用 funToTheFun.csv 匹配 trophic mode
+#结果按样本内相对多度 → 宿主科平均相对多度
+#画出堆积柱状图
+#图例中文
+#横轴宿主科水平放置
+#输出 600 dpi PNG + PDF
+#还会输出中间结果，方便你后面写论文核对
+#脚本：06_host_family_trophic_mode_bar_no_elephant.R
+## =========================
+## 图3-5 不同宿主科肠道真菌群落的营养型组成（no_elephant版）
+## 基于：SH abundance + SH taxonomy + FungalTraits trophic mode
+## =========================
+
+rm(list = ls())
+
+## ---- 库路径（按你之前习惯保留）----
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+## ---- 加载包 ----
+library(data.table)
+library(dplyr)
+library(ggplot2)
+
+## ---- 输入文件 ----
+sh_abund_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+meta_file     <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+
+## 注意：no_elephant 只是删样本，不影响 SH 的 taxonomy 注释
+## 所以这里用原始 final 版的 SH_taxonomy_matched.tsv 是正确的
+tax_file      <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv"
+
+## FungalTraits 文件
+fungaltraits_file <- "/mnt/d/fungal_ITS/FungalTraits_release/output/data/funToTheFun.csv"
+
+## ---- 输出目录 ----
+out_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_trophic_mode_no_elephant"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ---- 输出文件名 ----
+plot_png   <- file.path(out_dir, "Fig3_5_host_family_trophic_mode_composition_no_elephant.png")
+plot_pdf   <- file.path(out_dir, "Fig3_5_host_family_trophic_mode_composition_no_elephant.pdf")
+summary_csv <- file.path(out_dir, "host_family_trophic_mode_mean_relative_abundance_no_elephant.csv")
+sample_csv  <- file.path(out_dir, "sample_trophic_mode_relative_abundance_no_elephant.csv")
+assign_tsv  <- file.path(out_dir, "SH_trophic_mode_assignment_no_elephant.tsv")
+summary_txt <- file.path(out_dir, "host_family_trophic_mode_summary_no_elephant.txt")
+
+## =========================
+## 1. 工具函数
+## =========================
+
+normalize_name <- function(x) {
+  x <- as.character(x)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x <- gsub("\\bsp\\.?$", "sp.", x, ignore.case = TRUE)
+  x <- gsub("\\bspp\\.?$", "sp.", x, ignore.case = TRUE)
+  x <- tolower(x)
+
+  bad <- c("", "na", "n/a", "unknown", "unidentified", "uncultured",
+           "unclassified", "incertae sedis", "fungi sp.", "fungus")
+  x[x %in% bad] <- NA_character_
+  x
+}
+
+clean_rank_value <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^.*__", "", x)   # 去掉 k__/p__/g__/s__ 前缀
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x[x %in% c("", "NA", "na", "unidentified", "uncultured", "unclassified")] <- NA_character_
+  x
+}
+
+get_id_col <- function(dt) {
+  nms <- names(dt)
+  cand <- c("FeatureID", "#OTU ID", "OTU ID", "featureid", "feature_id", "SH", "id")
+  hit <- cand[cand %in% nms]
+  if (length(hit) > 0) return(hit[1])
+  return(nms[1])
+}
+
+## 从 taxonomy 字符串中提取 genus / species
+extract_genus_species_from_taxonomy <- function(tax_vec) {
+  genus <- rep(NA_character_, length(tax_vec))
+  species <- rep(NA_character_, length(tax_vec))
+
+  parts_list <- strsplit(as.character(tax_vec), ";", fixed = TRUE)
+
+  for (i in seq_along(parts_list)) {
+    parts <- trimws(parts_list[[i]])
+
+    g_hit <- parts[grepl("^g__", parts)]
+    s_hit <- parts[grepl("^s__", parts)]
+
+    if (length(g_hit) > 0) genus[i] <- clean_rank_value(g_hit[1])
+    if (length(s_hit) > 0) species[i] <- clean_rank_value(s_hit[1])
+
+    ## 如果 species 只有种加词，没有属名，则补上属名
+    if (!is.na(species[i]) && !is.na(genus[i])) {
+      sp_words <- strsplit(species[i], "\\s+")[[1]]
+      if (length(sp_words) == 1) {
+        species[i] <- paste(genus[i], species[i])
+      }
+    }
+  }
+
+  data.frame(
+    genus = normalize_name(genus),
+    species = normalize_name(species),
+    stringsAsFactors = FALSE
+  )
+}
+
+## 将 FungalTraits 英文营养型翻译为中文
+translate_trophic <- function(x) {
+  out <- dplyr::case_when(
+    x == "Saprotroph" ~ "腐生营养型",
+    x == "Symbiotroph" ~ "共生营养型",
+    x == "Saprotroph-Symbiotroph" ~ "腐生-共生营养型",
+    x == "Pathotroph" ~ "病理营养型",
+    x == "Pathotroph-Saprotroph" ~ "病理-腐生营养型",
+    x == "Pathotroph-Symbiotroph" ~ "病理-共生营养型",
+    x == "Pathotroph-Saprotroph-Symbiotroph" ~ "病理-腐生-共生营养型",
+    TRUE ~ "未分类"
+  )
+  out
+}
+
+## 营养型固定顺序（柱图与图例都按此顺序）
+trophic_order <- c(
+  "腐生营养型",
+  "共生营养型",
+  "腐生-共生营养型",
+  "病理营养型",
+  "病理-腐生营养型",
+  "病理-共生营养型",
+  "病理-腐生-共生营养型",
+  "未分类"
+)
+
+## 配色（尽量区分明显）
+trophic_colors <- c(
+  "腐生营养型" = "#E69F00",
+  "共生营养型" = "#009E73",
+  "腐生-共生营养型" = "#F94144",
+  "病理营养型" = "#3C91E6",
+  "病理-腐生营养型" = "#74A9F7",
+  "病理-共生营养型" = "#A5D8FF",
+  "病理-腐生-共生营养型" = "#1F78B4",
+  "未分类" = "#BDBDBD"
+)
+
+host_family_order <- c("Bovidae", "Suidae", "Cervidae", "Equidae", "Rhinocerotidae")
+
+## =========================
+## 2. 读取 metadata
+## =========================
+
+cat("读取 metadata ...\n")
+meta <- fread(meta_file, data.table = FALSE)
+
+if (!"host_family" %in% names(meta)) {
+  stop("metadata 中没有 host_family 列，请检查 metadata 文件。")
+}
+
+## 自动找样本ID列
+sample_id_candidates <- c("sample-id", "sample_id", "SampleID", "sampleid", "Sample", "sample")
+sample_col <- sample_id_candidates[sample_id_candidates %in% names(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中未找到样本ID列（如 sample-id / sample_id / SampleID 等）。")
+}
+
+meta <- meta[, c(sample_col, "host_family")]
+names(meta)[1] <- "SampleID"
+
+meta <- meta %>%
+  filter(host_family %in% host_family_order)
+
+cat("metadata样本数：", nrow(meta), "\n")
+
+## =========================
+## 3. 读取 SH abundance table
+## =========================
+
+cat("读取 SH 丰度表 ...\n")
+abund_dt <- fread(sh_abund_file, data.table = FALSE, check.names = FALSE)
+id_col_abund <- get_id_col(abund_dt)
+
+sh_ids <- abund_dt[[id_col_abund]]
+abund_mat <- as.matrix(abund_dt[, setdiff(names(abund_dt), id_col_abund), drop = FALSE])
+rownames(abund_mat) <- sh_ids
+storage.mode(abund_mat) <- "numeric"
+
+sample_names <- colnames(abund_mat)
+
+## metadata 和 abundance 取交集
+common_samples <- intersect(sample_names, meta$SampleID)
+if (length(common_samples) == 0) {
+  stop("SH 丰度表中的样本名与 metadata 中 SampleID 没有交集，请检查。")
+}
+
+abund_mat <- abund_mat[, common_samples, drop = FALSE]
+meta_use <- meta %>% filter(SampleID %in% common_samples)
+
+## 按丰度表列顺序排列 metadata
+meta_use <- meta_use[match(common_samples, meta_use$SampleID), ]
+
+cat("用于分析的样本数：", ncol(abund_mat), "\n")
+
+## 去掉总丰度为0的样本（理论上应没有，但保险）
+sample_sums0 <- colSums(abund_mat, na.rm = TRUE)
+keep_samples <- sample_sums0 > 0
+abund_mat <- abund_mat[, keep_samples, drop = FALSE]
+meta_use <- meta_use[keep_samples, ]
+common_samples <- colnames(abund_mat)
+
+cat("去除总丰度为0后样本数：", ncol(abund_mat), "\n")
+
+## =========================
+## 4. 读取 SH taxonomy 注释表
+## =========================
+
+cat("读取 SH taxonomy 注释表 ...\n")
+tax_dt <- fread(tax_file, data.table = FALSE, check.names = FALSE)
+id_col_tax <- get_id_col(tax_dt)
+
+## 尽量识别 taxonomy 列
+tax_col_candidates <- names(tax_dt)[grepl("tax", names(tax_dt), ignore.case = TRUE)]
+tax_col <- if (length(tax_col_candidates) > 0) tax_col_candidates[1] else NA
+
+if (!is.na(tax_col)) {
+  gs_df <- extract_genus_species_from_taxonomy(tax_dt[[tax_col]])
+} else if (all(c("Genus", "Species") %in% names(tax_dt))) {
+  gs_df <- data.frame(
+    genus = normalize_name(tax_dt$Genus),
+    species = normalize_name(tax_dt$Species),
+    stringsAsFactors = FALSE
+  )
+} else {
+  ## 兜底：用第2列当 taxonomy 字符串
+  gs_df <- extract_genus_species_from_taxonomy(tax_dt[[2]])
+}
+
+tax_use <- data.frame(
+  SH = tax_dt[[id_col_tax]],
+  genus = gs_df$genus,
+  species = gs_df$species,
+  stringsAsFactors = FALSE
+)
+
+## 只保留丰度表里出现的 SH
+tax_use <- tax_use %>% filter(SH %in% rownames(abund_mat))
+
+cat("taxonomy中与丰度表匹配的SH数：", nrow(tax_use), "\n")
+
+## 若有SH没在taxonomy中，补未分类
+missing_tax_sh <- setdiff(rownames(abund_mat), tax_use$SH)
+if (length(missing_tax_sh) > 0) {
+  tax_use <- bind_rows(
+    tax_use,
+    data.frame(SH = missing_tax_sh, genus = NA_character_, species = NA_character_, stringsAsFactors = FALSE)
+  )
+}
+
+tax_use <- tax_use[match(rownames(abund_mat), tax_use$SH), ]
+
+## =========================
+## 5. 读取 FungalTraits，并提取 trophic mode
+## =========================
+
+cat("读取 FungalTraits ...\n")
+ft <- fread(fungaltraits_file, data.table = FALSE)
+
+## 检查关键列
+if (!"speciesMatched" %in% names(ft)) {
+  stop("funToTheFun.csv 中未找到 speciesMatched 列，请检查文件。")
+}
+
+value_col <- if ("value" %in% names(ft)) "value" else NA
+trait_col <- if ("trait_name" %in% names(ft)) "trait_name" else NA
+
+if (is.na(value_col)) {
+  stop("funToTheFun.csv 中未找到 value 列，请检查文件。")
+}
+
+## 只保留 trophic mode 相关记录
+if (!is.na(trait_col)) {
+  ft_use <- ft %>% filter(grepl("trophic", .data[[trait_col]], ignore.case = TRUE))
+} else {
+  ft_use <- ft
+}
+
+## 保留 7 种原始 trophic mode
+valid_modes <- c(
+  "Saprotroph",
+  "Symbiotroph",
+  "Saprotroph-Symbiotroph",
+  "Pathotroph",
+  "Pathotroph-Saprotroph",
+  "Pathotroph-Symbiotroph",
+  "Pathotroph-Saprotroph-Symbiotroph"
+)
+
+ft_use <- ft_use %>%
+  mutate(
+    speciesMatched_norm = normalize_name(speciesMatched),
+    trophic_mode = trimws(.data[[value_col]])
+  ) %>%
+  filter(trophic_mode %in% valid_modes)
+
+cat("FungalTraits中 trophic mode 记录数：", nrow(ft_use), "\n")
+
+## ---- 5.1 精确的 speciesMatched 映射 ----
+species_map0 <- ft_use %>%
+  select(speciesMatched_norm, trophic_mode) %>%
+  distinct()
+
+## 若同一个 speciesMatched 对应多个不同 trophic_mode，则保守处理：剔除歧义
+species_map_stat <- species_map0 %>%
+  group_by(speciesMatched_norm) %>%
+  summarise(
+    n_mode = n_distinct(trophic_mode),
+    trophic_mode = ifelse(n_distinct(trophic_mode) == 1, unique(trophic_mode), NA_character_),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(trophic_mode))
+
+## ---- 5.2 genus fallback 映射：只用显式的 “Xxx sp.” 条目 ----
+genus_map0 <- ft_use %>%
+  mutate(
+    is_genus_sp = grepl("^[a-z][a-z0-9_-]+\\s+sp\\.?$", speciesMatched_norm, ignore.case = TRUE),
+    genus_from_sp = ifelse(is_genus_sp, sub("\\s+sp\\.?$", "", speciesMatched_norm, ignore.case = TRUE), NA_character_)
+  ) %>%
+  filter(is_genus_sp) %>%
+  select(genus_from_sp, trophic_mode) %>%
+  distinct()
+
+genus_map_stat <- genus_map0 %>%
+  group_by(genus_from_sp) %>%
+  summarise(
+    n_mode = n_distinct(trophic_mode),
+    trophic_mode = ifelse(n_distinct(trophic_mode) == 1, unique(trophic_mode), NA_character_),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(trophic_mode))
+
+cat("species级可用映射数：", nrow(species_map_stat), "\n")
+cat("genus级 fallback 映射数：", nrow(genus_map_stat), "\n")
+
+## =========================
+## 6. 给每个 SH 匹配 trophic mode
+## =========================
+
+cat("匹配 SH 的 trophic mode ...\n")
+
+sh_anno <- tax_use
+
+## 先 species 精确匹配
+sh_anno <- sh_anno %>%
+  left_join(species_map_stat %>% select(speciesMatched_norm, trophic_mode),
+            by = c("species" = "speciesMatched_norm")) %>%
+  rename(trophic_species = trophic_mode)
+
+## 再 genus fallback
+sh_anno <- sh_anno %>%
+  left_join(genus_map_stat %>% select(genus_from_sp, trophic_mode),
+            by = c("genus" = "genus_from_sp")) %>%
+  rename(trophic_genus = trophic_mode)
+
+## 优先 species，匹配不到再用 genus
+sh_anno <- sh_anno %>%
+  mutate(
+    trophic_mode_raw = ifelse(!is.na(trophic_species), trophic_species, trophic_genus),
+    trophic_mode_cn = translate_trophic(trophic_mode_raw),
+    trophic_mode_cn = ifelse(is.na(trophic_mode_cn), "未分类", trophic_mode_cn)
+  )
+
+## 保存 SH 注释结果
+write.table(sh_anno, file = assign_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("SH匹配结果：\n")
+print(table(sh_anno$trophic_mode_cn, useNA = "ifany"))
+
+## =========================
+## 7. 在样本内汇总各营养型丰度，并换算为相对多度
+## =========================
+
+cat("按营养型汇总样本内丰度 ...\n")
+
+## 行顺序必须和 abundance matrix 一致
+sh_anno <- sh_anno[match(rownames(abund_mat), sh_anno$SH), ]
+
+group_vec <- factor(sh_anno$trophic_mode_cn, levels = trophic_order)
+
+## rowsum：按行分组汇总到营养型
+mode_count_mat <- rowsum(abund_mat, group = group_vec, reorder = FALSE)
+
+## 确保 8 个营养型都在
+missing_modes <- setdiff(trophic_order, rownames(mode_count_mat))
+if (length(missing_modes) > 0) {
+  add_mat <- matrix(0, nrow = length(missing_modes), ncol = ncol(mode_count_mat),
+                    dimnames = list(missing_modes, colnames(mode_count_mat)))
+  mode_count_mat <- rbind(mode_count_mat, add_mat)
+}
+
+mode_count_mat <- mode_count_mat[trophic_order, , drop = FALSE]
+
+## 样本内转相对多度（%）
+sample_total <- colSums(mode_count_mat, na.rm = TRUE)
+mode_rel_mat <- sweep(mode_count_mat, 2, sample_total, "/") * 100
+
+## 保存 sample-level 相对多度
+sample_rel_df <- as.data.frame(t(mode_rel_mat), check.names = FALSE)
+sample_rel_df$SampleID <- rownames(sample_rel_df)
+sample_rel_df <- sample_rel_df %>%
+  left_join(meta_use, by = "SampleID") %>%
+  select(SampleID, host_family, all_of(trophic_order))
+
+write.csv(sample_rel_df, file = sample_csv, row.names = FALSE)
+
+## =========================
+## 8. 宿主科水平：平均相对多度
+## =========================
+
+cat("计算宿主科平均相对多度 ...\n")
+
+family_mean_df <- sample_rel_df %>%
+  group_by(host_family) %>%
+  summarise(across(all_of(trophic_order), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  mutate(host_family = factor(host_family, levels = host_family_order)) %>%
+  arrange(host_family)
+
+write.csv(family_mean_df, file = summary_csv, row.names = FALSE)
+
+## 作图长表
+plot_df <- family_mean_df %>%
+  tidyr::pivot_longer(
+    cols = all_of(trophic_order),
+    names_to = "TrophicMode",
+    values_to = "MeanRelativeAbundance"
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = host_family_order),
+    TrophicMode = factor(TrophicMode, levels = trophic_order)
+  )
+
+## =========================
+## 9. 绘图
+## =========================
+
+p <- ggplot(plot_df, aes(x = host_family, y = MeanRelativeAbundance, fill = TrophicMode)) +
+  geom_bar(stat = "identity", width = 0.72, color = NA) +
+  scale_fill_manual(
+    values = trophic_colors,
+    breaks = trophic_order,
+    name = "营养型"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = c(0, 0),
+    breaks = seq(0, 100, 20)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.2, "cm"),
+    axis.text.x = element_text(size = 13, angle = 0, hjust = 0.5, vjust = 0.5),
+    axis.text.y = element_text(size = 13),
+    axis.title.y = element_text(size = 16),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 12),
+    legend.position = "right"
+  )
+
+ggsave(plot_png, plot = p, width = 10.5, height = 7.2, dpi = 600, bg = "white")
+ggsave(plot_pdf, plot = p, width = 10.5, height = 7.2, bg = "white")
+
+## =========================
+## 10. 输出文字摘要
+## =========================
+
+sample_n_by_family <- meta_use %>%
+  count(host_family, name = "n") %>%
+  mutate(host_family = factor(host_family, levels = host_family_order)) %>%
+  arrange(host_family)
+
+txt_lines <- c(
+  "不同宿主科肠道真菌群落营养型组成（no_elephant版）结果摘要",
+  paste0("总样本数：", nrow(meta_use)),
+  "",
+  "各宿主科样本数："
+)
+
+for (i in seq_len(nrow(sample_n_by_family))) {
+  txt_lines <- c(txt_lines,
+                 paste0(sample_n_by_family$host_family[i], ": ", sample_n_by_family$n[i]))
+}
+
+txt_lines <- c(txt_lines, "", "各宿主科平均相对多度（%）：")
+
+for (i in seq_len(nrow(family_mean_df))) {
+  fam <- as.character(family_mean_df$host_family[i])
+  vals <- family_mean_df[i, trophic_order, drop = FALSE]
+  vals_str <- paste(
+    paste0(colnames(vals), "=", sprintf("%.2f", as.numeric(vals[1, ])), "%"),
+    collapse = "; "
+  )
+  txt_lines <- c(txt_lines, paste0(fam, ": ", vals_str))
+}
+
+writeLines(txt_lines, con = summary_txt)
+
+cat("完成！\n")
+cat("PNG: ", plot_png, "\n", sep = "")
+cat("PDF: ", plot_pdf, "\n", sep = "")
+cat("宿主科平均相对多度表: ", summary_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", sample_csv, "\n", sep = "")
+cat("SH营养型匹配表: ", assign_tsv, "\n", sep = "")
+cat("文字摘要: ", summary_txt, "\n", sep = "")
+#六、这份脚本跑完后，你会得到什么
+#1）最终图
+#Fig3_5_host_family_trophic_mode_composition_no_elephant.png
+#Fig3_5_host_family_trophic_mode_composition_no_elephant.pdf
+#2）宿主科平均相对多度表
+#host_family_trophic_mode_mean_relative_abundance_no_elephant.csv
+#这个表后面最适合用来写正文。
+#3）样本水平相对多度表
+#sample_trophic_mode_relative_abundance_no_elephant.csv
+#这个表是中间结果，能帮助你检查“平均相对多度”是不是按样本先算比例再求平均。
+#4）每个 SH 被分到什么营养型
+#SH_trophic_mode_assignment_no_elephant.tsv
+#这个表特别重要，后面如果你想核对：
+#某个 SH 匹配到了什么 trophic mode，是 species 匹配上的，还是 genus fallback 匹配上的，都能往回查。
+#八、你现在可以怎么做
+#在 WSL 里新建脚本
+nano /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_trophic_mode_bar_no_elephant.R
+#把上面完整脚本粘进去保存，运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_trophic_mode_bar_no_elephant.R
+#下面给你一份完整可运行修正版脚本，已经修复刚才失败的关键问题：能正确识别 SH_taxonomy_matched.tsv 里的小写 genus、species 列，不会再把第 2 列 kingdom 当 taxonomy 字符串解析。
+#这版会输出：
+#最终图：Fig3_5_host_family_trophic_mode_composition_no_elephant.png
+#PDF：Fig3_5_host_family_trophic_mode_composition_no_elephant.pdf
+#每个 SH 的营养型匹配表
+#样本水平营养型相对多度表
+#宿主科平均相对多度表
+#摘要 txt
+#你直接复制整段到 WSL 终端运行即可。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_trophic_mode_bar_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-5 不同宿主科肠道真菌群落的营养型组成
+## no_elephant 版
+##
+## 核心口径：
+## 1. 以 SH abundance table 为起点；
+## 2. 用 SH_taxonomy_matched.tsv 获取每个 SH 的 genus / species；
+## 3. 用 FungalTraits funToTheFun.csv 的 trophic_mode_fg 匹配营养型；
+## 4. 优先 species 精确匹配，未匹配再 genus 保守回退；
+## 5. 在样本内汇总各营养型 SH reads，并转为相对多度；
+## 6. 按宿主科计算平均相对多度；
+## 7. 输出 600 dpi 白底 PNG。
+## ============================================================
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R 包路径与依赖
+## =========================
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("data.table", "dplyr", "tidyr", "ggplot2")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+})
+
+## =========================
+## 1. 输入输出路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+sh_abund_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+meta_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+## 注意：no_elephant 只是剔除样本，不改变 SH taxonomy 注释
+## 因此这里使用原 globalfungi_style_test 中的 SH_taxonomy_matched.tsv 是正确的。
+tax_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test/taxonomy/SH_taxonomy_matched.tsv"
+
+fungaltraits_file <- "/mnt/d/fungal_ITS/FungalTraits_release/output/data/funToTheFun.csv"
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_trophic_mode_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+plot_png <- file.path(out_dir, "Fig3_5_host_family_trophic_mode_composition_no_elephant.png")
+plot_pdf <- file.path(out_dir, "Fig3_5_host_family_trophic_mode_composition_no_elephant.pdf")
+
+summary_csv <- file.path(out_dir, "host_family_trophic_mode_mean_relative_abundance_no_elephant.csv")
+sample_csv  <- file.path(out_dir, "sample_trophic_mode_relative_abundance_no_elephant.csv")
+assign_tsv  <- file.path(out_dir, "SH_trophic_mode_assignment_no_elephant.tsv")
+summary_txt <- file.path(out_dir, "host_family_trophic_mode_summary_no_elephant.txt")
+match_summary_csv <- file.path(out_dir, "SH_trophic_mode_match_summary_no_elephant.csv")
+
+for (f in c(sh_abund_file, meta_file, tax_file, fungaltraits_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+cat("Input SH abundance table:\n", sh_abund_file, "\n\n")
+cat("Input metadata:\n", meta_file, "\n\n")
+cat("Input SH taxonomy:\n", tax_file, "\n\n")
+cat("Input FungalTraits:\n", fungaltraits_file, "\n\n")
+
+## =========================
+## 2. 工具函数
+## =========================
+normalize_name <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^.*__", "", x)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+
+  ## 统一 sp / spp 写法
+  x <- gsub("\\bsp\\.?$", "sp.", x, ignore.case = TRUE)
+  x <- gsub("\\bspp\\.?$", "sp.", x, ignore.case = TRUE)
+
+  x <- tolower(x)
+
+  bad <- c(
+    "", "na", "n/a", "unknown", "unidentified", "uncultured",
+    "unclassified", "incertae sedis", "fungi sp.", "fungus",
+    "no blast hit"
+  )
+
+  x[x %in% bad] <- NA_character_
+  x
+}
+
+clean_rank_value <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^.*__", "", x)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x[x %in% c("", "NA", "na", "unidentified", "uncultured", "unclassified")] <- NA_character_
+  x
+}
+
+get_id_col <- function(dt) {
+  nms <- names(dt)
+  cand <- c("SH_ID", "FeatureID", "#OTU ID", "OTU ID", "featureid", "feature_id", "SH", "id", "ID")
+  hit <- cand[cand %in% nms]
+  if (length(hit) > 0) return(hit[1])
+  return(nms[1])
+}
+
+extract_genus_species_from_taxonomy_string <- function(tax_vec) {
+  genus <- rep(NA_character_, length(tax_vec))
+  species <- rep(NA_character_, length(tax_vec))
+
+  parts_list <- strsplit(as.character(tax_vec), ";", fixed = TRUE)
+
+  for (i in seq_along(parts_list)) {
+    parts <- trimws(parts_list[[i]])
+
+    g_hit <- parts[grepl("^g__", parts)]
+    s_hit <- parts[grepl("^s__", parts)]
+
+    if (length(g_hit) > 0) genus[i] <- clean_rank_value(g_hit[1])
+    if (length(s_hit) > 0) species[i] <- clean_rank_value(s_hit[1])
+
+    ## 如果 species 只有种加词，补上 genus
+    if (!is.na(species[i]) && !is.na(genus[i])) {
+      sp_words <- strsplit(species[i], "\\s+")[[1]]
+      if (length(sp_words) == 1) {
+        species[i] <- paste(genus[i], species[i])
+      }
+    }
+  }
+
+  data.frame(
+    genus = normalize_name(genus),
+    species = normalize_name(species),
+    stringsAsFactors = FALSE
+  )
+}
+
+translate_trophic <- function(x) {
+  dplyr::case_when(
+    x == "Saprotroph" ~ "腐生营养型",
+    x == "Symbiotroph" ~ "共生营养型",
+    x == "Saprotroph-Symbiotroph" ~ "腐生-共生营养型",
+    x == "Pathotroph" ~ "病理营养型",
+    x == "Pathotroph-Saprotroph" ~ "病理-腐生营养型",
+    x == "Pathotroph-Symbiotroph" ~ "病理-共生营养型",
+    x == "Pathotroph-Saprotroph-Symbiotroph" ~ "病理-腐生-共生营养型",
+    TRUE ~ "未分类"
+  )
+}
+
+trophic_order <- c(
+  "腐生营养型",
+  "共生营养型",
+  "腐生-共生营养型",
+  "病理营养型",
+  "病理-腐生营养型",
+  "病理-共生营养型",
+  "病理-腐生-共生营养型",
+  "未分类"
+)
+
+## 颜色顺序与图例顺序一致
+trophic_colors <- c(
+  "腐生营养型" = "#E69F00",
+  "共生营养型" = "#009E73",
+  "腐生-共生营养型" = "#E41A1C",
+  "病理营养型" = "#3C78D8",
+  "病理-腐生营养型" = "#6FA8DC",
+  "病理-共生营养型" = "#9FC5E8",
+  "病理-腐生-共生营养型" = "#1F4E79",
+  "未分类" = "#B45F06"
+)
+
+host_family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+## =========================
+## 3. 读取 metadata
+## =========================
+cat("读取 metadata ...\n")
+
+meta <- fread(
+  meta_file,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+if (!"host_family" %in% names(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+sample_id_candidates <- c(
+  "sample-id", "sample_id", "SampleID", "sampleid",
+  "#SampleID", "Sample", "sample", "Run", "run"
+)
+
+sample_col <- sample_id_candidates[sample_id_candidates %in% names(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中未找到样本ID列。现有列名：\n", paste(names(meta), collapse = ", "))
+}
+
+meta_use0 <- meta %>%
+  transmute(
+    SampleID = as.character(.data[[sample_col]]),
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(SampleID),
+    SampleID != "",
+    host_family %in% host_family_order
+  ) %>%
+  distinct(SampleID, .keep_all = TRUE)
+
+cat("metadata 中 5 个宿主科样本数：", nrow(meta_use0), "\n", sep = "")
+cat("metadata 宿主科样本数：\n")
+print(table(meta_use0$host_family))
+
+## =========================
+## 4. 读取 SH abundance table
+## =========================
+cat("\n读取 SH 丰度表 ...\n")
+
+sh_lines <- readLines(sh_abund_file, warn = FALSE)
+sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+## biom convert --to-tsv 可能第一行是说明行
+if (grepl("^# Constructed from biom file", sh_lines[1])) {
+  sh_lines <- sh_lines[-1]
+}
+
+abund_dt <- fread(
+  text = paste(sh_lines, collapse = "\n"),
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+id_col_abund <- get_id_col(abund_dt)
+cat("SH abundance ID 列：", id_col_abund, "\n", sep = "")
+
+sh_ids <- as.character(abund_dt[[id_col_abund]])
+
+abund_cols <- setdiff(names(abund_dt), id_col_abund)
+
+## 去掉可能存在的 taxonomy / metadata 列
+abund_cols <- abund_cols[!grepl("taxonomy|metadata", abund_cols, ignore.case = TRUE)]
+
+abund_mat <- as.matrix(abund_dt[, abund_cols, drop = FALSE])
+rownames(abund_mat) <- sh_ids
+storage.mode(abund_mat) <- "numeric"
+abund_mat[is.na(abund_mat)] <- 0
+
+cat("SH abundance matrix: ", nrow(abund_mat), " SHs × ", ncol(abund_mat), " samples\n", sep = "")
+
+common_samples <- intersect(colnames(abund_mat), meta_use0$SampleID)
+
+if (length(common_samples) == 0) {
+  stop("SH 丰度表样本名与 metadata 样本名没有交集。")
+}
+
+abund_mat <- abund_mat[, common_samples, drop = FALSE]
+
+meta_use <- meta_use0 %>%
+  filter(SampleID %in% common_samples)
+
+meta_use <- meta_use[match(colnames(abund_mat), meta_use$SampleID), ]
+
+sample_sums0 <- colSums(abund_mat, na.rm = TRUE)
+keep_samples <- sample_sums0 > 0
+
+abund_mat <- abund_mat[, keep_samples, drop = FALSE]
+meta_use <- meta_use[keep_samples, ]
+
+cat("用于分析的样本数：", ncol(abund_mat), "\n", sep = "")
+cat("用于分析的宿主科样本数：\n")
+print(table(meta_use$host_family))
+
+## =========================
+## 5. 读取 SH taxonomy 注释表
+## =========================
+cat("\n读取 SH taxonomy 注释表 ...\n")
+
+tax_dt <- fread(
+  tax_file,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+id_col_tax <- get_id_col(tax_dt)
+cat("SH taxonomy ID 列：", id_col_tax, "\n", sep = "")
+
+nms <- names(tax_dt)
+nms_lower <- tolower(nms)
+
+genus_col <- nms[match("genus", nms_lower)]
+species_col <- nms[match("species", nms_lower)]
+
+if (!is.na(genus_col) && !is.na(species_col)) {
+
+  cat("检测到独立 genus/species 列：", genus_col, ", ", species_col, "\n", sep = "")
+
+  gs_df <- data.frame(
+    genus = normalize_name(clean_rank_value(tax_dt[[genus_col]])),
+    species = normalize_name(clean_rank_value(tax_dt[[species_col]])),
+    stringsAsFactors = FALSE
+  )
+
+} else {
+
+  tax_col_candidates <- nms[grepl("taxonomy|taxon", nms, ignore.case = TRUE)]
+  tax_col <- if (length(tax_col_candidates) > 0) tax_col_candidates[1] else NA_character_
+
+  if (!is.na(tax_col)) {
+    cat("检测到 taxonomy 字符串列：", tax_col, "\n", sep = "")
+    gs_df <- extract_genus_species_from_taxonomy_string(tax_dt[[tax_col]])
+  } else {
+    stop(
+      "无法从 SH_taxonomy_matched.tsv 中识别 genus/species 信息。\n",
+      "当前列名为：\n",
+      paste(nms, collapse = ", ")
+    )
+  }
+}
+
+tax_use <- data.frame(
+  SH = as.character(tax_dt[[id_col_tax]]),
+  genus = gs_df$genus,
+  species = gs_df$species,
+  stringsAsFactors = FALSE
+)
+
+cat("taxonomy 总 SH 数：", nrow(tax_use), "\n", sep = "")
+cat("taxonomy 可识别 genus 的 SH 数：", sum(!is.na(tax_use$genus)), "\n", sep = "")
+cat("taxonomy 可识别 species 的 SH 数：", sum(!is.na(tax_use$species)), "\n", sep = "")
+
+tax_use <- tax_use %>%
+  filter(SH %in% rownames(abund_mat))
+
+missing_tax_sh <- setdiff(rownames(abund_mat), tax_use$SH)
+
+if (length(missing_tax_sh) > 0) {
+  tax_use <- bind_rows(
+    tax_use,
+    data.frame(
+      SH = missing_tax_sh,
+      genus = NA_character_,
+      species = NA_character_,
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+tax_use <- tax_use[match(rownames(abund_mat), tax_use$SH), ]
+
+cat("与丰度表匹配的 SH 数：", nrow(tax_use), "\n", sep = "")
+cat("匹配后可识别 genus 的 SH 数：", sum(!is.na(tax_use$genus)), "\n", sep = "")
+cat("匹配后可识别 species 的 SH 数：", sum(!is.na(tax_use$species)), "\n", sep = "")
+
+if (sum(!is.na(tax_use$genus)) == 0) {
+  stop("taxonomy 解析后 genus 全部为空，不能继续。")
+}
+
+## =========================
+## 6. 读取 FungalTraits，并建立 trophic mode 映射
+## =========================
+cat("\n读取 FungalTraits ...\n")
+
+ft <- fread(
+  fungaltraits_file,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+required_cols <- c("speciesMatched", "trait_name", "value")
+miss_cols <- setdiff(required_cols, names(ft))
+
+if (length(miss_cols) > 0) {
+  stop("funToTheFun.csv 缺少关键列：", paste(miss_cols, collapse = ", "))
+}
+
+valid_modes <- c(
+  "Saprotroph",
+  "Symbiotroph",
+  "Saprotroph-Symbiotroph",
+  "Pathotroph",
+  "Pathotroph-Saprotroph",
+  "Pathotroph-Symbiotroph",
+  "Pathotroph-Saprotroph-Symbiotroph"
+)
+
+ft_use <- ft %>%
+  filter(trait_name == "trophic_mode_fg") %>%
+  transmute(
+    speciesMatched_raw = as.character(speciesMatched),
+    speciesMatched_norm = normalize_name(speciesMatched),
+    trophic_mode = trimws(as.character(value))
+  ) %>%
+  filter(
+    !is.na(speciesMatched_norm),
+    trophic_mode %in% valid_modes
+  ) %>%
+  distinct()
+
+cat("FungalTraits trophic_mode_fg 记录数：", nrow(ft_use), "\n", sep = "")
+
+## species 精确映射：speciesMatched_norm -> trophic_mode
+## 如果同一 speciesMatched 有多个 trophic mode，保守设为 NA，不强行归类
+species_map_stat <- ft_use %>%
+  group_by(speciesMatched_norm) %>%
+  summarise(
+    n_mode = n_distinct(trophic_mode),
+    trophic_mode = ifelse(n_distinct(trophic_mode) == 1, unique(trophic_mode), NA_character_),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(trophic_mode))
+
+## genus fallback 映射，采用两个保守来源：
+## A. FungalTraits 中显式的 “Genus sp.” 记录
+genus_map_explicit <- ft_use %>%
+  mutate(
+    is_genus_sp = grepl("^[a-z][a-z0-9.-]+\\s+sp\\.?$", speciesMatched_norm),
+    genus_norm = ifelse(is_genus_sp, sub("\\s+sp\\.?$", "", speciesMatched_norm), NA_character_)
+  ) %>%
+  filter(!is.na(genus_norm)) %>%
+  select(genus_norm, trophic_mode) %>%
+  distinct()
+
+## B. 同一 genus 下所有已知 species 的 trophic mode 完全一致时，才作为 genus fallback
+genus_map_from_species <- ft_use %>%
+  mutate(
+    genus_norm = sub("\\s+.*$", "", speciesMatched_norm)
+  ) %>%
+  filter(
+    !is.na(genus_norm),
+    genus_norm != "",
+    !grepl("\\s+sp\\.?$", speciesMatched_norm)
+  ) %>%
+  select(genus_norm, trophic_mode) %>%
+  distinct()
+
+genus_map_all <- bind_rows(
+  genus_map_explicit,
+  genus_map_from_species
+) %>%
+  distinct()
+
+genus_map_stat <- genus_map_all %>%
+  group_by(genus_norm) %>%
+  summarise(
+    n_mode = n_distinct(trophic_mode),
+    trophic_mode = ifelse(n_distinct(trophic_mode) == 1, unique(trophic_mode), NA_character_),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(trophic_mode))
+
+cat("species 级可用映射数：", nrow(species_map_stat), "\n", sep = "")
+cat("genus 级保守 fallback 映射数：", nrow(genus_map_stat), "\n", sep = "")
+
+## =========================
+## 7. 给每个 SH 匹配 trophic mode
+## =========================
+cat("\n匹配每个 SH 的 trophic mode ...\n")
+
+sh_anno <- tax_use
+
+sh_anno <- sh_anno %>%
+  left_join(
+    species_map_stat %>% select(speciesMatched_norm, trophic_mode),
+    by = c("species" = "speciesMatched_norm")
+  ) %>%
+  rename(trophic_species = trophic_mode)
+
+sh_anno <- sh_anno %>%
+  left_join(
+    genus_map_stat %>% select(genus_norm, trophic_mode),
+    by = c("genus" = "genus_norm")
+  ) %>%
+  rename(trophic_genus = trophic_mode)
+
+sh_anno <- sh_anno %>%
+  mutate(
+    match_method = case_when(
+      !is.na(trophic_species) ~ "species",
+      is.na(trophic_species) & !is.na(trophic_genus) ~ "genus_fallback",
+      TRUE ~ "unmatched"
+    ),
+    trophic_mode_raw = case_when(
+      !is.na(trophic_species) ~ trophic_species,
+      is.na(trophic_species) & !is.na(trophic_genus) ~ trophic_genus,
+      TRUE ~ NA_character_
+    ),
+    trophic_mode_cn = translate_trophic(trophic_mode_raw),
+    trophic_mode_cn = ifelse(is.na(trophic_mode_cn), "未分类", trophic_mode_cn)
+  )
+
+write.table(
+  sh_anno,
+  file = assign_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+cat("SH 匹配方法统计：\n")
+print(table(sh_anno$match_method, useNA = "ifany"))
+
+cat("SH 营养型匹配结果：\n")
+print(table(sh_anno$trophic_mode_cn, useNA = "ifany"))
+
+match_summary <- sh_anno %>%
+  count(match_method, trophic_mode_cn, name = "SH_number") %>%
+  arrange(match_method, trophic_mode_cn)
+
+write.csv(match_summary, match_summary_csv, row.names = FALSE)
+
+## 如果仍然全部未分类，直接报错，避免继续输出误导图
+if (all(sh_anno$trophic_mode_cn == "未分类")) {
+  stop("所有 SH 都被归为未分类。请检查 FungalTraits speciesMatched 与 taxonomy species/genus 格式。")
+}
+
+## =========================
+## 8. 在样本内汇总营养型丰度，并转为相对多度
+## =========================
+cat("\n按营养型汇总样本内丰度 ...\n")
+
+sh_anno <- sh_anno[match(rownames(abund_mat), sh_anno$SH), ]
+
+group_vec <- factor(sh_anno$trophic_mode_cn, levels = trophic_order)
+
+mode_count_mat <- rowsum(
+  abund_mat,
+  group = group_vec,
+  reorder = FALSE
+)
+
+missing_modes <- setdiff(trophic_order, rownames(mode_count_mat))
+
+if (length(missing_modes) > 0) {
+  add_mat <- matrix(
+    0,
+    nrow = length(missing_modes),
+    ncol = ncol(mode_count_mat),
+    dimnames = list(missing_modes, colnames(mode_count_mat))
+  )
+  mode_count_mat <- rbind(mode_count_mat, add_mat)
+}
+
+mode_count_mat <- mode_count_mat[trophic_order, , drop = FALSE]
+
+sample_total <- colSums(mode_count_mat, na.rm = TRUE)
+
+if (any(sample_total == 0)) {
+  stop("存在营养型汇总后总丰度为0的样本。")
+}
+
+mode_rel_mat <- sweep(mode_count_mat, 2, sample_total, "/") * 100
+
+sample_rel_df <- as.data.frame(t(mode_rel_mat), check.names = FALSE)
+sample_rel_df$SampleID <- rownames(sample_rel_df)
+
+sample_rel_df <- sample_rel_df %>%
+  left_join(meta_use, by = "SampleID") %>%
+  select(SampleID, host_family, all_of(trophic_order))
+
+write.csv(sample_rel_df, file = sample_csv, row.names = FALSE)
+
+## =========================
+## 9. 宿主科水平：平均相对多度
+## =========================
+cat("\n计算宿主科平均相对多度 ...\n")
+
+family_mean_df <- sample_rel_df %>%
+  group_by(host_family) %>%
+  summarise(
+    across(all_of(trophic_order), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(host_family = factor(host_family, levels = host_family_order)) %>%
+  arrange(host_family)
+
+write.csv(family_mean_df, file = summary_csv, row.names = FALSE)
+
+cat("宿主科平均相对多度合计检查：\n")
+print(
+  family_mean_df %>%
+    mutate(total = rowSums(across(all_of(trophic_order)))) %>%
+    select(host_family, total)
+)
+
+plot_df <- family_mean_df %>%
+  pivot_longer(
+    cols = all_of(trophic_order),
+    names_to = "TrophicMode",
+    values_to = "MeanRelativeAbundance"
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = host_family_order),
+    TrophicMode = factor(TrophicMode, levels = trophic_order)
+  )
+
+## =========================
+## 10. 绘图
+## =========================
+cat("\n绘图 ...\n")
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = host_family,
+    y = MeanRelativeAbundance,
+    fill = TrophicMode
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = "grey35",
+    linewidth = 0.18
+  ) +
+  scale_fill_manual(
+    values = trophic_colors,
+    breaks = trophic_order,
+    name = "营养型",
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 15) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.20, "cm"),
+    axis.text.x = element_text(size = 13, angle = 0, hjust = 0.5, vjust = 0.5, colour = "black"),
+    axis.text.y = element_text(size = 13, colour = "black"),
+    axis.title.y = element_text(size = 17, colour = "black"),
+    legend.title = element_text(size = 15, colour = "black"),
+    legend.text = element_text(size = 12, colour = "black"),
+    legend.key.size = unit(0.45, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    legend.position = "right",
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  )
+
+ggsave(
+  plot_png,
+  plot = p,
+  width = 10.5,
+  height = 7.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  plot_pdf,
+  plot = p,
+  width = 10.5,
+  height = 7.2,
+  bg = "white"
+)
+
+## =========================
+## 11. 输出摘要
+## =========================
+sample_n_by_family <- meta_use %>%
+  count(host_family, name = "n") %>%
+  mutate(host_family = factor(host_family, levels = host_family_order)) %>%
+  arrange(host_family)
+
+txt_lines <- c(
+  "不同宿主科肠道真菌群落营养型组成（no_elephant版）结果摘要",
+  paste0("总样本数：", nrow(meta_use)),
+  "",
+  "各宿主科样本数："
+)
+
+for (i in seq_len(nrow(sample_n_by_family))) {
+  txt_lines <- c(
+    txt_lines,
+    paste0(as.character(sample_n_by_family$host_family[i]), ": ", sample_n_by_family$n[i])
+  )
+}
+
+txt_lines <- c(
+  txt_lines,
+  "",
+  "SH匹配方法统计："
+)
+
+method_tab <- as.data.frame(table(sh_anno$match_method), stringsAsFactors = FALSE)
+names(method_tab) <- c("match_method", "SH_number")
+
+for (i in seq_len(nrow(method_tab))) {
+  txt_lines <- c(
+    txt_lines,
+    paste0(method_tab$match_method[i], ": ", method_tab$SH_number[i])
+  )
+}
+
+txt_lines <- c(
+  txt_lines,
+  "",
+  "SH营养型统计："
+)
+
+mode_tab <- as.data.frame(table(sh_anno$trophic_mode_cn), stringsAsFactors = FALSE)
+names(mode_tab) <- c("trophic_mode", "SH_number")
+
+for (i in seq_len(nrow(mode_tab))) {
+  txt_lines <- c(
+    txt_lines,
+    paste0(mode_tab$trophic_mode[i], ": ", mode_tab$SH_number[i])
+  )
+}
+
+txt_lines <- c(
+  txt_lines,
+  "",
+  "各宿主科平均相对多度（%）："
+)
+
+for (i in seq_len(nrow(family_mean_df))) {
+  fam <- as.character(family_mean_df$host_family[i])
+  vals <- family_mean_df[i, trophic_order, drop = FALSE]
+  vals_str <- paste(
+    paste0(colnames(vals), "=", sprintf("%.2f", as.numeric(vals[1, ])), "%"),
+    collapse = "; "
+  )
+  txt_lines <- c(txt_lines, paste0(fam, ": ", vals_str))
+}
+
+writeLines(txt_lines, con = summary_txt)
+
+cat("\n完成！\n")
+cat("PNG: ", plot_png, "\n", sep = "")
+cat("PDF: ", plot_pdf, "\n", sep = "")
+cat("宿主科平均相对多度表: ", summary_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", sample_csv, "\n", sep = "")
+cat("SH营养型匹配表: ", assign_tsv, "\n", sep = "")
+cat("SH匹配摘要表: ", match_summary_csv, "\n", sep = "")
+cat("文字摘要: ", summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_trophic_mode_bar_no_elephant.R
+#跑完后你重点看终端里的这几行：
+#匹配后可识别 genus 的 SH 数
+#匹配后可识别 species 的 SH 数
+#SH 匹配方法统计
+#SH 营养型匹配结果
