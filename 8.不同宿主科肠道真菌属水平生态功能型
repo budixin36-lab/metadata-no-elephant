@@ -1,0 +1,3337 @@
+#用 Table S1 属水平注释表，再配合你已经生成好的 genus_abundance_table_no_elephant.tsv，这是合理的。
+#我先把关键判断说清楚：
+#genus_abundance_table_no_elephant.tsv 适合直接用。
+#因为 Table S1 本来就是 genus-level annotations，文章也明确说 genus-level 和 SH-level annotations 分别作为 Table S1 和 Table S3 发布，并可通过 genus names 或 SH codes 给 HTS 输出表做功能性状赋值。
+#你现在要用 Table S1 的 primary_lifestyle，所以直接用属水平丰度表，比绕回 SH 表再汇总更直接。
+#这次图不再叫“营养型 trophic mode 组成”更合适。
+#Table S1 里没有旧 trophic_mode_fg，核心字段是 primary_lifestyle、Secondary_lifestyle 等。文章 Table 1 也把 primary_lifestyle 标为 genus-level 的 primary guild 字段，secondary_lifestyle 是 secondary guild 字段。
+#所以图名建议改成：图3-5 不同宿主科肠道真菌属水平生态功能型组成 或 图3-5 不同宿主科肠道真菌群落 primary lifestyle 组成
+#异名要谨慎处理。
+#Table S1 的 COMMENT on genus 里确实有很多 “synonym of X” 这种信息，但它不是规范的“同物异名映射表”。文章也提醒 genus names 被 synonymised 或 split 时并没有自动程序处理。
+#所以代码里会采用：直接匹配 GENUS 优先；只有直接匹配不到时，才尝试使用 COMMENT on genus 中唯一、明确的 synonym target 作为保守补充；所有匹配方式都会输出到表里供你检查。
+#我用你上传的两个文件粗查了一下：
+#genus_abundance_table_no_elephant.tsv 有 2687 个属级条目、3237 个样本列；Table S1 有 10771 行、10765 个唯一属名。直接按属名匹配时，能匹配 2107/2687 个属名；按总丰度看，直接匹配覆盖约 88.85% reads。未匹配的主要是 Fungi_gen_Incertae_sedis、Ascomycota_gen_Incertae_sedis、各种高阶分类的 gen_Incertae_sedis，这些本来就不应该强行赋予属水平生态功能型。
+#下面是完整脚本。它会输出图、匹配表、组成表和摘要文件。
+#完整脚本，直接复制整段到 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/08_host_family_primary_lifestyle_bar_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-5 不同宿主科肠道真菌属水平生态功能型组成
+## 基于 FungalTraits Table S1: primary_lifestyle
+##
+## 核心口径：
+## 1. 使用 no_elephant 属水平丰度表；
+## 2. 使用 no_elephant metadata 提供 host_family；
+## 3. 使用 FungalTraits Table S1 的 GENUS 与 primary_lifestyle 注释属；
+## 4. 优先直接匹配 GENUS；
+## 5. 未直接匹配时，谨慎使用 COMMENT on genus 中的 "synonym of X" 做补充匹配；
+## 6. 未匹配或 ambiguous 的属归为“未分类”；
+## 7. 每个样本内先转为相对多度，再按宿主科求平均；
+## 8. 输出 600 dpi PNG、PDF 和中间表。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R包路径与依赖
+## =========================
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "tidyr", "ggplot2", "openxlsx", "stringr")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(openxlsx)
+  library(stringr)
+})
+
+## =========================
+## 1. 输入输出路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_abund_file <- file.path(
+  base_dir,
+  "taxonomy/genus_abundance_table_no_elephant.tsv"
+)
+
+## 你截图里的 Windows 下载路径，对应 WSL 路径如下
+fungaltraits_s1_file <- "/mnt/c/Users/hp/Downloads/Table S1. Traits of genera.xlsx"
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_primary_lifestyle_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+plot_png <- file.path(out_dir, "Fig3_5_host_family_primary_lifestyle_bar_no_elephant.png")
+plot_pdf <- file.path(out_dir, "Fig3_5_host_family_primary_lifestyle_bar_no_elephant.pdf")
+
+annotation_csv <- file.path(out_dir, "genus_primary_lifestyle_annotation_no_elephant.csv")
+sample_csv <- file.path(out_dir, "sample_primary_lifestyle_relative_abundance_no_elephant.csv")
+family_csv <- file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant.csv")
+summary_txt <- file.path(out_dir, "host_family_primary_lifestyle_summary_no_elephant.txt")
+
+for (f in c(metadata_file, genus_abund_file, fungaltraits_s1_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+cat("Metadata file:\n", metadata_file, "\n\n")
+cat("Genus abundance table:\n", genus_abund_file, "\n\n")
+cat("FungalTraits Table S1:\n", fungaltraits_s1_file, "\n\n")
+
+## =========================
+## 2. 工具函数
+## =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA_character_
+  x
+}
+
+norm_genus <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^g__", "", x)
+  x <- gsub("_", " ", x)
+  x <- trimws(x)
+  x <- str_squish(x)
+  x[x %in% c("", "NA", "na", "N/A", "unknown", "Unknown", "unclassified")] <- NA_character_
+  tolower(x)
+}
+
+pretty_lifestyle <- function(x) {
+  dplyr::case_when(
+    x == "wood_saprotroph" ~ "木材腐生型",
+    x == "litter_saprotroph" ~ "凋落物腐生型",
+    x == "soil_saprotroph" ~ "土壤腐生型",
+    x == "unspecified_saprotroph" ~ "未明确腐生型",
+    x == "dung_saprotroph" ~ "粪生腐生型",
+    x == "nectar/tap_saprotroph" ~ "花蜜/树液腐生型",
+    x == "pollen_saprotroph" ~ "花粉腐生型",
+
+    x == "plant_pathogen" ~ "植物病原型",
+    x == "animal_parasite" ~ "动物寄生型",
+    x == "algal_parasite" ~ "藻类寄生型",
+    x == "protistan_parasite" ~ "原生生物寄生型",
+    x == "lichen_parasite" ~ "地衣寄生型",
+    x == "mycoparasite" ~ "真菌寄生型",
+    x == "unspecified_pathotroph" ~ "未明确病理型",
+
+    x == "lichenized" ~ "地衣型",
+    x == "ectomycorrhizal" ~ "外生菌根型",
+    x == "arbuscular_mycorrhizal" ~ "丛枝菌根型",
+    x == "moss_symbiont" ~ "苔藓共生型",
+    x == "unspecified_symbiotroph" ~ "未明确共生型",
+    x == "animal_endosymbiont" ~ "动物内共生型",
+    x == "algal_ectosymbiont" ~ "藻类外共生型",
+
+    x == "foliar_endophyte" ~ "叶内生型",
+    x == "root_endophyte" ~ "根内生型",
+    x == "epiphyte" ~ "附生型",
+
+    x == "sooty_mold" ~ "煤污菌型",
+    x == "animal-associated" ~ "动物相关型",
+    x == "arthropod-associated" ~ "节肢动物相关型",
+    x == "bacterivorous" ~ "食细菌型",
+    x == "algivorous/protistivorous" ~ "食藻/食原生生物型",
+    x == "unspecified" ~ "未明确型",
+
+    TRUE ~ "未分类"
+  )
+}
+
+extract_synonym_target <- function(comment) {
+  comment <- as.character(comment)
+  comment[is.na(comment)] <- ""
+
+  ## 只处理明确 “synonym of X” 的情况。
+  hit <- str_match(comment, regex("synonym of\\s+([A-Za-z][A-Za-z.-]*)", ignore_case = TRUE))[, 2]
+  hit <- norm_genus(hit)
+  hit
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "找不到列：", label,
+      "\n尝试列名：", paste(candidates, collapse = ", "),
+      "\n实际列名：", paste(cols, collapse = ", ")
+    )
+  }
+  hit
+}
+
+host_family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+## primary_lifestyle 的中文显示顺序
+lifestyle_order_cn <- c(
+  "木材腐生型",
+  "凋落物腐生型",
+  "土壤腐生型",
+  "未明确腐生型",
+  "粪生腐生型",
+  "花蜜/树液腐生型",
+  "花粉腐生型",
+
+  "植物病原型",
+  "动物寄生型",
+  "藻类寄生型",
+  "原生生物寄生型",
+  "地衣寄生型",
+  "真菌寄生型",
+  "未明确病理型",
+
+  "地衣型",
+  "外生菌根型",
+  "丛枝菌根型",
+  "苔藓共生型",
+  "未明确共生型",
+  "动物内共生型",
+  "藻类外共生型",
+
+  "叶内生型",
+  "根内生型",
+  "附生型",
+
+  "煤污菌型",
+  "动物相关型",
+  "节肢动物相关型",
+  "食细菌型",
+  "食藻/食原生生物型",
+  "未明确型",
+  "未分类"
+)
+
+## 手动配色：尽量避免相邻类型颜色太接近
+lifestyle_colors <- c(
+  "木材腐生型" = "#E69F00",
+  "凋落物腐生型" = "#F0C808",
+  "土壤腐生型" = "#B8860B",
+  "未明确腐生型" = "#D55E00",
+  "粪生腐生型" = "#8C510A",
+  "花蜜/树液腐生型" = "#FDB863",
+  "花粉腐生型" = "#BF812D",
+
+  "植物病原型" = "#E41A1C",
+  "动物寄生型" = "#984EA3",
+  "藻类寄生型" = "#F781BF",
+  "原生生物寄生型" = "#A65628",
+  "地衣寄生型" = "#FB8072",
+  "真菌寄生型" = "#B2182B",
+  "未明确病理型" = "#C51B7D",
+
+  "地衣型" = "#009E73",
+  "外生菌根型" = "#1B9E77",
+  "丛枝菌根型" = "#66A61E",
+  "苔藓共生型" = "#A6D854",
+  "未明确共生型" = "#5AAE61",
+  "动物内共生型" = "#00A087",
+  "藻类外共生型" = "#7FC97F",
+
+  "叶内生型" = "#4DBBD5",
+  "根内生型" = "#3C78D8",
+  "附生型" = "#80B1D3",
+
+  "煤污菌型" = "#999999",
+  "动物相关型" = "#6A3D9A",
+  "节肢动物相关型" = "#CAB2D6",
+  "食细菌型" = "#B15928",
+  "食藻/食原生生物型" = "#A6CEE3",
+  "未明确型" = "#636363",
+  "未分类" = "#D9D9D9"
+)
+
+## =========================
+## 3. 读取 metadata
+## =========================
+cat("读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  stringsAsFactors = FALSE
+) %>%
+  filter(
+    !is.na(sample_id),
+    !is.na(host_family),
+    host_family %in% host_family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+cat("metadata 样本数：", nrow(meta2), "\n", sep = "")
+cat("metadata 宿主科样本数：\n")
+print(table(meta2$host_family))
+
+## =========================
+## 4. 读取 genus abundance table
+## =========================
+cat("\n读取 genus abundance table ...\n")
+
+genus_tab <- read.delim(
+  genus_abund_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table_no_elephant.tsv 列数异常。")
+}
+
+colnames(genus_tab)[1] <- "genus"
+
+genus_tab$genus_raw <- as.character(genus_tab$genus)
+genus_tab$genus_norm <- norm_genus(genus_tab$genus_raw)
+
+sample_cols <- setdiff(colnames(genus_tab), c("genus", "genus_raw", "genus_norm"))
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(as.character(genus_tab[[cc]])))
+}
+
+genus_tab[is.na(genus_tab)] <- 0
+
+## 合并重复 genus_norm
+genus_tab2 <- genus_tab %>%
+  filter(!is.na(genus_norm)) %>%
+  group_by(genus_norm) %>%
+  summarise(
+    genus_raw_joined = paste(unique(genus_raw), collapse = "; "),
+    across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+cat("genus 丰度表属数：", nrow(genus_tab2), "\n", sep = "")
+
+common_samples <- intersect(sample_cols, meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("genus abundance table 和 metadata 没有共同样本。")
+}
+
+genus_tab2 <- genus_tab2 %>%
+  select(genus_norm, genus_raw_joined, all_of(common_samples))
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% common_samples)
+
+meta_use <- meta_use[match(common_samples, meta_use$sample_id), ]
+
+cat("用于分析的样本数：", length(common_samples), "\n", sep = "")
+
+## =========================
+## 5. 读取 FungalTraits Table S1
+## =========================
+cat("\n读取 FungalTraits Table S1 ...\n")
+
+traits <- openxlsx::read.xlsx(
+  fungaltraits_s1_file,
+  sheet = "data",
+  check.names = FALSE
+)
+
+need_cols <- c("GENUS", "primary_lifestyle")
+miss <- setdiff(need_cols, colnames(traits))
+if (length(miss) > 0) {
+  stop("Table S1 缺少关键列：", paste(miss, collapse = ", "))
+}
+
+comment_col <- "COMMENT on genus"
+if (!comment_col %in% colnames(traits)) {
+  traits[[comment_col]] <- NA_character_
+}
+
+traits2 <- traits %>%
+  transmute(
+    GENUS_raw = as.character(GENUS),
+    genus_norm = norm_genus(GENUS),
+    primary_lifestyle_raw = clean_value(primary_lifestyle),
+    primary_lifestyle_cn = pretty_lifestyle(primary_lifestyle_raw),
+    comment_on_genus = as.character(.data[[comment_col]]),
+    synonym_target_norm = extract_synonym_target(comment_on_genus)
+  ) %>%
+  filter(!is.na(genus_norm))
+
+cat("Table S1 总行数：", nrow(traits2), "\n", sep = "")
+cat("Table S1 唯一属数：", n_distinct(traits2$genus_norm), "\n", sep = "")
+
+## ---- 5.1 直接 GENUS 匹配表 ----
+## 如果同一 GENUS 有多个不同 primary_lifestyle，标为 ambiguous，后面归未分类
+direct_map <- traits2 %>%
+  group_by(genus_norm) %>%
+  summarise(
+    GENUS_raw_joined = paste(unique(GENUS_raw), collapse = "; "),
+    primary_lifestyle_raw_joined = paste(unique(na.omit(primary_lifestyle_raw)), collapse = "; "),
+    n_lifestyle = n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]) == 1,
+      unique(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)])[1],
+      NA_character_
+    ),
+    comment_joined = paste(unique(na.omit(comment_on_genus)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    direct_status = case_when(
+      is.na(primary_lifestyle_cn) ~ "direct_ambiguous_or_missing",
+      TRUE ~ "direct"
+    )
+  )
+
+## ---- 5.2 基于 COMMENT on genus 的 synonym target 补充表 ----
+## 只在 direct 没有匹配到时作为 fallback。
+## 同一个 target 若对应多个 lifestyle，则不用，避免误配。
+synonym_map <- traits2 %>%
+  filter(!is.na(synonym_target_norm), !is.na(primary_lifestyle_cn)) %>%
+  group_by(synonym_target_norm) %>%
+  summarise(
+    synonym_source_genera = paste(unique(GENUS_raw), collapse = "; "),
+    synonym_lifestyle_raw_joined = paste(unique(na.omit(primary_lifestyle_raw)), collapse = "; "),
+    n_lifestyle = n_distinct(primary_lifestyle_cn),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn) == 1,
+      unique(primary_lifestyle_cn)[1],
+      NA_character_
+    ),
+    synonym_comments = paste(unique(na.omit(comment_on_genus)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(primary_lifestyle_cn))
+
+cat("COMMENT synonym fallback 可用 target 数：", nrow(synonym_map), "\n", sep = "")
+
+## =========================
+## 6. 给属丰度表做功能型注释
+## =========================
+cat("\n匹配 genus -> primary_lifestyle ...\n")
+
+genus_anno <- genus_tab2 %>%
+  select(genus_norm, genus_raw_joined) %>%
+  left_join(
+    direct_map %>%
+      select(
+        genus_norm,
+        direct_GENUS = GENUS_raw_joined,
+        direct_primary_lifestyle_raw = primary_lifestyle_raw_joined,
+        direct_lifestyle_cn = primary_lifestyle_cn,
+        direct_status,
+        direct_comment = comment_joined
+      ),
+    by = "genus_norm"
+  ) %>%
+  left_join(
+    synonym_map %>%
+      select(
+        synonym_target_norm,
+        synonym_source_genera,
+        synonym_lifestyle_raw_joined,
+        synonym_lifestyle_cn = primary_lifestyle_cn,
+        synonym_comments
+      ),
+    by = c("genus_norm" = "synonym_target_norm")
+  ) %>%
+  mutate(
+    match_method = case_when(
+      !is.na(direct_lifestyle_cn) ~ "direct_GENUS",
+      is.na(direct_lifestyle_cn) & !is.na(synonym_lifestyle_cn) ~ "synonym_comment_fallback",
+      !is.na(direct_status) & direct_status == "direct_ambiguous_or_missing" ~ "direct_ambiguous_or_missing",
+      TRUE ~ "unmatched"
+    ),
+    primary_lifestyle_cn = case_when(
+      !is.na(direct_lifestyle_cn) ~ direct_lifestyle_cn,
+      is.na(direct_lifestyle_cn) & !is.na(synonym_lifestyle_cn) ~ synonym_lifestyle_cn,
+      TRUE ~ "未分类"
+    )
+  )
+
+write.csv(genus_anno, annotation_csv, row.names = FALSE)
+
+cat("属名匹配方式统计：\n")
+print(table(genus_anno$match_method, useNA = "ifany"))
+
+cat("属数层面功能型统计：\n")
+print(table(genus_anno$primary_lifestyle_cn, useNA = "ifany"))
+
+## =========================
+## 7. 样本内计算相对多度
+## =========================
+cat("\n计算样本水平生态功能型相对多度 ...\n")
+
+abund_df <- genus_tab2 %>%
+  left_join(
+    genus_anno %>% select(genus_norm, primary_lifestyle_cn),
+    by = "genus_norm"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(is.na(primary_lifestyle_cn), "未分类", primary_lifestyle_cn)
+  )
+
+abund_long <- abund_df %>%
+  select(genus_norm, primary_lifestyle_cn, all_of(common_samples)) %>%
+  pivot_longer(
+    cols = all_of(common_samples),
+    names_to = "sample_id",
+    values_to = "abundance"
+  )
+
+mode_sample_count <- abund_long %>%
+  group_by(sample_id, primary_lifestyle_cn) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sample_total <- mode_sample_count %>%
+  group_by(sample_id) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sample_rel <- mode_sample_count %>%
+  left_join(sample_total, by = "sample_id") %>%
+  mutate(
+    relative_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  ) %>%
+  select(sample_id, primary_lifestyle_cn, relative_abundance) %>%
+  complete(
+    sample_id = common_samples,
+    primary_lifestyle_cn = lifestyle_order_cn,
+    fill = list(relative_abundance = 0)
+  ) %>%
+  left_join(meta_use, by = c("sample_id" = "sample_id"))
+
+write.csv(sample_rel, sample_csv, row.names = FALSE)
+
+## =========================
+## 8. 宿主科平均相对多度
+## =========================
+cat("计算宿主科平均相对多度 ...\n")
+
+family_mean <- sample_rel %>%
+  group_by(host_family, primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    host_family = host_family_order,
+    primary_lifestyle_cn = lifestyle_order_cn,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = host_family_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = lifestyle_order_cn)
+  ) %>%
+  arrange(host_family, primary_lifestyle_cn)
+
+write.csv(family_mean, family_csv, row.names = FALSE)
+
+cat("各宿主科加总检查，应接近100：\n")
+print(
+  family_mean %>%
+    group_by(host_family) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop")
+)
+
+## 删除所有宿主科均为 0 的功能型，避免图例太长
+plot_df <- family_mean %>%
+  group_by(primary_lifestyle_cn) %>%
+  mutate(overall_mean = mean(mean_relative_abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(overall_mean > 0) %>%
+  mutate(
+    primary_lifestyle_cn = factor(
+      as.character(primary_lifestyle_cn),
+      levels = lifestyle_order_cn[lifestyle_order_cn %in% unique(as.character(primary_lifestyle_cn))]
+    )
+  )
+
+used_levels <- levels(plot_df$primary_lifestyle_cn)
+used_colors <- lifestyle_colors[used_levels]
+
+## =========================
+## 9. 绘图
+## =========================
+cat("\n绘图 ...\n")
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = host_family,
+    y = mean_relative_abundance,
+    fill = primary_lifestyle_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = "grey35",
+    linewidth = 0.16
+  ) +
+  scale_fill_manual(
+    values = used_colors,
+    breaks = used_levels,
+    name = "生态功能型",
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, 100), clip = "off") +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 15) +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.20, "cm"),
+    axis.text.x = element_text(size = 13, angle = 0, hjust = 0.5, colour = "black"),
+    axis.text.y = element_text(size = 13, colour = "black"),
+    axis.title.y = element_text(size = 17, colour = "black"),
+    legend.title = element_text(size = 14, colour = "black"),
+    legend.text = element_text(size = 10.5, colour = "black"),
+    legend.key.size = unit(0.42, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  )
+
+ggsave(
+  plot_png,
+  p,
+  width = 11.2,
+  height = 7.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  plot_pdf,
+  p,
+  width = 11.2,
+  height = 7.2,
+  bg = "white"
+)
+
+## =========================
+## 10. 输出摘要
+## =========================
+sample_n_by_family <- meta_use %>%
+  count(host_family, name = "n") %>%
+  mutate(host_family = factor(host_family, levels = host_family_order)) %>%
+  arrange(host_family)
+
+match_tab <- genus_anno %>%
+  count(match_method, name = "genus_number") %>%
+  arrange(desc(genus_number))
+
+## 按总丰度算匹配覆盖
+genus_total <- genus_tab2 %>%
+  mutate(total_abundance = rowSums(across(all_of(common_samples)), na.rm = TRUE)) %>%
+  select(genus_norm, total_abundance)
+
+coverage_by_abundance <- genus_total %>%
+  left_join(genus_anno %>% select(genus_norm, match_method, primary_lifestyle_cn), by = "genus_norm") %>%
+  mutate(classified = primary_lifestyle_cn != "未分类") %>%
+  summarise(
+    total_abundance = sum(total_abundance, na.rm = TRUE),
+    classified_abundance = sum(total_abundance[classified], na.rm = TRUE),
+    classified_percent = classified_abundance / total_abundance * 100
+  )
+
+txt <- c(
+  "不同宿主科肠道真菌属水平生态功能型组成（no_elephant版）",
+  "",
+  paste0("输入 genus abundance table: ", genus_abund_file),
+  paste0("输入 FungalTraits Table S1: ", fungaltraits_s1_file),
+  "",
+  "计算口径：",
+  "1. 使用 genus_abundance_table_no_elephant.tsv 作为属水平丰度表；",
+  "2. 使用 FungalTraits Table S1 的 GENUS 与 primary_lifestyle 进行属水平生态功能型注释；",
+  "3. 直接匹配 GENUS 优先，COMMENT on genus 中明确 synonym of X 的记录仅作为 fallback；",
+  "4. 未匹配、无 primary_lifestyle 或重复属名功能型不一致者归为未分类；",
+  "5. 先在每个样本内计算各生态功能型相对多度，再按宿主科求平均。",
+  "",
+  "各宿主科样本数："
+)
+
+for (i in seq_len(nrow(sample_n_by_family))) {
+  txt <- c(txt, paste0(as.character(sample_n_by_family$host_family[i]), ": ", sample_n_by_family$n[i]))
+}
+
+txt <- c(txt, "", "属名匹配方式统计：")
+for (i in seq_len(nrow(match_tab))) {
+  txt <- c(txt, paste0(match_tab$match_method[i], ": ", match_tab$genus_number[i]))
+}
+
+txt <- c(
+  txt,
+  "",
+  paste0(
+    "按总丰度计算，已获得生态功能型注释的属丰度占比：",
+    sprintf("%.2f", coverage_by_abundance$classified_percent),
+    "%"
+  ),
+  "",
+  "各宿主科平均相对多度（%）："
+)
+
+family_wide <- family_mean %>%
+  pivot_wider(
+    names_from = primary_lifestyle_cn,
+    values_from = mean_relative_abundance,
+    values_fill = 0
+  )
+
+for (i in seq_len(nrow(family_wide))) {
+  fam <- as.character(family_wide$host_family[i])
+  vals <- family_wide[i, setdiff(colnames(family_wide), "host_family"), drop = FALSE]
+  vals <- vals[, colSums(vals) > 0, drop = FALSE]
+  line <- paste(
+    paste0(colnames(vals), "=", sprintf("%.2f", as.numeric(vals[1, ])), "%"),
+    collapse = "; "
+  )
+  txt <- c(txt, paste0(fam, ": ", line))
+}
+
+writeLines(txt, summary_txt)
+
+cat("\n完成！\n")
+cat("PNG: ", plot_png, "\n", sep = "")
+cat("PDF: ", plot_pdf, "\n", sep = "")
+cat("属注释表: ", annotation_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", sample_csv, "\n", sep = "")
+cat("宿主科平均相对多度表: ", family_csv, "\n", sep = "")
+cat("摘要: ", summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/08_host_family_primary_lifestyle_bar_no_elephant.R
+#图3-5 不同宿主科肠道真菌属水平功能类群组成
+#不要再叫“营养型组成”，因为现在依据的是 FungalTraits Table S1 的 primary_lifestyle，它更接近“功能类群 / 生态功能类群 / primary guild”，不是之前旧 trophic_mode_fg 那套 trophic mode。
+#另外，你图例里的中文看着不像简体中文，主要是 R 作图设备没有固定使用简体中文字体，系统自动 fallback 到了其他 CJK 字体。这次代码里我会强制用 Windows 的 宋体 SimSun，避免再出现奇怪字形。图例标题“生态功能型”也会删掉，横轴宿主科名会改成中文：牛科、猪科、鹿科、马科、犀科。
+#下面给你一份完整最终版脚本。
+#这版已经按你刚才的要求改好了：
+#“未明确病理型”→“未定义病原菌”
+#“地衣型”→“地衣型真菌”
+#“煤污菌/煤污菌型”→“煤烟菌”
+#“未定义型”和“未分类”合并显示为“未分类”
+#横轴宿主科改成中文：牛科、猪科、鹿科、马科、犀科
+#图例上方不显示标题
+#纵轴为“平均相对多度（%）”
+#基于 genus_abundance_table_no_elephant.tsv + Table S1. Traits of genera.xlsx 的 primary lifestyle 作图
+#会优先按属名匹配，若 traits 表有异名列，也会把异名一起纳入匹配
+#输出 PNG/PDF/匹配表/样本水平表/宿主科汇总表/文字摘要
+#你直接复制保存为：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R
+#然后运行即可。
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(ggplot2)
+  library(tools)
+  library(grid)
+})
+
+# =========================================================
+# 0. 基础设置
+# =========================================================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+# ---- 只允许使用 no_elephant 相关文件，避免误用全量数据 ----
+candidate_metadata_files <- c(
+  file.path(base_dir, "metadata", "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"),
+  file.path(base_dir, "metadata", "metadata_valid_globalfungi_SH_nozero.csv")
+)
+
+candidate_genus_table_files <- c(
+  file.path(base_dir, "taxonomy", "genus_abundance_table_no_elephant.tsv")
+)
+
+candidate_traits_files <- c(
+  "/mnt/c/Users/hp/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/d/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/data/Table S1. Traits of genera.xlsx"
+)
+
+out_dir <- file.path(base_dir, "results", "chapter3_family_primary_lifestyle_no_elephant")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 输出文件名
+out_png <- file.path(out_dir, "Fig3_5_host_family_genus_primary_lifestyle_composition_no_elephant.png")
+out_pdf <- file.path(out_dir, "Fig3_5_host_family_genus_primary_lifestyle_composition_no_elephant.pdf")
+out_family_csv <- file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant.csv")
+out_sample_csv <- file.path(out_dir, "sample_primary_lifestyle_relative_abundance_no_elephant.csv")
+out_assign_tsv <- file.path(out_dir, "genus_primary_lifestyle_assignment_no_elephant.tsv")
+out_summary_txt <- file.path(out_dir, "host_family_primary_lifestyle_summary_no_elephant.txt")
+
+# =========================================================
+# 1. 工具函数
+# =========================================================
+
+choose_existing_file <- function(x) {
+  hit <- x[file.exists(x)]
+  if (length(hit) == 0) return(NA_character_)
+  hit[1]
+}
+
+normalize_name <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*", "", x)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- gsub("\\bsp\\.?$", "", x, ignore.case = TRUE)
+  x <- gsub("\\bspp\\.?$", "", x, ignore.case = TRUE)
+  x <- trimws(x)
+
+  # 对于 "Aspergillus flavus" 这种，取第一个词作为属名
+  x <- sapply(strsplit(x, "\\s+"), function(v) {
+    if (length(v) == 0) return(NA_character_)
+    v[1]
+  }, USE.NAMES = FALSE)
+
+  x <- tolower(x)
+
+  x[x %in% c(
+    "", "na", "nan", "null",
+    "unassigned", "unclassified", "uncultured", "unknown",
+    "fungi", "fungal", "incertae", "incertae sedis"
+  )] <- NA_character_
+
+  return(x)
+}
+
+normalize_colname <- function(x) {
+  tolower(gsub("[^a-z0-9]+", "", x))
+}
+
+find_col <- function(df, patterns, required = TRUE) {
+  nm <- names(df)
+  nm2 <- normalize_colname(nm)
+
+  idx <- integer(0)
+  for (p in patterns) {
+    idx <- c(idx, which(grepl(p, nm2)))
+  }
+  idx <- unique(idx)
+
+  if (length(idx) == 0) {
+    if (required) {
+      stop("无法识别所需列。现有列名为：\n", paste(names(df), collapse = " | "))
+    } else {
+      return(NA_character_)
+    }
+  }
+  nm[idx[1]]
+}
+
+# 可选：尽量修复中文显示
+base_family <- ""
+if (requireNamespace("showtext", quietly = TRUE) &&
+    requireNamespace("sysfonts", quietly = TRUE)) {
+
+  font_candidates <- c(
+    "/mnt/c/Windows/Fonts/msyh.ttc",    # 微软雅黑
+    "/mnt/c/Windows/Fonts/simsun.ttc",  # 宋体
+    "/mnt/c/Windows/Fonts/simhei.ttf",  # 黑体
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+  )
+
+  font_file <- choose_existing_file(font_candidates)
+
+  if (!is.na(font_file)) {
+    try({
+      sysfonts::font_add("cnfont", regular = font_file)
+      showtext::showtext_auto()
+      base_family <- "cnfont"
+    }, silent = TRUE)
+  }
+}
+
+# =========================================================
+# 2. 路径检查
+# =========================================================
+
+metadata_file <- choose_existing_file(candidate_metadata_files)
+genus_table_file <- choose_existing_file(candidate_genus_table_files)
+traits_file <- choose_existing_file(candidate_traits_files)
+
+if (is.na(metadata_file)) {
+  stop("找不到 no_elephant 的 metadata 文件，请检查路径。")
+}
+if (is.na(genus_table_file)) {
+  stop("找不到 genus_abundance_table_no_elephant.tsv，请检查路径。")
+}
+if (is.na(traits_file)) {
+  stop("找不到 Table S1. Traits of genera.xlsx，请检查路径。")
+}
+
+cat("metadata_file: ", metadata_file, "\n")
+cat("genus_table_file: ", genus_table_file, "\n")
+cat("traits_file: ", traits_file, "\n")
+
+# =========================================================
+# 3. 读取 metadata
+# =========================================================
+
+cat("读取 metadata ...\n")
+meta <- fread(metadata_file, data.table = FALSE)
+
+sample_col <- find_col(meta, c("^sampleid$", "^sample$", "^samples?$", "sampleid"), required = TRUE)
+family_col <- find_col(meta, c("^hostfamily$", "hostfamily"), required = TRUE)
+
+meta <- meta %>%
+  transmute(
+    sampleid = as.character(.data[[sample_col]]),
+    host_family = as.character(.data[[family_col]])
+  ) %>%
+  filter(!is.na(sampleid), sampleid != "") %>%
+  distinct()
+
+family_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+meta <- meta %>%
+  filter(host_family %in% names(family_map)) %>%
+  mutate(
+    host_family_cn = unname(family_map[host_family])
+  )
+
+cat("metadata样本数：", nrow(meta), "\n")
+
+# =========================================================
+# 4. 读取 genus abundance table
+# =========================================================
+
+cat("读取 genus 丰度表 ...\n")
+genus_tab <- fread(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE,
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table_no_elephant.tsv 读取失败，列数异常。")
+}
+
+first_col <- names(genus_tab)[1]
+names(genus_tab)[1] <- "Genus_raw"
+
+# 只保留 metadata 中真实存在的样本列
+sample_cols <- intersect(meta$sampleid, names(genus_tab))
+if (length(sample_cols) == 0) {
+  stop("genus 丰度表中找不到与 metadata 对应的样本列。")
+}
+
+genus_tab <- genus_tab[, c("Genus_raw", sample_cols), drop = FALSE]
+
+# 数值化
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(genus_tab[[cc]]))
+  genus_tab[[cc]][is.na(genus_tab[[cc]])] <- 0
+}
+
+# 规范化属名
+genus_tab$Genus <- normalize_name(genus_tab$Genus_raw)
+genus_tab$Genus[is.na(genus_tab$Genus)] <- "unclassified"
+
+# 合并重复属名
+genus_tab2 <- genus_tab %>%
+  select(Genus, all_of(sample_cols)) %>%
+  group_by(Genus) %>%
+  summarise(across(everything(), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+cat("genus 丰度表中的属数（合并后）：", nrow(genus_tab2), "\n")
+
+# 转长表
+genus_long <- genus_tab2 %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sampleid",
+    values_to = "abundance"
+  ) %>%
+  left_join(meta, by = "sampleid")
+
+# 去掉总丰度为0样本
+sample_total <- genus_long %>%
+  group_by(sampleid) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop")
+
+valid_samples <- sample_total %>%
+  filter(total_abundance > 0) %>%
+  pull(sampleid)
+
+genus_long <- genus_long %>%
+  filter(sampleid %in% valid_samples)
+
+sample_total <- sample_total %>%
+  filter(sampleid %in% valid_samples)
+
+cat("用于分析的样本数：", length(valid_samples), "\n")
+
+genus_long <- genus_long %>%
+  left_join(sample_total, by = "sampleid") %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  )
+
+# =========================================================
+# 5. 读取 Table S1（属水平 traits 表）
+# =========================================================
+
+cat("读取 Table S1. Traits of genera ...\n")
+sheet_name <- excel_sheets(traits_file)[1]
+traits_raw <- read_excel(traits_file, sheet = sheet_name)
+
+cat("Table S1 行数：", nrow(traits_raw), "\n")
+
+genus_col <- find_col(
+  traits_raw,
+  c("^genus$", "acceptedgenus", "currentgenus", "genusname", "currentname", "^name$"),
+  required = TRUE
+)
+
+synonym_col <- find_col(
+  traits_raw,
+  c("synonym", "basionym"),
+  required = FALSE
+)
+
+primary_col <- find_col(
+  traits_raw,
+  c("primarylifestyle"),
+  required = TRUE
+)
+
+traits_core <- traits_raw %>%
+  transmute(
+    accepted_name = as.character(.data[[genus_col]]),
+    synonym_text = if (!is.na(synonym_col)) as.character(.data[[synonym_col]]) else NA_character_,
+    primary_lifestyle = as.character(.data[[primary_col]])
+  )
+
+# 构建 accepted genus 映射
+accepted_map <- traits_core %>%
+  transmute(
+    raw_name = accepted_name,
+    genus_key = normalize_name(accepted_name),
+    primary_lifestyle = primary_lifestyle,
+    match_source = "accepted_name"
+  ) %>%
+  filter(!is.na(genus_key), genus_key != "")
+
+# 构建 synonym 映射（若有异名列）
+if (!all(is.na(traits_core$synonym_text))) {
+  synonym_map <- traits_core %>%
+    filter(!is.na(synonym_text), synonym_text != "") %>%
+    mutate(synonym_text = gsub("，", ";", synonym_text)) %>%
+    mutate(synonym_text = gsub("\\|", ";", synonym_text)) %>%
+    mutate(synonym_text = gsub(",", ";", synonym_text)) %>%
+    separate_rows(synonym_text, sep = ";") %>%
+    mutate(synonym_text = trimws(synonym_text)) %>%
+    filter(!is.na(synonym_text), synonym_text != "") %>%
+    transmute(
+      raw_name = synonym_text,
+      genus_key = normalize_name(synonym_text),
+      primary_lifestyle = primary_lifestyle,
+      match_source = "synonym"
+    ) %>%
+    filter(!is.na(genus_key), genus_key != "")
+} else {
+  synonym_map <- data.frame(
+    raw_name = character(0),
+    genus_key = character(0),
+    primary_lifestyle = character(0),
+    match_source = character(0)
+  )
+}
+
+trait_map_all <- bind_rows(accepted_map, synonym_map)
+
+# 同一个 genus_key 若出现多个映射，优先 accepted_name
+trait_map_all$match_source <- factor(
+  trait_map_all$match_source,
+  levels = c("accepted_name", "synonym")
+)
+
+trait_map <- trait_map_all %>%
+  arrange(match_source) %>%
+  distinct(genus_key, .keep_all = TRUE)
+
+cat("traits 可用 genus 映射数：", nrow(trait_map), "\n")
+
+# =========================================================
+# 6. primary lifestyle 英文 -> 中文显示名
+# =========================================================
+
+normalize_lifestyle <- function(x) {
+  x <- tolower(as.character(x))
+  x <- gsub("_", " ", x)
+  x <- gsub("-", " ", x)
+  x <- gsub("/", " / ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x
+}
+
+map_primary_lifestyle <- function(x) {
+  if (is.na(x) || trimws(x) == "") return("未分类")
+
+  y <- normalize_lifestyle(x)
+
+  # ---- 腐生类 ----
+  if (y %in% c("wood saprotroph")) return("木材腐生型")
+  if (y %in% c("litter saprotroph")) return("凋落物腐生型")
+  if (y %in% c("soil saprotroph")) return("土壤腐生型")
+  if (y %in% c("undefined saprotroph")) return("未明确腐生型")
+  if (y %in% c("dung saprotroph")) return("粪生腐生型")
+  if (y %in% c("nectar saprotroph", "tap saprotroph", "nectar / tap saprotroph", "nectar tap saprotroph")) return("花蜜/树液腐生型")
+  if (y %in% c("pollen saprotroph")) return("花粉腐生型")
+
+  # ---- 病理/寄生类 ----
+  if (y %in% c("plant pathogen")) return("植物病原型")
+  if (y %in% c("animal parasite", "animal pathogen")) return("动物寄生型")
+  if (y %in% c("algal parasite")) return("藻类寄生型")
+  if (y %in% c("protozoan parasite", "protistan parasite")) return("原生生物寄生型")
+  if (y %in% c("lichen parasite")) return("地衣寄生型")
+  if (y %in% c("fungal parasite", "mycoparasite")) return("真菌寄生型")
+  if (y %in% c("undefined pathogen")) return("未定义病原菌")
+
+  # ---- 共生类 ----
+  if (y %in% c("lichenized", "lichenised")) return("地衣型真菌")
+  if (y %in% c("ectomycorrhizal")) return("外生菌根型")
+  if (y %in% c("arbuscular mycorrhizal")) return("丛枝菌根型")
+  if (y %in% c("bryophilous")) return("苔藓共生型")
+  if (y %in% c("undefined symbiotroph")) return("未明确共生型")
+  if (y %in% c("animal endosymbiont")) return("动物内共生型")
+  if (y %in% c("algal epibiont")) return("藻类外共生型")
+
+  # ---- 内生/附生 ----
+  if (y %in% c("foliar endophyte", "leaf endophyte")) return("叶内生型")
+  if (y %in% c("root endophyte")) return("根内生型")
+  if (y %in% c("epiphyte")) return("附生型")
+
+  # ---- 其他 ----
+  if (y %in% c("sooty mold", "sooty mould")) return("煤烟菌")
+  if (y %in% c("animal associated")) return("动物相关型")
+  if (y %in% c("arthropod associated")) return("节肢动物相关型")
+  if (y %in% c("bacterivore")) return("食细菌型")
+
+  # generic undefined -> 合并进未分类
+  if (y %in% c("undefined", "unassigned", "unknown")) return("未分类")
+
+  # 若遇到未覆盖类型，也先归未分类，避免错误英文直接进入图例
+  return("未分类")
+}
+
+# =========================================================
+# 7. 匹配 genus -> primary lifestyle
+# =========================================================
+
+cat("匹配 genus 与 primary lifestyle ...\n")
+
+genus_assignment <- genus_tab2 %>%
+  transmute(
+    Genus = Genus,
+    genus_key = normalize_name(Genus)
+  ) %>%
+  left_join(
+    trait_map %>%
+      select(genus_key, raw_name, primary_lifestyle, match_source),
+    by = "genus_key"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = vapply(primary_lifestyle, map_primary_lifestyle, character(1)),
+    # 合并“未定义型/未分类”为“未分类”
+    primary_lifestyle_cn = ifelse(primary_lifestyle_cn %in% c("未定义型", "未分类"), "未分类", primary_lifestyle_cn)
+  )
+
+# 统计匹配情况
+matched_n <- sum(!is.na(genus_assignment$primary_lifestyle))
+unmatched_n <- sum(is.na(genus_assignment$primary_lifestyle))
+cat("成功匹配 genus 数：", matched_n, "\n")
+cat("未匹配 genus 数：", unmatched_n, "\n")
+
+# 保存 genus 匹配表
+write.table(
+  genus_assignment,
+  file = out_assign_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# =========================================================
+# 8. 汇总到样本、宿主科水平
+# =========================================================
+
+genus_long2 <- genus_long %>%
+  mutate(genus_key = normalize_name(Genus)) %>%
+  left_join(
+    genus_assignment %>%
+      select(genus_key, primary_lifestyle_cn) %>%
+      distinct(),
+    by = "genus_key"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(is.na(primary_lifestyle_cn) | primary_lifestyle_cn == "", "未分类", primary_lifestyle_cn)
+  )
+
+# 样本内按功能类群汇总
+sample_fun <- genus_long2 %>%
+  group_by(sampleid, host_family, host_family_cn, primary_lifestyle_cn) %>%
+  summarise(rel_abundance = sum(rel_abundance, na.rm = TRUE), .groups = "drop")
+
+# 保证每个样本所有类群齐全
+sample_fun <- sample_fun %>%
+  complete(
+    sampleid,
+    primary_lifestyle_cn,
+    fill = list(rel_abundance = 0)
+  ) %>%
+  left_join(meta %>% select(sampleid, host_family, host_family_cn), by = "sampleid") %>%
+  distinct()
+
+# 宿主科平均相对多度
+family_mean <- sample_fun %>%
+  group_by(host_family_cn, primary_lifestyle_cn) %>%
+  summarise(mean_relative_abundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop")
+
+# =========================================================
+# 9. 顺序与颜色
+# =========================================================
+
+family_order <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+function_order <- c(
+  "木材腐生型",
+  "凋落物腐生型",
+  "土壤腐生型",
+  "未明确腐生型",
+  "粪生腐生型",
+  "花蜜/树液腐生型",
+  "花粉腐生型",
+
+  "植物病原型",
+  "动物寄生型",
+  "藻类寄生型",
+  "原生生物寄生型",
+  "地衣寄生型",
+  "真菌寄生型",
+  "未定义病原菌",
+
+  "地衣型真菌",
+  "外生菌根型",
+  "丛枝菌根型",
+  "苔藓共生型",
+  "未明确共生型",
+  "动物内共生型",
+  "藻类外共生型",
+
+  "叶内生型",
+  "根内生型",
+  "附生型",
+
+  "煤烟菌",
+  "动物相关型",
+  "节肢动物相关型",
+  "食细菌型",
+
+  "未分类"
+)
+
+function_colors <- c(
+  "木材腐生型"     = "#E69F00",
+  "凋落物腐生型"   = "#F0C808",
+  "土壤腐生型"     = "#C49000",
+  "未明确腐生型"   = "#8C510A",
+  "粪生腐生型"     = "#D95F02",
+  "花蜜/树液腐生型" = "#F3B562",
+  "花粉腐生型"     = "#B8860B",
+
+  "植物病原型"     = "#F50F18",
+  "动物寄生型"     = "#9B59B6",
+  "藻类寄生型"     = "#E67AB6",
+  "原生生物寄生型" = "#D77FB4",
+  "地衣寄生型"     = "#FA8072",
+  "真菌寄生型"     = "#B2182B",
+  "未定义病原菌"   = "#C51B8A",
+
+  "地衣型真菌"     = "#11A579",
+  "外生菌根型"     = "#1F9E89",
+  "丛枝菌根型"     = "#66A61E",
+  "苔藓共生型"     = "#A6D854",
+  "未明确共生型"   = "#2CA25F",
+  "动物内共生型"   = "#00A087",
+  "藻类外共生型"   = "#4DBBD5",
+
+  "叶内生型"       = "#73A2D1",
+  "根内生型"       = "#4A7BD0",
+  "附生型"         = "#6A51A3",
+
+  "煤烟菌"         = "#5E5E5E",
+  "动物相关型"     = "#7A52A5",
+  "节肢动物相关型" = "#8DA0CB",
+  "食细菌型"       = "#4C78A8",
+
+  "未分类"         = "#C9C9C9"
+)
+
+# 只保留实际出现的类群
+present_groups <- family_mean %>%
+  filter(mean_relative_abundance > 0) %>%
+  pull(primary_lifestyle_cn) %>%
+  unique()
+
+present_groups <- function_order[function_order %in% present_groups]
+
+family_mean_plot <- family_mean %>%
+  filter(primary_lifestyle_cn %in% present_groups) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = family_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = present_groups)
+  ) %>%
+  arrange(host_family_cn, primary_lifestyle_cn)
+
+# 保存表格
+write.csv(family_mean_plot, out_family_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(sample_fun, out_sample_csv, row.names = FALSE, fileEncoding = "UTF-8")
+
+# =========================================================
+# 10. 作图
+# =========================================================
+
+p <- ggplot(family_mean_plot, aes(x = host_family_cn, y = mean_relative_abundance, fill = primary_lifestyle_cn)) +
+  geom_col(width = 0.72, color = NA) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = function_colors[present_groups],
+    drop = TRUE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  theme_bw(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.title.y = element_text(size = 16, color = "black"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11.5, color = "black"),
+    legend.key.size = unit(0.45, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE
+    )
+  )
+
+# 保存图
+ggsave(out_png, p, width = 24, height = 14, units = "cm", dpi = 600, bg = "white")
+ggsave(out_pdf, p, width = 24, height = 14, units = "cm", bg = "white")
+
+# =========================================================
+# 11. 文字摘要
+# =========================================================
+
+overall_mean <- sample_fun %>%
+  group_by(primary_lifestyle_cn) %>%
+  summarise(mean_relative_abundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_relative_abundance))
+
+family_top <- family_mean %>%
+  group_by(host_family_cn) %>%
+  arrange(host_family_cn, desc(mean_relative_abundance)) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+sink(out_summary_txt)
+cat("不同宿主科肠道真菌属水平功能类群组成（no_elephant）\n")
+cat("====================================================\n\n")
+cat("一、计算基础\n")
+cat("1. 丰度数据：", genus_table_file, "\n", sep = "")
+cat("2. metadata：", metadata_file, "\n", sep = "")
+cat("3. traits 数据：", traits_file, "\n", sep = "")
+cat("4. 以 Table S1 的 primary lifestyle 作为属水平生态功能型注释依据。\n")
+cat("5. 先将每个样本内各属丰度换算为相对多度（%），再按功能类群汇总，最后对同一宿主科内样本求平均，得到“平均相对多度（%）”。\n")
+cat("6. 匹配时优先使用属名；若 Table S1 中存在异名（synonym/basionym）列，则同步纳入匹配。\n")
+cat("7. 图中“未分类”包括两部分：\n")
+cat("   （1）未能匹配到 Table S1 的属；\n")
+cat("   （2）generic undefined/unknown 等合并显示为“未分类”的情况。\n\n")
+
+cat("二、匹配概况\n")
+cat("丰度表中的属数（合并后）：", nrow(genus_assignment), "\n")
+cat("成功匹配 primary lifestyle 的属数：", matched_n, "\n")
+cat("未匹配属数：", unmatched_n, "\n\n")
+
+cat("三、总体功能类群平均相对多度（按全部样本平均）\n")
+print(overall_mean, row.names = FALSE)
+cat("\n")
+
+cat("四、各宿主科前5位功能类群\n")
+print(family_top, row.names = FALSE)
+cat("\n")
+
+sink()
+
+cat("完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("宿主科平均相对多度表: ", out_family_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", out_sample_csv, "\n", sep = "")
+cat("genus 匹配表: ", out_assign_tsv, "\n", sep = "")
+cat("文字摘要: ", out_summary_txt, "\n", sep = "")
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R
+#readxl 包在你当前 R 环境里坏了/版本不兼容：
+#undefined symbol: libiconv
+#package ‘readxl’ was built under R version 4.5.3
+#所以不要再折腾 readxl。我们直接把脚本改成用你之前常用、也更稳的 openxlsx 读取 Excel。
+#你在 WSL 终端直接运行下面这段修复命令：
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+# 1. 把 readxl 换成 openxlsx
+txt = txt.replace("  library(readxl)\n", "  library(openxlsx)\n")
+
+# 2. 替换读取 Excel sheet 的代码
+old = '''sheet_name <- excel_sheets(traits_file)[1]
+traits_raw <- read_excel(traits_file, sheet = sheet_name)'''
+
+new = '''sheet_names <- openxlsx::getSheetNames(traits_file)
+sheet_name <- if ("data" %in% sheet_names) "data" else sheet_names[1]
+
+traits_raw <- openxlsx::read.xlsx(
+  traits_file,
+  sheet = sheet_name,
+  check.names = FALSE
+)'''
+
+if old not in txt:
+    raise SystemExit("没有找到 readxl 读取 Excel 的原代码。请把脚本中读取 Table S1 附近几行发我。")
+
+txt = txt.replace(old, new)
+
+script.write_text(txt, encoding="utf-8")
+print("已将脚本从 readxl 改为 openxlsx：", script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R
+#脚本里的列名识别函数太“自作聪明”了。你的 Table S1 列名已经很清楚：
+#GENUS
+#COMMENT.on.genus
+#primary_lifestyle
+#Secondary_lifestyle
+#所以现在应该不要再用复杂的 find_col() 去猜列名，直接指定这三列最稳：
+#GENUS
+#COMMENT.on.genus
+#primary_lifestyle
+#你直接在 WSL 终端运行下面这段修复代码，它会自动改脚本，不用你手动进 nano 改。
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R")
+txt = script.read_text(encoding="utf-8")
+
+old = r'''genus_col <- find_col(
+  traits_raw,
+  c("^genus$", "acceptedgenus", "currentgenus", "genusname", "currentname", "^name$"),
+  required = TRUE
+)
+
+synonym_col <- find_col(
+  traits_raw,
+  c("synonym", "basionym"),
+  required = FALSE
+)
+
+primary_col <- find_col(
+  traits_raw,
+  c("primarylifestyle"),
+  required = TRUE
+)'''
+
+new = r'''## Table S1 的列名在 openxlsx 读取后为：
+## GENUS, COMMENT.on.genus, primary_lifestyle, Secondary_lifestyle ...
+## 这里直接指定列名，避免自动识别函数误判
+genus_col <- "GENUS"
+primary_col <- "primary_lifestyle"
+
+if (!genus_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 GENUS 列。现有列名为：\n", paste(colnames(traits_raw), collapse = " | "))
+}
+
+if (!primary_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 primary_lifestyle 列。现有列名为：\n", paste(colnames(traits_raw), collapse = " | "))
+}
+
+## openxlsx 会把 COMMENT on genus 读成 COMMENT.on.genus
+## 这不是严格的异名列，但里面可能包含 synonym of ... 这类说明，可作为保守辅助信息
+synonym_col <- if ("COMMENT.on.genus" %in% colnames(traits_raw)) {
+  "COMMENT.on.genus"
+} else if ("COMMENT on genus" %in% colnames(traits_raw)) {
+  "COMMENT on genus"
+} else {
+  NA_character_
+}'''
+
+if old not in txt:
+    raise SystemExit("没有找到需要替换的列名识别代码。请把脚本中 'genus_col <- find_col' 附近内容发我。")
+
+txt = txt.replace(old, new)
+
+script.write_text(txt, encoding="utf-8")
+print("已修复 Table S1 列名识别：", script)
+PY
+#运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R
+#你这次报错的原因是：脚本前面已经把 host_family_cn 加进了 meta，但后面在 complete() 和 left_join() 的过程中，host_family_cn 被生成成了 host_family_cn.x / host_family_cn.y，所以最后真正名为 host_family_cn 的列不存在了。也就是不是数据错，是我上一版脚本在补全 0 值时把宿主科中文列弄丢了。
+#直接整段复制运行即可，会覆盖原脚本。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-5 不同宿主科肠道真菌属水平功能类群组成
+## no_elephant 版，最终修正版
+##
+## 数据基础：
+## 1. genus_abundance_table_no_elephant.tsv
+## 2. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+## 3. FungalTraits Table S1. Traits of genera.xlsx
+##
+## 计算口径：
+## 1. 使用属水平丰度表；
+## 2. 以 FungalTraits Table S1 的 primary_lifestyle 为功能类群注释；
+## 3. 属名直接匹配为主；
+## 4. COMMENT.on.genus 中明确 "synonym of XXX" 的记录作为保守辅助；
+## 5. 未匹配、缺失 primary_lifestyle、undefined 合并显示为“未分类”；
+## 6. 每个样本内先计算各功能类群相对多度，再按宿主科求平均。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## -----------------------------
+## 0. R 包路径与依赖
+## -----------------------------
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("data.table", "dplyr", "tidyr", "stringr", "openxlsx", "ggplot2", "grid")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_table_file <- file.path(
+  base_dir,
+  "taxonomy/genus_abundance_table_no_elephant.tsv"
+)
+
+traits_file_candidates <- c(
+  "/mnt/c/Users/hp/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/d/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/data/Table S1. Traits of genera.xlsx"
+)
+
+traits_file <- traits_file_candidates[file.exists(traits_file_candidates)][1]
+
+if (is.na(traits_file)) {
+  stop("找不到 Table S1. Traits of genera.xlsx。已尝试：\n", paste(traits_file_candidates, collapse = "\n"))
+}
+
+if (!file.exists(metadata_file)) stop("找不到 metadata 文件：", metadata_file)
+if (!file.exists(genus_table_file)) stop("找不到 genus 丰度表：", genus_table_file)
+
+out_dir <- file.path(base_dir, "results/chapter3_family_primary_lifestyle_no_elephant")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(out_dir, "Fig3_5_host_family_genus_primary_lifestyle_composition_no_elephant_CN_final.png")
+out_pdf <- file.path(out_dir, "Fig3_5_host_family_genus_primary_lifestyle_composition_no_elephant_CN_final.pdf")
+out_family_csv <- file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant_CN_final.csv")
+out_sample_csv <- file.path(out_dir, "sample_primary_lifestyle_relative_abundance_no_elephant_CN_final.csv")
+out_assign_tsv <- file.path(out_dir, "genus_primary_lifestyle_assignment_no_elephant_CN_final.tsv")
+out_summary_txt <- file.path(out_dir, "host_family_primary_lifestyle_summary_no_elephant_CN_final.txt")
+
+cat("metadata_file: ", metadata_file, "\n", sep = "")
+cat("genus_table_file: ", genus_table_file, "\n", sep = "")
+cat("traits_file: ", traits_file, "\n", sep = "")
+
+## -----------------------------
+## 2. 工具函数
+## -----------------------------
+normalize_colname <- function(x) {
+  tolower(gsub("[^a-z0-9]+", "", x))
+}
+
+pick_col <- function(df, candidates, label) {
+  nms <- names(df)
+  nms_norm <- normalize_colname(nms)
+  cand_norm <- normalize_colname(candidates)
+
+  hit <- which(nms_norm %in% cand_norm)
+  if (length(hit) == 0) {
+    stop(
+      "找不到列：", label,
+      "\n尝试列名：", paste(candidates, collapse = ", "),
+      "\n实际列名：", paste(nms, collapse = " | ")
+    )
+  }
+  nms[hit[1]]
+}
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a", "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded", "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA_character_
+  x
+}
+
+normalize_genus <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*g__", "", x, ignore.case = TRUE)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+
+  ## 如果是 "Aspergillus flavus" 这种，只取属名
+  x <- sapply(strsplit(x, "\\s+"), function(v) {
+    if (length(v) == 0) return(NA_character_)
+    v[1]
+  }, USE.NAMES = FALSE)
+
+  x <- tolower(x)
+
+  x[x %in% c(
+    "", "na", "nan", "null", "unassigned", "unclassified",
+    "uncultured", "unknown", "fungi", "fungal", "incertae", "sedis"
+  )] <- NA_character_
+
+  x
+}
+
+extract_synonym_target <- function(comment) {
+  comment <- as.character(comment)
+  comment[is.na(comment)] <- ""
+
+  ## 只处理明确的 “synonym of XXX”
+  hit <- stringr::str_match(
+    comment,
+    stringr::regex("synonym of\\s+([A-Za-z][A-Za-z0-9._-]*)", ignore_case = TRUE)
+  )[, 2]
+
+  normalize_genus(hit)
+}
+
+norm_lifestyle <- function(x) {
+  x <- tolower(as.character(x))
+  x <- gsub("_", " ", x)
+  x <- gsub("-", " ", x)
+  x <- gsub("/", " / ", x)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+map_lifestyle_cn <- function(x) {
+  if (is.na(x) || trimws(as.character(x)) == "") return("未分类")
+
+  y <- norm_lifestyle(x)
+
+  ## 腐生类
+  if (y %in% c("wood saprotroph")) return("木材腐生型")
+  if (y %in% c("litter saprotroph")) return("凋落物腐生型")
+  if (y %in% c("soil saprotroph")) return("土壤腐生型")
+  if (y %in% c("undefined saprotroph", "unspecified saprotroph")) return("未明确腐生型")
+  if (y %in% c("dung saprotroph")) return("粪生腐生型")
+  if (y %in% c("nectar saprotroph", "tap saprotroph", "nectar / tap saprotroph", "nectar tap saprotroph")) return("花蜜/树液腐生型")
+  if (y %in% c("pollen saprotroph")) return("花粉腐生型")
+
+  ## 病原/寄生类
+  if (y %in% c("plant pathogen")) return("植物病原型")
+  if (y %in% c("animal parasite", "animal pathogen")) return("动物寄生型")
+  if (y %in% c("algal parasite")) return("藻类寄生型")
+  if (y %in% c("protozoan parasite", "protistan parasite")) return("原生生物寄生型")
+  if (y %in% c("lichen parasite")) return("地衣寄生型")
+  if (y %in% c("fungal parasite", "mycoparasite")) return("真菌寄生型")
+  if (y %in% c("undefined pathogen", "unspecified pathogen", "undefined pathotroph", "unspecified pathotroph")) return("未定义病原菌")
+
+  ## 共生类
+  if (y %in% c("lichenized", "lichenised")) return("地衣型真菌")
+  if (y %in% c("ectomycorrhizal")) return("外生菌根型")
+  if (y %in% c("arbuscular mycorrhizal")) return("丛枝菌根型")
+  if (y %in% c("moss symbiont", "bryophilous")) return("苔藓共生型")
+  if (y %in% c("undefined symbiotroph", "unspecified symbiotroph")) return("未明确共生型")
+  if (y %in% c("animal endosymbiont")) return("动物内共生型")
+  if (y %in% c("algal ectosymbiont", "algal epibiont")) return("藻类外共生型")
+
+  ## 内生/附生
+  if (y %in% c("foliar endophyte", "leaf endophyte")) return("叶内生型")
+  if (y %in% c("root endophyte")) return("根内生型")
+  if (y %in% c("epiphyte")) return("附生型")
+
+  ## 其他
+  if (y %in% c("sooty mold", "sooty mould")) return("煤烟菌")
+  if (y %in% c("animal associated", "animal-associated")) return("动物相关型")
+  if (y %in% c("arthropod associated", "arthropod-associated")) return("节肢动物相关型")
+  if (y %in% c("bacterivore", "bacterivorous")) return("食细菌型")
+  if (y %in% c("algivorous", "protistivorous", "algivorous / protistivorous", "algivorous protistivorous")) return("食藻/食原生生物型")
+
+  ## generic undefined / unknown 直接合并为未分类
+  if (y %in% c("undefined", "unspecified", "unknown", "unassigned", "na", "n/a")) return("未分类")
+
+  ## 未覆盖到的也归未分类，避免英文直接进图
+  return("未分类")
+}
+
+## -----------------------------
+## 3. 字体设置
+## -----------------------------
+base_family <- ""
+
+if (requireNamespace("showtext", quietly = TRUE) &&
+    requireNamespace("sysfonts", quietly = TRUE)) {
+
+  font_candidates <- c(
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+  )
+
+  font_file <- font_candidates[file.exists(font_candidates)][1]
+
+  if (!is.na(font_file)) {
+    sysfonts::font_add("cnfont", regular = font_file)
+    showtext::showtext_auto()
+    showtext::showtext_opts(dpi = 600)
+    base_family <- "cnfont"
+    cat("使用中文字体：", font_file, "\n", sep = "")
+  } else {
+    cat("未找到可用中文字体，使用默认字体。\n")
+  }
+}
+
+## -----------------------------
+## 4. 读取 metadata
+## -----------------------------
+cat("读取 metadata ...\n")
+
+meta_raw <- data.table::fread(metadata_file, data.table = FALSE, check.names = FALSE)
+
+sample_col <- pick_col(
+  meta_raw,
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  meta_raw,
+  c("host_family", "Host_family", "family", "hostFamily"),
+  "host_family"
+)
+
+family_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+family_order <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+meta <- meta_raw %>%
+  transmute(
+    sampleid = as.character(.data[[sample_col]]),
+    host_family = as.character(.data[[family_col]])
+  ) %>%
+  filter(
+    !is.na(sampleid),
+    sampleid != "",
+    host_family %in% names(family_map)
+  ) %>%
+  distinct(sampleid, .keep_all = TRUE) %>%
+  mutate(
+    host_family_cn = unname(family_map[host_family])
+  )
+
+cat("metadata样本数：", nrow(meta), "\n", sep = "")
+cat("metadata宿主科样本数：\n")
+print(table(meta$host_family_cn))
+
+## -----------------------------
+## 5. 读取 genus 丰度表
+## -----------------------------
+cat("\n读取 genus 丰度表 ...\n")
+
+genus_tab <- data.table::fread(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE,
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table_no_elephant.tsv 列数异常。")
+}
+
+colnames(genus_tab)[1] <- "Genus_raw"
+
+sample_cols <- intersect(meta$sampleid, colnames(genus_tab))
+
+if (length(sample_cols) == 0) {
+  stop("genus 丰度表和 metadata 没有共同样本。")
+}
+
+genus_tab <- genus_tab[, c("Genus_raw", sample_cols), drop = FALSE]
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(genus_tab[[cc]]))
+  genus_tab[[cc]][is.na(genus_tab[[cc]])] <- 0
+}
+
+genus_tab <- genus_tab %>%
+  mutate(
+    genus_key = normalize_genus(Genus_raw),
+    genus_key = ifelse(is.na(genus_key), "unclassified", genus_key)
+  )
+
+genus_tab2 <- genus_tab %>%
+  group_by(genus_key) %>%
+  summarise(
+    Genus_raw_joined = paste(unique(Genus_raw), collapse = "; "),
+    across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+cat("genus 丰度表中的属数（合并后）：", nrow(genus_tab2), "\n", sep = "")
+cat("用于分析的样本数：", length(sample_cols), "\n", sep = "")
+
+## -----------------------------
+## 6. 读取 Table S1
+## -----------------------------
+cat("\n读取 Table S1. Traits of genera ...\n")
+
+sheet_names <- openxlsx::getSheetNames(traits_file)
+sheet_name <- if ("data" %in% sheet_names) "data" else sheet_names[1]
+
+traits_raw <- openxlsx::read.xlsx(
+  traits_file,
+  sheet = sheet_name,
+  check.names = FALSE
+)
+
+cat("Table S1 行数：", nrow(traits_raw), "\n", sep = "")
+cat("Table S1 列名：\n")
+print(colnames(traits_raw))
+
+genus_col <- "GENUS"
+primary_col <- "primary_lifestyle"
+
+if (!genus_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 GENUS 列。")
+}
+if (!primary_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 primary_lifestyle 列。")
+}
+
+comment_col <- if ("COMMENT.on.genus" %in% colnames(traits_raw)) {
+  "COMMENT.on.genus"
+} else if ("COMMENT on genus" %in% colnames(traits_raw)) {
+  "COMMENT on genus"
+} else {
+  NA_character_
+}
+
+traits_core <- traits_raw %>%
+  transmute(
+    accepted_genus_raw = as.character(.data[[genus_col]]),
+    accepted_key = normalize_genus(.data[[genus_col]]),
+    primary_lifestyle_raw = as.character(.data[[primary_col]]),
+    comment_on_genus = if (!is.na(comment_col)) as.character(.data[[comment_col]]) else NA_character_,
+    synonym_target_key = if (!is.na(comment_col)) extract_synonym_target(.data[[comment_col]]) else NA_character_
+  ) %>%
+  filter(!is.na(accepted_key))
+
+## 直接 GENUS 匹配表
+accepted_map <- traits_core %>%
+  mutate(
+    primary_lifestyle_cn = vapply(primary_lifestyle_raw, map_lifestyle_cn, character(1))
+  ) %>%
+  group_by(accepted_key) %>%
+  summarise(
+    accepted_genus_joined = paste(unique(accepted_genus_raw), collapse = "; "),
+    primary_raw_joined = paste(unique(na.omit(primary_lifestyle_raw)), collapse = "; "),
+    n_lifestyle = n_distinct(primary_lifestyle_cn),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn) == 1,
+      unique(primary_lifestyle_cn)[1],
+      "未分类"
+    ),
+    match_source = "accepted_GENUS",
+    .groups = "drop"
+  )
+
+## COMMENT.on.genus 中 "synonym of XXX" 的保守 fallback
+synonym_map <- traits_core %>%
+  filter(!is.na(synonym_target_key)) %>%
+  mutate(
+    primary_lifestyle_cn = vapply(primary_lifestyle_raw, map_lifestyle_cn, character(1))
+  ) %>%
+  group_by(synonym_target_key) %>%
+  summarise(
+    accepted_genus_joined = paste(unique(accepted_genus_raw), collapse = "; "),
+    primary_raw_joined = paste(unique(na.omit(primary_lifestyle_raw)), collapse = "; "),
+    n_lifestyle = n_distinct(primary_lifestyle_cn),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn) == 1,
+      unique(primary_lifestyle_cn)[1],
+      "未分类"
+    ),
+    match_source = "synonym_comment_fallback",
+    .groups = "drop"
+  ) %>%
+  rename(accepted_key = synonym_target_key)
+
+cat("accepted GENUS 映射数：", nrow(accepted_map), "\n", sep = "")
+cat("synonym fallback 映射数：", nrow(synonym_map), "\n", sep = "")
+
+## -----------------------------
+## 7. 属名匹配
+## -----------------------------
+cat("\n匹配 genus 与 primary_lifestyle ...\n")
+
+genus_assignment <- genus_tab2 %>%
+  select(genus_key, Genus_raw_joined) %>%
+  left_join(
+    accepted_map %>%
+      select(
+        accepted_key,
+        accepted_genus_joined,
+        primary_raw_joined,
+        primary_lifestyle_cn,
+        accepted_match_source = match_source
+      ),
+    by = c("genus_key" = "accepted_key")
+  ) %>%
+  left_join(
+    synonym_map %>%
+      select(
+        accepted_key,
+        synonym_accepted_genus_joined = accepted_genus_joined,
+        synonym_primary_raw_joined = primary_raw_joined,
+        synonym_primary_lifestyle_cn = primary_lifestyle_cn,
+        synonym_match_source = match_source
+      ),
+    by = c("genus_key" = "accepted_key")
+  ) %>%
+  mutate(
+    match_method = case_when(
+      !is.na(primary_lifestyle_cn) ~ "accepted_GENUS",
+      is.na(primary_lifestyle_cn) & !is.na(synonym_primary_lifestyle_cn) ~ "synonym_comment_fallback",
+      TRUE ~ "unmatched"
+    ),
+    primary_lifestyle_cn = case_when(
+      !is.na(primary_lifestyle_cn) ~ primary_lifestyle_cn,
+      is.na(primary_lifestyle_cn) & !is.na(synonym_primary_lifestyle_cn) ~ synonym_primary_lifestyle_cn,
+      TRUE ~ "未分类"
+    ),
+    ## 合并 generic undefined/未定义型 和 未分类
+    primary_lifestyle_cn = ifelse(
+      primary_lifestyle_cn %in% c("未定义型", "未分类"),
+      "未分类",
+      primary_lifestyle_cn
+    )
+  )
+
+matched_n <- sum(genus_assignment$match_method != "unmatched")
+unmatched_n <- sum(genus_assignment$match_method == "unmatched")
+
+cat("成功匹配 genus 数：", matched_n, "\n", sep = "")
+cat("未匹配 genus 数：", unmatched_n, "\n", sep = "")
+cat("匹配方式统计：\n")
+print(table(genus_assignment$match_method))
+cat("功能类群属数统计：\n")
+print(table(genus_assignment$primary_lifestyle_cn))
+
+write.table(
+  genus_assignment,
+  file = out_assign_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+## -----------------------------
+## 8. 样本内相对多度与功能类群汇总
+## -----------------------------
+cat("\n计算样本水平功能类群相对多度 ...\n")
+
+genus_long <- genus_tab2 %>%
+  select(genus_key, all_of(sample_cols)) %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sampleid",
+    values_to = "abundance"
+  ) %>%
+  left_join(meta %>% select(sampleid, host_family_cn), by = "sampleid") %>%
+  left_join(
+    genus_assignment %>%
+      select(genus_key, primary_lifestyle_cn),
+    by = "genus_key"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(is.na(primary_lifestyle_cn), "未分类", primary_lifestyle_cn)
+  )
+
+sample_totals <- genus_long %>%
+  group_by(sampleid) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop")
+
+genus_long <- genus_long %>%
+  left_join(sample_totals, by = "sampleid") %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  )
+
+## 每个样本 × 功能类群
+sample_fun_raw <- genus_long %>%
+  group_by(sampleid, primary_lifestyle_cn) %>%
+  summarise(
+    rel_abundance = sum(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 重要：先只 complete sampleid × 功能类群，然后再 join 宿主科中文名，避免 host_family_cn 丢失或生成 .x/.y
+function_order <- c(
+  "木材腐生型",
+  "凋落物腐生型",
+  "土壤腐生型",
+  "未明确腐生型",
+  "粪生腐生型",
+  "花蜜/树液腐生型",
+  "花粉腐生型",
+
+  "植物病原型",
+  "动物寄生型",
+  "藻类寄生型",
+  "原生生物寄生型",
+  "地衣寄生型",
+  "真菌寄生型",
+  "未定义病原菌",
+
+  "地衣型真菌",
+  "外生菌根型",
+  "丛枝菌根型",
+  "苔藓共生型",
+  "未明确共生型",
+  "动物内共生型",
+  "藻类外共生型",
+
+  "叶内生型",
+  "根内生型",
+  "附生型",
+
+  "煤烟菌",
+  "动物相关型",
+  "节肢动物相关型",
+  "食细菌型",
+  "食藻/食原生生物型",
+
+  "未分类"
+)
+
+sample_fun <- sample_fun_raw %>%
+  complete(
+    sampleid = meta$sampleid,
+    primary_lifestyle_cn = function_order,
+    fill = list(rel_abundance = 0)
+  ) %>%
+  left_join(meta %>% select(sampleid, host_family_cn), by = "sampleid") %>%
+  filter(!is.na(host_family_cn))
+
+## 自查：必须有 host_family_cn
+if (!"host_family_cn" %in% colnames(sample_fun)) {
+  stop("内部错误：sample_fun 中没有 host_family_cn。")
+}
+
+sample_check <- sample_fun %>%
+  group_by(sampleid) %>%
+  summarise(total = sum(rel_abundance), .groups = "drop")
+
+cat("样本水平相对多度加总范围，应接近100：\n")
+print(summary(sample_check$total))
+
+write.csv(
+  sample_fun,
+  out_sample_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 9. 宿主科平均相对多度
+## -----------------------------
+cat("计算宿主科平均相对多度 ...\n")
+
+family_order <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_mean <- sample_fun %>%
+  group_by(host_family_cn, primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    host_family_cn = family_order,
+    primary_lifestyle_cn = function_order,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = family_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  arrange(host_family_cn, primary_lifestyle_cn)
+
+cat("各宿主科加总检查，应接近100：\n")
+family_total_check <- family_mean %>%
+  group_by(host_family_cn) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+print(family_total_check)
+
+write.csv(
+  family_mean,
+  out_family_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 10. 仅保留图中实际出现的类群
+## -----------------------------
+plot_df <- family_mean %>%
+  group_by(primary_lifestyle_cn) %>%
+  mutate(overall_mean = mean(mean_relative_abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(overall_mean > 0)
+
+present_groups <- function_order[function_order %in% unique(as.character(plot_df$primary_lifestyle_cn))]
+
+plot_df <- plot_df %>%
+  mutate(
+    primary_lifestyle_cn = factor(as.character(primary_lifestyle_cn), levels = present_groups)
+  )
+
+cat("图中显示的功能类群：\n")
+print(present_groups)
+
+function_colors <- c(
+  "木材腐生型" = "#E69F00",
+  "凋落物腐生型" = "#F0C808",
+  "土壤腐生型" = "#C49000",
+  "未明确腐生型" = "#8C510A",
+  "粪生腐生型" = "#D95F02",
+  "花蜜/树液腐生型" = "#F3B562",
+  "花粉腐生型" = "#B8860B",
+
+  "植物病原型" = "#F50F18",
+  "动物寄生型" = "#9B59B6",
+  "藻类寄生型" = "#E67AB6",
+  "原生生物寄生型" = "#D77FB4",
+  "地衣寄生型" = "#FA8072",
+  "真菌寄生型" = "#B2182B",
+  "未定义病原菌" = "#C51B8A",
+
+  "地衣型真菌" = "#11A579",
+  "外生菌根型" = "#1F9E89",
+  "丛枝菌根型" = "#66A61E",
+  "苔藓共生型" = "#A6D854",
+  "未明确共生型" = "#2CA25F",
+  "动物内共生型" = "#00A087",
+  "藻类外共生型" = "#4DBBD5",
+
+  "叶内生型" = "#73A2D1",
+  "根内生型" = "#4A7BD0",
+  "附生型" = "#6A51A3",
+
+  "煤烟菌" = "#5E5E5E",
+  "动物相关型" = "#7A52A5",
+  "节肢动物相关型" = "#8DA0CB",
+  "食细菌型" = "#4C78A8",
+  "食藻/食原生生物型" = "#A6CEE3",
+
+  "未分类" = "#C9C9C9"
+)
+
+## -----------------------------
+## 11. 作图
+## -----------------------------
+cat("\n绘图 ...\n")
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = host_family_cn,
+    y = mean_relative_abundance,
+    fill = primary_lifestyle_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = function_colors[present_groups],
+    breaks = present_groups,
+    drop = FALSE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE,
+      keywidth = unit(0.42, "cm"),
+      keyheight = unit(0.42, "cm")
+    )
+  ) +
+  theme_bw(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.title.y = element_text(size = 16, color = "black"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black"),
+    legend.key.size = unit(0.44, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+## -----------------------------
+## 12. 输出摘要
+## -----------------------------
+overall_mean <- sample_fun %>%
+  group_by(primary_lifestyle_cn) %>%
+  summarise(mean_relative_abundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_relative_abundance))
+
+family_top <- family_mean %>%
+  group_by(host_family_cn) %>%
+  arrange(host_family_cn, desc(mean_relative_abundance)) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+sink(out_summary_txt)
+cat("不同宿主科肠道真菌属水平功能类群组成（no_elephant）\n")
+cat("====================================================\n\n")
+cat("一、输入文件\n")
+cat("metadata: ", metadata_file, "\n", sep = "")
+cat("genus abundance table: ", genus_table_file, "\n", sep = "")
+cat("FungalTraits Table S1: ", traits_file, "\n\n", sep = "")
+
+cat("二、计算口径\n")
+cat("1. 使用 no_elephant 属水平丰度表。\n")
+cat("2. 使用 FungalTraits Table S1 的 GENUS 与 primary_lifestyle 对属进行功能类群注释。\n")
+cat("3. 直接 GENUS 匹配优先；COMMENT.on.genus 中明确 'synonym of XXX' 的记录仅作为保守辅助匹配。\n")
+cat("4. 未匹配、缺失 primary_lifestyle、generic undefined/unknown 均合并显示为“未分类”。\n")
+cat("5. 先计算每个样本内各功能类群相对多度，再按宿主科求平均，得到平均相对多度（%）。\n\n")
+
+cat("三、匹配概况\n")
+cat("丰度表中的属数（合并后）：", nrow(genus_assignment), "\n")
+cat("成功匹配 genus 数：", matched_n, "\n")
+cat("未匹配 genus 数：", unmatched_n, "\n\n")
+cat("匹配方式统计：\n")
+print(as.data.frame(table(genus_assignment$match_method)), row.names = FALSE)
+cat("\n功能类群属数统计：\n")
+print(as.data.frame(table(genus_assignment$primary_lifestyle_cn)), row.names = FALSE)
+
+cat("\n四、样本与宿主科检查\n")
+cat("用于分析的样本数：", length(sample_cols), "\n")
+cat("各宿主科样本数：\n")
+print(as.data.frame(table(meta$host_family_cn)), row.names = FALSE)
+cat("\n各宿主科加总检查：\n")
+print(family_total_check, row.names = FALSE)
+
+cat("\n五、总体功能类群平均相对多度（按全部样本平均）\n")
+print(overall_mean, row.names = FALSE)
+
+cat("\n六、各宿主科前5位功能类群\n")
+print(family_top, row.names = FALSE)
+
+sink()
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("宿主科平均相对多度表: ", out_family_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", out_sample_csv, "\n", sep = "")
+cat("genus 匹配表: ", out_assign_tsv, "\n", sep = "")
+cat("文字摘要: ", out_summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/06_host_family_primary_lifestyle_bar_no_elephant.R
+#边框风格不一致：之前多数图只有 x、y 轴，这张不应该四边封闭。下一版改成只保留左轴和下轴。
+#颜色区分不够：第二列图例的绿色系太接近，尤其“地衣型真菌、外生菌根真菌、未明确共生菌、动物内共生菌”等不容易区分。下一版改成按实际出现类群重新分配高区分度颜色。
+#功能类群排序：建议按总体平均相对多度从高到低排序，未分类固定放在最后一个图例项，图中也保持灰色，便于解释。
+#中文名没有完整继承：上一版确实只把你刚提的几个词硬改了，没有把我前面整理过的一整套中文译名完整应用到最终图，这是脚本逻辑的问题。这次用一个统一的最终译名表重新映射所有类群。
+#下面这份脚本只重绘，不重新计算，直接读取你已经生成的宿主科平均相对多度表，重新整理译名、合并“未定义型/未分类”、按占比排序、换高区分度颜色、去掉四边框。
+#直接复制运行即可。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-5 不同宿主科肠道真菌属水平功能类群组成
+## 仅重绘最终版：中文译名、中文宿主科、去四边框、高区分度配色、按总体占比排序
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "ggplot2", "grid")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 字体设置
+## -----------------------------
+base_family <- ""
+
+if (requireNamespace("showtext", quietly = TRUE) &&
+    requireNamespace("sysfonts", quietly = TRUE)) {
+
+  font_candidates <- c(
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+  )
+
+  font_file <- font_candidates[file.exists(font_candidates)][1]
+
+  if (!is.na(font_file)) {
+    sysfonts::font_add("cnfont", regular = font_file)
+    showtext::showtext_auto()
+    showtext::showtext_opts(dpi = 600)
+    base_family <- "cnfont"
+    cat("使用中文字体：", font_file, "\n", sep = "")
+  } else {
+    cat("未找到可用中文字体，使用默认字体。\n")
+  }
+}
+
+## -----------------------------
+## 2. 输入输出
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+out_dir <- file.path(base_dir, "results/chapter3_family_primary_lifestyle_no_elephant")
+
+## 优先读取上一版最终脚本生成的表；如果没有，就读取较早版本表
+input_candidates <- c(
+  file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant_CN_final.csv"),
+  file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant.csv")
+)
+
+in_csv <- input_candidates[file.exists(input_candidates)][1]
+
+if (is.na(in_csv)) {
+  stop("找不到宿主科平均相对多度表。已尝试：\n", paste(input_candidates, collapse = "\n"))
+}
+
+out_png <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final2.png")
+out_pdf <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final2.pdf")
+out_csv <- file.path(out_dir, "host_family_function_group_mean_relative_abundance_no_elephant_CN_final2.csv")
+
+cat("读取表格：", in_csv, "\n", sep = "")
+
+df <- read.csv(
+  in_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+## -----------------------------
+## 3. 兼容列名
+## -----------------------------
+if (!"mean_relative_abundance" %in% colnames(df)) {
+  stop("输入表缺少 mean_relative_abundance 列。")
+}
+
+## 宿主科列兼容
+if ("host_family_cn" %in% colnames(df)) {
+  df$host_family_cn2 <- df$host_family_cn
+} else if ("host_family" %in% colnames(df)) {
+  family_map <- c(
+    "Bovidae" = "牛科",
+    "Suidae" = "猪科",
+    "Cervidae" = "鹿科",
+    "Equidae" = "马科",
+    "Rhinocerotidae" = "犀科"
+  )
+  df$host_family_cn2 <- ifelse(
+    df$host_family %in% names(family_map),
+    unname(family_map[df$host_family]),
+    df$host_family
+  )
+} else {
+  stop("输入表缺少 host_family_cn 或 host_family 列。")
+}
+
+## 功能类群列兼容
+if ("primary_lifestyle_cn" %in% colnames(df)) {
+  df$group_raw <- df$primary_lifestyle_cn
+} else if ("function_group_cn" %in% colnames(df)) {
+  df$group_raw <- df$function_group_cn
+} else {
+  stop("输入表缺少 primary_lifestyle_cn 或 function_group_cn 列。")
+}
+
+## -----------------------------
+## 4. 最终中文译名统一表
+## -----------------------------
+label_map <- c(
+  "木材腐生型" = "木腐菌",
+  "木腐菌" = "木腐菌",
+
+  "凋落物腐生型" = "凋落物腐生菌",
+  "凋落物腐生菌" = "凋落物腐生菌",
+
+  "土壤腐生型" = "土壤腐生菌",
+  "土壤腐生菌" = "土壤腐生菌",
+
+  "未明确腐生型" = "未定义腐生菌",
+  "未定义腐生菌" = "未定义腐生菌",
+
+  "粪生腐生型" = "粪生腐生菌",
+  "粪生腐生菌" = "粪生腐生菌",
+
+  "花蜜/树液腐生型" = "花蜜/树液腐生菌",
+  "花蜜/树液腐生菌" = "花蜜/树液腐生菌",
+
+  "花粉腐生型" = "花粉腐生菌",
+  "花粉腐生菌" = "花粉腐生菌",
+
+  "植物病原型" = "植物病原菌",
+  "植物病原菌" = "植物病原菌",
+
+  "动物寄生型" = "动物寄生菌",
+  "动物寄生菌" = "动物寄生菌",
+
+  "藻类寄生型" = "藻类寄生菌",
+  "藻类寄生菌" = "藻类寄生菌",
+
+  "原生生物寄生型" = "原生生物寄生菌",
+  "原生生物寄生菌" = "原生生物寄生菌",
+
+  "地衣寄生型" = "地衣寄生菌",
+  "地衣寄生菌" = "地衣寄生菌",
+
+  "真菌寄生型" = "真菌寄生菌",
+  "真菌寄生菌" = "真菌寄生菌",
+
+  "未明确病理型" = "未定义病原菌",
+  "未定义病原菌" = "未定义病原菌",
+
+  "地衣型" = "地衣型真菌",
+  "地衣型真菌" = "地衣型真菌",
+
+  "外生菌根型" = "外生菌根真菌",
+  "外生菌根真菌" = "外生菌根真菌",
+
+  "丛枝菌根型" = "丛枝菌根真菌",
+  "丛枝菌根真菌" = "丛枝菌根真菌",
+
+  "苔藓共生型" = "苔藓共生菌",
+  "苔藓共生菌" = "苔藓共生菌",
+
+  "未明确共生型" = "未定义共生菌",
+  "未定义共生菌" = "未定义共生菌",
+
+  "动物内共生型" = "动物内共生菌",
+  "动物内共生菌" = "动物内共生菌",
+
+  "藻类外共生型" = "藻类外共生菌",
+  "藻类外共生菌" = "藻类外共生菌",
+
+  "叶内生型" = "叶内生菌",
+  "叶内生菌" = "叶内生菌",
+
+  "根内生型" = "根内生菌",
+  "根内生菌" = "根内生菌",
+
+  "附生型" = "附生菌",
+  "附生菌" = "附生菌",
+
+  "煤污菌型" = "煤烟菌",
+  "煤污菌" = "煤烟菌",
+  "煤烟菌" = "煤烟菌",
+
+  "动物相关型" = "动物相关菌",
+  "动物相关菌" = "动物相关菌",
+
+  "节肢动物相关型" = "节肢动物相关菌",
+  "节肢动物相关菌" = "节肢动物相关菌",
+
+  "食细菌型" = "食细菌型",
+  "食藻/食原生生物型" = "食藻/食原生生物型",
+
+  "未定义型" = "未分类",
+  "未分类" = "未分类"
+)
+
+df2 <- df %>%
+  mutate(
+    function_group = ifelse(
+      group_raw %in% names(label_map),
+      unname(label_map[group_raw]),
+      group_raw
+    ),
+    function_group = ifelse(
+      function_group %in% c("未定义型", "未分类"),
+      "未分类",
+      function_group
+    ),
+    host_family_cn2 = factor(
+      host_family_cn2,
+      levels = c("牛科", "猪科", "鹿科", "马科", "犀科")
+    )
+  ) %>%
+  group_by(host_family_cn2, function_group) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## -----------------------------
+## 5. 排序：除未分类外，按总体平均相对多度从高到低
+## -----------------------------
+order_df <- df2 %>%
+  group_by(function_group) %>%
+  summarise(
+    overall_mean = mean(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(function_group != "未分类") %>%
+  arrange(desc(overall_mean))
+
+ordered_groups <- c(order_df$function_group, "未分类")
+
+df2 <- df2 %>%
+  mutate(
+    function_group = factor(function_group, levels = ordered_groups)
+  )
+
+write.csv(df2, out_csv, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("\n各宿主科加总检查，应接近100：\n")
+print(
+  df2 %>%
+    group_by(host_family_cn2) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop")
+)
+
+cat("\n图例排序：\n")
+print(ordered_groups)
+
+## -----------------------------
+## 6. 高区分度颜色
+## 说明：按排序后的图例依次分配，避免相邻项目颜色过近
+## -----------------------------
+high_contrast_palette <- c(
+  "#E41A1C", "#009E73", "#377EB8", "#E69F00", "#984EA3",
+  "#00A6D6", "#D55E00", "#4DAF4A", "#F781BF", "#A65628",
+  "#1B9E77", "#FDB462", "#6A3D9A", "#B3DE69", "#FF7F00",
+  "#A6761D", "#1F78B4", "#E7298A", "#66C2A5", "#B15928",
+  "#5E4FA2", "#A6CEE3", "#FB9A99", "#8DA0CB", "#7CAE00",
+  "#C77CFF", "#00BFC4", "#F8766D", "#619CFF", "#C49A00"
+)
+
+non_unclassified <- ordered_groups[ordered_groups != "未分类"]
+
+color_values <- setNames(
+  high_contrast_palette[seq_along(non_unclassified)],
+  non_unclassified
+)
+
+color_values <- c(
+  color_values,
+  "未分类" = "#C9C9C9"
+)
+
+## -----------------------------
+## 7. 作图：只保留 x、y 轴，不要四边封闭框
+## -----------------------------
+p <- ggplot(
+  df2,
+  aes(
+    x = host_family_cn2,
+    y = mean_relative_abundance,
+    fill = function_group
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = color_values,
+    breaks = ordered_groups,
+    drop = FALSE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE,
+      keywidth = unit(0.42, "cm"),
+      keyheight = unit(0.42, "cm")
+    )
+  ) +
+  theme_classic(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.7),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.title.y = element_text(size = 16, color = "black"),
+
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black"),
+    legend.key.size = unit(0.44, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("中文标签汇总表: ", out_csv, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R
+#这版输出文件是：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_primary_lifestyle_no_elephant/Fig3_5_host_family_function_group_composition_no_elephant_CN_final2.png
+#上一版重绘脚本在重新映射中文名称时，没有把所有异常值、空值、旧名称都兜底合并到“未分类”。有些功能类群在 function_group 里变成了 NA 或未被识别，ggplot 作图时这些行被丢掉了，所以猪科、鹿科、犀科柱子没有堆满 100%。这类组成图绝对不能这样。
+#下面这版做了两层保险：
+#所有无法识别、空值、NA、未定义型，全部合并为“未分类”；
+#作图前自动检查每个宿主科是否为 100%，如果不是，会把缺失部分补入“未分类”，并在终端提示。
+#直接覆盖上一版重绘脚本运行。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-5 不同宿主科肠道真菌属水平功能类群组成
+## 最终重绘版：保证每个柱子=100%
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "tidyr", "ggplot2", "grid")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 字体设置
+## -----------------------------
+base_family <- ""
+
+if (requireNamespace("showtext", quietly = TRUE) &&
+    requireNamespace("sysfonts", quietly = TRUE)) {
+
+  font_candidates <- c(
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+  )
+
+  font_file <- font_candidates[file.exists(font_candidates)][1]
+
+  if (!is.na(font_file)) {
+    sysfonts::font_add("cnfont", regular = font_file)
+    showtext::showtext_auto()
+    showtext::showtext_opts(dpi = 600)
+    base_family <- "cnfont"
+    cat("使用中文字体：", font_file, "\n", sep = "")
+  }
+}
+
+## -----------------------------
+## 2. 输入输出
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+out_dir <- file.path(base_dir, "results/chapter3_family_primary_lifestyle_no_elephant")
+
+input_candidates <- c(
+  file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant_CN_final.csv"),
+  file.path(out_dir, "host_family_primary_lifestyle_mean_relative_abundance_no_elephant.csv")
+)
+
+in_csv <- input_candidates[file.exists(input_candidates)][1]
+
+if (is.na(in_csv)) {
+  stop("找不到宿主科平均相对多度表。已尝试：\n", paste(input_candidates, collapse = "\n"))
+}
+
+out_png <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final3.png")
+out_pdf <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final3.pdf")
+out_csv <- file.path(out_dir, "host_family_function_group_mean_relative_abundance_no_elephant_CN_final3.csv")
+
+cat("读取表格：", in_csv, "\n", sep = "")
+
+df <- read.csv(
+  in_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"mean_relative_abundance" %in% colnames(df)) {
+  stop("输入表缺少 mean_relative_abundance 列。")
+}
+
+## -----------------------------
+## 3. 兼容列名
+## -----------------------------
+family_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+if ("host_family_cn" %in% colnames(df)) {
+  df$host_family_cn2 <- df$host_family_cn
+} else if ("host_family" %in% colnames(df)) {
+  df$host_family_cn2 <- ifelse(
+    df$host_family %in% names(family_map),
+    unname(family_map[df$host_family]),
+    df$host_family
+  )
+} else {
+  stop("输入表缺少 host_family_cn 或 host_family 列。")
+}
+
+if ("primary_lifestyle_cn" %in% colnames(df)) {
+  df$group_raw <- df$primary_lifestyle_cn
+} else if ("function_group_cn" %in% colnames(df)) {
+  df$group_raw <- df$function_group_cn
+} else {
+  stop("输入表缺少 primary_lifestyle_cn 或 function_group_cn 列。")
+}
+
+df$group_raw <- trimws(as.character(df$group_raw))
+df$group_raw[df$group_raw %in% c("", "NA", "N/A", "na", "n/a", "unknown", "Unknown")] <- NA_character_
+
+## -----------------------------
+## 4. 最终中文译名统一表
+## -----------------------------
+label_map <- c(
+  "木材腐生型" = "木腐菌",
+  "木腐菌" = "木腐菌",
+
+  "凋落物腐生型" = "凋落物腐生菌",
+  "凋落物腐生菌" = "凋落物腐生菌",
+
+  "土壤腐生型" = "土壤腐生菌",
+  "土壤腐生菌" = "土壤腐生菌",
+
+  "未明确腐生型" = "未定义腐生菌",
+  "未定义腐生菌" = "未定义腐生菌",
+
+  "粪生腐生型" = "粪生腐生菌",
+  "粪生腐生菌" = "粪生腐生菌",
+
+  "花蜜/树液腐生型" = "花蜜/树液腐生菌",
+  "花蜜/树液腐生菌" = "花蜜/树液腐生菌",
+
+  "花粉腐生型" = "花粉腐生菌",
+  "花粉腐生菌" = "花粉腐生菌",
+
+  "植物病原型" = "植物病原菌",
+  "植物病原菌" = "植物病原菌",
+
+  "动物寄生型" = "动物寄生菌",
+  "动物寄生菌" = "动物寄生菌",
+
+  "藻类寄生型" = "藻类寄生菌",
+  "藻类寄生菌" = "藻类寄生菌",
+
+  "原生生物寄生型" = "原生生物寄生菌",
+  "原生生物寄生菌" = "原生生物寄生菌",
+
+  "地衣寄生型" = "地衣寄生菌",
+  "地衣寄生菌" = "地衣寄生菌",
+
+  "真菌寄生型" = "真菌寄生菌",
+  "真菌寄生菌" = "真菌寄生菌",
+
+  "未明确病理型" = "未定义病原菌",
+  "未定义病原菌" = "未定义病原菌",
+
+  "地衣型" = "地衣型真菌",
+  "地衣型真菌" = "地衣型真菌",
+
+  "外生菌根型" = "外生菌根真菌",
+  "外生菌根真菌" = "外生菌根真菌",
+
+  "丛枝菌根型" = "丛枝菌根真菌",
+  "丛枝菌根真菌" = "丛枝菌根真菌",
+
+  "苔藓共生型" = "苔藓共生菌",
+  "苔藓共生菌" = "苔藓共生菌",
+
+  "未明确共生型" = "未定义共生菌",
+  "未定义共生菌" = "未定义共生菌",
+
+  "动物内共生型" = "动物内共生菌",
+  "动物内共生菌" = "动物内共生菌",
+
+  "藻类外共生型" = "藻类外共生菌",
+  "藻类外共生菌" = "藻类外共生菌",
+
+  "叶内生型" = "叶内生菌",
+  "叶内生菌" = "叶内生菌",
+
+  "根内生型" = "根内生菌",
+  "根内生菌" = "根内生菌",
+
+  "附生型" = "附生菌",
+  "附生菌" = "附生菌",
+
+  "煤污菌型" = "煤烟菌",
+  "煤污菌" = "煤烟菌",
+  "煤烟菌" = "煤烟菌",
+
+  "动物相关型" = "动物相关菌",
+  "动物相关菌" = "动物相关菌",
+
+  "节肢动物相关型" = "节肢动物相关菌",
+  "节肢动物相关菌" = "节肢动物相关菌",
+
+  "食细菌型" = "食细菌型",
+  "食藻/食原生生物型" = "食藻/食原生生物型",
+  "食藻/食原生动物型" = "食藻/食原生生物型",
+
+  "未定义型" = "未分类",
+  "未分类" = "未分类"
+)
+
+df2 <- df %>%
+  mutate(
+    function_group = case_when(
+      is.na(group_raw) ~ "未分类",
+      group_raw %in% names(label_map) ~ unname(label_map[group_raw]),
+      TRUE ~ "未分类"
+    ),
+    function_group = ifelse(
+      is.na(function_group) | function_group %in% c("", "未定义型", "未分类"),
+      "未分类",
+      function_group
+    ),
+    host_family_cn2 = factor(
+      host_family_cn2,
+      levels = c("牛科", "猪科", "鹿科", "马科", "犀科")
+    )
+  ) %>%
+  group_by(host_family_cn2, function_group) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(host_family_cn2))
+
+## -----------------------------
+## 5. 强制补全并检查总和
+## -----------------------------
+all_families <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+df2 <- df2 %>%
+  tidyr::complete(
+    host_family_cn2 = factor(all_families, levels = all_families),
+    function_group,
+    fill = list(mean_relative_abundance = 0)
+  )
+
+total_check_before <- df2 %>%
+  group_by(host_family_cn2) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+
+cat("\n补偿前各宿主科加总：\n")
+print(total_check_before)
+
+## 如果因为旧标签/NA导致总和不足，把残差补入未分类
+residual_df <- total_check_before %>%
+  mutate(
+    residual = 100 - total,
+    residual = ifelse(abs(residual) < 1e-6, 0, residual),
+    function_group = "未分类",
+    mean_relative_abundance = residual
+  ) %>%
+  filter(residual > 0) %>%
+  select(host_family_cn2, function_group, mean_relative_abundance)
+
+if (nrow(residual_df) > 0) {
+  cat("\n检测到柱子不足100%，已将缺失部分补入“未分类”：\n")
+  print(residual_df)
+
+  df2 <- bind_rows(df2, residual_df) %>%
+    group_by(host_family_cn2, function_group) %>%
+    summarise(
+      mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+## 如果总和略超过100，由四舍五入造成，按比例缩放到100
+total_check_after_add <- df2 %>%
+  group_by(host_family_cn2) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+
+if (any(total_check_after_add$total > 100.0001)) {
+  df2 <- df2 %>%
+    left_join(total_check_after_add, by = "host_family_cn2") %>%
+    mutate(
+      mean_relative_abundance = mean_relative_abundance / total * 100
+    ) %>%
+    select(-total)
+}
+
+final_check <- df2 %>%
+  group_by(host_family_cn2) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+
+cat("\n最终各宿主科加总，应为100：\n")
+print(final_check)
+
+## -----------------------------
+## 6. 排序：除未分类外，按总体平均相对多度从高到低
+## -----------------------------
+order_df <- df2 %>%
+  group_by(function_group) %>%
+  summarise(
+    overall_mean = mean(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(function_group != "未分类") %>%
+  arrange(desc(overall_mean))
+
+ordered_groups <- c(order_df$function_group, "未分类")
+
+df2 <- df2 %>%
+  mutate(
+    host_family_cn2 = factor(as.character(host_family_cn2), levels = all_families),
+    function_group = factor(function_group, levels = ordered_groups)
+  )
+
+write.csv(df2, out_csv, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("\n图例排序：\n")
+print(ordered_groups)
+
+## -----------------------------
+## 7. 高区分度颜色
+## -----------------------------
+high_contrast_palette <- c(
+  "#E41A1C", "#009E73", "#377EB8", "#E69F00", "#984EA3",
+  "#00A6D6", "#D55E00", "#4DAF4A", "#F781BF", "#A65628",
+  "#1B9E77", "#FDB462", "#6A3D9A", "#B3DE69", "#FF7F00",
+  "#A6761D", "#1F78B4", "#E7298A", "#66C2A5", "#B15928",
+  "#5E4FA2", "#A6CEE3", "#FB9A99", "#8DA0CB", "#7CAE00",
+  "#C77CFF", "#00BFC4", "#F8766D", "#619CFF", "#C49A00"
+)
+
+non_unclassified <- ordered_groups[ordered_groups != "未分类"]
+
+color_values <- setNames(
+  high_contrast_palette[seq_along(non_unclassified)],
+  non_unclassified
+)
+
+color_values <- c(
+  color_values,
+  "未分类" = "#C9C9C9"
+)
+
+## -----------------------------
+## 8. 作图
+## -----------------------------
+p <- ggplot(
+  df2,
+  aes(
+    x = host_family_cn2,
+    y = mean_relative_abundance,
+    fill = function_group
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = color_values,
+    breaks = ordered_groups,
+    drop = FALSE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE,
+      keywidth = unit(0.42, "cm"),
+      keyheight = unit(0.42, "cm")
+    )
+  ) +
+  theme_classic(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.7),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.title.y = element_text(size = 16, color = "black"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black"),
+    legend.key.size = unit(0.44, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("中文标签汇总表: ", out_csv, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R
+#输出文件/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_primary_lifestyle_no_elephant/Fig3_5_host_family_function_group_composition_no_elephant_CN_final3.png
+#是 scale_y_continuous(limits = c(0, 100)) 的问题。
+#你的终端已经显示每个宿主科加总都是 100，但 ggplot2 又提示：
+#Removed 3 rows containing missing values or values outside the scale range (`geom_col()`).
+#这说明不是数据没到 100，而是作图时把顶部某些小色块删掉了。堆叠柱图在浮点计算时可能出现 100.0000000001 这类值，limits = c(0, 100) 会直接删除超出范围的图层，于是柱子看起来不到 100。
+#这次只需要改作图代码，不改数据、不重新计算。
+#直接运行下面这段修复脚本：
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R")
+txt = script.read_text(encoding="utf-8")
+
+old = '''  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +'''
+
+new = '''  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +'''
+
+if old not in txt:
+    raise SystemExit("没找到需要替换的 scale_y_continuous 代码块。")
+
+txt = txt.replace(old, new)
+
+script.write_text(txt, encoding="utf-8")
+print("已修复：删除 scale_y_continuous(limits=...)，改用 coord_cartesian(ylim=...)。")
+PY
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R
