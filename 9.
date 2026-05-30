@@ -1015,3 +1015,1538 @@ print("已按你最终版 UpSet 代码风格修复 top_anno / left_anno。")
 PY
 #运行：
 Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/11_redraw_chapter3_figures_CN_no_elephant.R
+#下面这份是完整作图脚本，只重做你现在要求的两张图：
+#图3-1 UpSet 图：按你原来的最终版 UpSetR 代码逻辑，只把宿主科名改成中文，其余布局、排序、红色高亮、比例都尽量保持原样。
+#图3-4 弦图：基于原版弦图代码，改成中文属名/宿主科名，并把宿主科名的文字方向改成和真菌属名一样，即从圆心指向扇形方向；同时放大宿主科名和属名，并扩大画布避免截断。
+#直接复制整段到 WSL 终端运行。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 中文重绘：
+## 图3-1 宿主科水平共享/独有 SH UpSet 图
+## 图3-4 不同宿主科肠道真菌优势属水平组成弦图
+##
+## 重点：
+## 1. UpSet 图严格沿用原最终版 UpSetR 作图逻辑，只把宿主科英文名换成中文；
+## 2. 弦图保留原版排版和数据结构，宿主科名与属名都使用同一种径向文字方向；
+## 3. 简体中文字体：优先微软雅黑；
+## 4. PNG 输出 600 dpi 白底。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "tidyverse",
+  "UpSetR",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(UpSetR)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/msyh.ttc 或 simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+base_dir <- file.path(project_dir, "globalfungi_style_test_no_elephant")
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+genus_table_candidates <- c(
+  file.path(base_dir, "taxonomy/genus_abundance_table_no_elephant.tsv"),
+  file.path(base_dir, "taxonomy/genus_abundance_table.tsv"),
+  file.path(base_dir, "abundance_tables/genus_abundance_table_no_elephant.tsv"),
+  file.path(base_dir, "abundance_tables/genus_abundance_table.tsv"),
+  file.path(project_dir, "globalfungi_style_test/taxonomy/genus_abundance_table.tsv")
+)
+
+genus_table_file <- genus_table_candidates[file.exists(genus_table_candidates)][1]
+
+if (is.na(genus_table_file)) {
+  stop(
+    "找不到 genus_abundance_table。已尝试：\n",
+    paste(genus_table_candidates, collapse = "\n")
+  )
+}
+
+upset_dir <- file.path(base_dir, "results/host_family_upset")
+chord_dir <- file.path(base_dir, "results/chapter3_family_composition_no_elephant")
+
+dir.create(upset_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(chord_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (!file.exists(metadata_file)) stop("找不到 metadata：", metadata_file)
+if (!file.exists(sh_table_file)) stop("找不到 SH abundance table：", sh_table_file)
+
+cat("metadata_file: ", metadata_file, "\n", sep = "")
+cat("sh_table_file: ", sh_table_file, "\n", sep = "")
+cat("genus_table_file: ", genus_table_file, "\n", sep = "")
+
+## =========================
+## 3. 中文映射
+## =========================
+to_cn <- function(x, map_vec) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(map_vec)
+  x2[hit] <- unname(map_vec[x2[hit]])
+  x2
+}
+
+family_cn <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+genus_cn <- c(
+  "Kazachstania" = "哈萨克酵母属",
+  "Aspergillus" = "曲霉属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Cladonia" = "石蕊属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Cortinarius" = "丝膜菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属"
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "not applicable", "Not applicable",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "Cannot find column for ", label,
+      ". Tried: ", paste(candidates, collapse = ", "),
+      "\nExisting columns:\n", paste(cols, collapse = ", ")
+    )
+  }
+  hit
+}
+
+clean_genus <- function(x) {
+  x <- trimws(as.character(x))
+  x <- sub("^.*g__", "g__", x)
+  x <- sub("^g__", "", x)
+  x <- sub("^Genus__", "", x)
+  x[x == "" | is.na(x)] <- "Unassigned"
+  x[x %in% c("NA", "N/A", "na", "n/a", "unknown", "Unknown")] <- "Unassigned"
+  x
+}
+
+fmt_tick <- function(x) {
+  ifelse(abs(x - round(x)) < 1e-6, as.character(round(x)), sprintf("%.1f", x))
+}
+
+## 大于20：每20标一次，另加最大值；
+## 15-20：0、10、最大值；
+## 小于15：0、最大值。
+nice_axis_at <- function(sector, xmax, drop_sectors) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  ## 对容易重叠的扇区删除倒数第二个刻度标签
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+read_sh_table <- function(sh_table_file) {
+  sh_lines <- readLines(sh_table_file, warn = FALSE)
+  sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+  if (length(sh_lines) == 0) {
+    stop("SH abundance table 为空。")
+  }
+
+  ## biom convert --to-tsv 第一行通常是说明行，第二行才是 #OTU ID 表头
+  if (grepl("^# Constructed from biom file", sh_lines[1])) {
+    sh_lines <- sh_lines[-1]
+  }
+
+  if (!grepl("^#OTU ID\t|^#OTU ID$", sh_lines[1])) {
+    stop(
+      "SH abundance table 表头异常。文件前几行是：\n",
+      paste(head(sh_lines, 5), collapse = "\n")
+    )
+  }
+
+  sh_raw <- read.delim(
+    text = paste(sh_lines, collapse = "\n"),
+    header = TRUE,
+    sep = "\t",
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+  colnames(sh_raw)[1] <- "SH_ID"
+
+  taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+  if (length(taxonomy_cols) > 0) {
+    sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+  }
+
+  rownames(sh_raw) <- sh_raw$SH_ID
+  mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+  mode(mat) <- "numeric"
+  mat[is.na(mat)] <- 0
+
+  mat
+}
+
+## ============================================================
+## A. 图3-1 UpSet：沿用最终 UpSetR 逻辑，只改宿主科名为中文
+## ============================================================
+cat("\n开始绘制图3-1 中文 UpSet 图...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列，请检查列名。")
+}
+
+possible_sample_cols <- c("sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID")
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("没有找到样本 ID 列。请检查 metadata 中样本 ID 列名。")
+}
+
+meta_upset <- meta %>%
+  mutate(
+    sample_id = .data[[sample_col]],
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family != "NA",
+    host_family != "missing",
+    host_family != "not_recorded",
+    host_family != "not reported",
+    host_family %in% names(family_cn)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+cat("Metadata samples after filtering host_family:", nrow(meta_upset), "\n")
+cat("Host families:\n")
+print(sort(table(meta_upset$host_family), decreasing = TRUE))
+
+mat_sh <- read_sh_table(sh_table_file)
+
+cat("SH abundance matrix dimension:", nrow(mat_sh), "SHs x", ncol(mat_sh), "samples\n")
+
+common_samples <- intersect(colnames(mat_sh), meta_upset$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 样本名和 metadata 样本名没有交集，请检查 sample_id 列。")
+}
+
+mat_sh <- mat_sh[, common_samples, drop = FALSE]
+
+meta_upset2 <- meta_upset %>%
+  filter(sample_id %in% common_samples) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta_upset2 <- meta_upset2[match(colnames(mat_sh), meta_upset2$sample_id), ]
+
+cat("Matched samples:", ncol(mat_sh), "\n")
+cat("Matched host families:\n")
+print(sort(table(meta_upset2$host_family), decreasing = TRUE))
+
+host_families <- sort(unique(meta_upset2$host_family))
+
+presence_list <- list()
+
+for (hf in host_families) {
+  samples_hf <- meta_upset2$sample_id[meta_upset2$host_family == hf]
+  sub_mat <- mat_sh[, samples_hf, drop = FALSE]
+  present_sh <- rownames(sub_mat)[rowSums(sub_mat > 0) > 0]
+  presence_list[[hf]] <- present_sh
+}
+
+set_size_df <- tibble(
+  host_family = names(presence_list),
+  SH_number = lengths(presence_list)
+) %>%
+  arrange(desc(SH_number))
+
+write.csv(
+  set_size_df,
+  file.path(upset_dir, "host_family_SH_set_size_no_elephant.csv"),
+  row.names = FALSE
+)
+
+all_sh <- sort(unique(unlist(presence_list)))
+
+upset_df <- tibble(SH_ID = all_sh)
+
+for (hf in host_families) {
+  upset_df[[hf]] <- as.integer(upset_df$SH_ID %in% presence_list[[hf]])
+}
+
+write.csv(
+  upset_df,
+  file.path(upset_dir, "host_family_SH_presence_absence_matrix_no_elephant.csv"),
+  row.names = FALSE
+)
+
+shared_sh <- Reduce(intersect, presence_list)
+
+cat("Number of SHs shared by all host families:", length(shared_sh), "\n")
+
+write.table(
+  shared_sh,
+  file.path(upset_dir, "shared_SHs_all_host_families_no_elephant.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE,
+  sep = "\t"
+)
+
+upset_input <- as.data.frame(upset_df)
+rownames(upset_input) <- upset_input$SH_ID
+upset_input$SH_ID <- NULL
+
+pa_mat <- as.matrix(upset_input)
+
+family_sample_counts <- meta_upset2 %>%
+  count(host_family, name = "sample_n") %>%
+  arrange(desc(sample_n))
+
+family_unique_counts <- tibble(
+  host_family = colnames(pa_mat),
+  unique_SH_number = sapply(colnames(pa_mat), function(hf) {
+    sum(pa_mat[, hf] == 1 & rowSums(pa_mat) == 1)
+  })
+) %>%
+  arrange(desc(unique_SH_number))
+
+pattern_df <- as.data.frame(pa_mat)
+pattern_df$pattern <- apply(pattern_df, 1, paste0, collapse = "")
+
+intersection_summary <- pattern_df %>%
+  count(pattern, name = "SH_number") %>%
+  mutate(
+    pattern = as.character(pattern),
+    pattern = sprintf("%0*s", length(host_families), pattern),
+    pattern = gsub(" ", "0", pattern)
+  )
+
+pattern_mat <- do.call(rbind, strsplit(as.character(intersection_summary$pattern), ""))
+pattern_mat <- matrix(as.integer(pattern_mat), ncol = length(host_families), byrow = FALSE)
+colnames(pattern_mat) <- host_families
+
+intersection_summary$degree <- rowSums(pattern_mat == 1)
+intersection_summary$families <- apply(pattern_mat, 1, function(x) {
+  paste(host_families[x == 1], collapse = " & ")
+})
+intersection_summary$share_type <- ifelse(
+  intersection_summary$degree == 1,
+  "1科特有",
+  paste0(intersection_summary$degree, "科共有")
+)
+
+intersection_summary <- intersection_summary %>%
+  arrange(desc(degree), desc(SH_number))
+
+write.csv(
+  intersection_summary,
+  file.path(upset_dir, "host_family_SH_intersection_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+degree_summary <- intersection_summary %>%
+  group_by(degree, share_type) %>%
+  summarise(SH_number_total = sum(SH_number), .groups = "drop") %>%
+  arrange(desc(degree))
+
+write.csv(
+  degree_summary,
+  file.path(upset_dir, "host_family_SH_degree_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+summary_file <- file.path(upset_dir, "host_family_upset_summary_no_elephant.txt")
+
+sink(summary_file)
+cat("Host family-level UpSet summary, no_elephant version\n")
+cat("====================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input SH abundance table:\n", sh_table_file, "\n\n")
+cat("Matched samples:", ncol(mat_sh), "\n")
+cat("Total SHs:", nrow(mat_sh), "\n")
+cat("Host family number:", length(host_families), "\n\n")
+cat("Host family sample numbers:\n")
+print(family_sample_counts)
+cat("\nHost family SH set sizes:\n")
+print(set_size_df)
+cat("\nHost family unique SH numbers:\n")
+print(family_unique_counts)
+cat("\nNumber of SHs shared by all host families:", length(shared_sh), "\n\n")
+cat("Degree summary:\n")
+print(degree_summary)
+sink()
+
+## 关键：只把 UpSetR 输入矩阵的列名改成中文；数据和最终版排序逻辑不变
+upset_input_cn <- upset_input
+colnames(upset_input_cn) <- to_cn(colnames(upset_input_cn), family_cn)
+
+set_order <- set_size_df$host_family
+set_order_cn <- to_cn(set_order, family_cn)
+
+all5_query_cn <- list(
+  query = intersects,
+  params = to_cn(
+    c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae"),
+    family_cn
+  ),
+  color = "#D73027",
+  active = TRUE
+)
+
+out_upset_pdf <- file.path(upset_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only.pdf")
+out_upset_png <- file.path(upset_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only.png")
+
+## PDF
+cairo_pdf(
+  out_upset_pdf,
+  width = 12,
+  height = 8.0,
+  family = cn_font,
+  bg = "white"
+)
+
+upset(
+  upset_input_cn,
+  sets = set_order_cn,
+  nsets = length(set_order_cn),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.25, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query_cn)
+)
+
+dev.off()
+
+## PNG
+png(
+  out_upset_png,
+  width = 5000,
+  height = 3400,
+  res = 600,
+  type = "cairo",
+  bg = "white"
+)
+
+upset(
+  upset_input_cn,
+  sets = set_order_cn,
+  nsets = length(set_order_cn),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.25, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query_cn)
+)
+
+dev.off()
+
+cat("图3-1 中文版完成：", out_upset_png, "\n", sep = "")
+
+## ============================================================
+## B. 图3-4 弦图：中文标签 + 宿主科名与属名同方向径向排布
+## ============================================================
+cat("\n开始绘制图3-4 中文弦图...\n")
+
+top_n_genus <- 20
+min_link_value <- 0.001
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Equidae",
+  "Cervidae",
+  "Rhinocerotidae"
+)
+
+family_colors <- c(
+  Bovidae = "#D8AA00",
+  Suidae = "#E41A1C",
+  Equidae = "#00BFC4",
+  Cervidae = "#2CA02C",
+  Rhinocerotidae = "#619CFF"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+drop_penultimate_tick_sectors_en <- c(
+  "Equidae", "Cervidae", "Rhinocerotidae",
+  "Thelebolus", "Ascochyta"
+)
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  stringsAsFactors = FALSE
+)
+
+meta2 <- meta2[complete.cases(meta2), ]
+meta2 <- meta2[!duplicated(meta2$sample_id), ]
+meta2 <- meta2 %>%
+  filter(host_family %in% family_order) %>%
+  mutate(host_family = factor(host_family, levels = family_order))
+
+cat("Metadata samples after family filtering:\n")
+print(table(meta2$host_family))
+
+genus_tab <- read.delim(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table 列数异常，至少应为2列。")
+}
+
+colnames(genus_tab)[1] <- "genus"
+genus_tab$genus <- clean_genus(genus_tab$genus)
+
+sample_cols <- setdiff(colnames(genus_tab), "genus")
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(as.character(genus_tab[[cc]])))
+}
+genus_tab[is.na(genus_tab)] <- 0
+
+genus_tab <- genus_tab %>%
+  group_by(genus) %>%
+  summarise(across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+genus_long <- genus_tab %>%
+  pivot_longer(
+    cols = -genus,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    abundance = suppressWarnings(as.numeric(abundance))
+  ) %>%
+  filter(!is.na(abundance))
+
+common_samples <- intersect(meta2$sample_id, unique(genus_long$sample_id))
+
+if (length(common_samples) == 0) {
+  stop("metadata 与 genus 表没有匹配到共同样本。")
+}
+
+meta2 <- meta2 %>% filter(sample_id %in% common_samples)
+genus_long <- genus_long %>% filter(sample_id %in% common_samples)
+
+sample_total <- genus_long %>%
+  group_by(sample_id) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop")
+
+valid_samples <- sample_total$sample_id[sample_total$total_abundance > 0]
+
+meta2 <- meta2 %>% filter(sample_id %in% valid_samples)
+genus_long <- genus_long %>% filter(sample_id %in% valid_samples)
+
+genus_rel <- genus_long %>%
+  group_by(sample_id) %>%
+  mutate(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  ) %>%
+  left_join(meta2, by = "sample_id") %>%
+  filter(!is.na(host_family))
+
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n")
+cat("Matched host family samples:\n")
+print(table(genus_rel %>% distinct(sample_id, host_family) %>% pull(host_family)))
+
+family_genus_mean_all <- genus_rel %>%
+  group_by(host_family, genus) %>%
+  summarise(
+    mean_rel_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    host_family = family_order,
+    genus,
+    fill = list(mean_rel_abundance = 0)
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order)
+  )
+
+genus_rank <- family_genus_mean_all %>%
+  group_by(genus) %>%
+  summarise(
+    overall_mean_rel_abundance = mean(mean_rel_abundance, na.rm = TRUE),
+    max_family_mean_rel_abundance = max(mean_rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(overall_mean_rel_abundance), genus)
+
+top_genera <- genus_rank %>%
+  filter(genus != "Unassigned") %>%
+  slice_head(n = top_n_genus) %>%
+  pull(genus)
+
+write.csv(
+  genus_rank,
+  file.path(chord_dir, "host_family_all_genus_rank_by_mean_relative_abundance_no_elephant.csv"),
+  row.names = FALSE
+)
+
+top_summary <- genus_rank %>%
+  filter(genus %in% top_genera) %>%
+  mutate(top20_order = match(genus, top_genera)) %>%
+  arrange(top20_order)
+
+write.csv(
+  top_summary,
+  file.path(chord_dir, "host_family_top20_genus_summary_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mean_top20 <- family_genus_mean_all %>%
+  filter(genus %in% top_genera) %>%
+  mutate(
+    host_family = factor(host_family, levels = family_order),
+    genus = factor(genus, levels = top_genera)
+  )
+
+write.csv(
+  mean_top20,
+  file.path(chord_dir, "host_family_top20_genus_mean_relative_abundance_long_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mat_df <- mean_top20 %>%
+  pivot_wider(
+    names_from = genus,
+    values_from = mean_rel_abundance,
+    values_fill = 0
+  ) %>%
+  arrange(host_family)
+
+mat_df$host_family <- as.character(mat_df$host_family)
+mat_df <- mat_df[match(family_order, mat_df$host_family), , drop = FALSE]
+
+mat <- as.matrix(mat_df[, top_genera, drop = FALSE])
+rownames(mat) <- mat_df$host_family
+
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+write.csv(
+  as.data.frame(mat) %>% rownames_to_column("host_family"),
+  file.path(chord_dir, "host_family_top20_genus_chord_matrix_no_elephant.csv"),
+  row.names = FALSE
+)
+
+mat_plot <- mat
+mat_plot[mat_plot < min_link_value] <- 0
+mat_plot <- mat_plot[, colSums(mat_plot) > 0, drop = FALSE]
+mat_plot <- mat_plot[rowSums(mat_plot) > 0, , drop = FALSE]
+
+genus_order_en <- colnames(mat_plot)
+family_order_plot_en <- rownames(mat_plot)
+
+genus_source_prop <- apply(mat_plot, 2, function(x) {
+  if (sum(x) == 0) {
+    rep(0, length(x))
+  } else {
+    x / sum(x)
+  }
+})
+
+genus_source_prop <- as.matrix(genus_source_prop)
+rownames(genus_source_prop) <- rownames(mat_plot)
+
+write.csv(
+  as.data.frame(t(genus_source_prop)) %>% rownames_to_column("genus"),
+  file.path(chord_dir, "host_family_top20_genus_source_composition_for_chord_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  as.data.frame(mat_plot) %>% rownames_to_column("host_family"),
+  file.path(chord_dir, "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"),
+  row.names = FALSE
+)
+
+## 中文作图矩阵；只改显示名，不改数值
+mat_plot_cn <- mat_plot
+rownames(mat_plot_cn) <- to_cn(rownames(mat_plot_cn), family_cn)
+colnames(mat_plot_cn) <- to_cn(colnames(mat_plot_cn), genus_cn)
+
+genus_source_prop_cn <- genus_source_prop
+rownames(genus_source_prop_cn) <- to_cn(rownames(genus_source_prop_cn), family_cn)
+colnames(genus_source_prop_cn) <- to_cn(colnames(genus_source_prop_cn), genus_cn)
+
+family_order_plot_cn <- rownames(mat_plot_cn)
+genus_order_cn <- colnames(mat_plot_cn)
+
+family_colors_cn <- family_colors
+names(family_colors_cn) <- to_cn(names(family_colors), family_cn)
+
+drop_penultimate_tick_sectors_cn <- to_cn(
+  drop_penultimate_tick_sectors_en,
+  c(family_cn, genus_cn)
+)
+
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      units = "in",
+      res = 600,
+      type = "cairo",
+      bg = "white"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_cn)),
+    genus_order_cn
+  )
+
+  grid_cols <- c(
+    family_colors_cn[family_order_plot_cn],
+    genus_colors[genus_order_cn]
+  )
+
+  link_col_mat <- matrix(NA, nrow = nrow(mat_plot_cn), ncol = ncol(mat_plot_cn))
+  rownames(link_col_mat) <- rownames(mat_plot_cn)
+  colnames(link_col_mat) <- colnames(mat_plot_cn)
+
+  for (g in genus_order_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(genus_colors[g], transparency = 0.45)
+  }
+
+  n_family <- length(family_order_plot_cn)
+  n_genus <- length(genus_order_cn)
+
+  sector_order <- c(genus_order_cn, family_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4, n_family - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.50, 1.50),
+    canvas.ylim = c(-1.50, 1.50),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot_cn,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.035,
+    preAllocateTracks = list(
+      list(track.height = 0.185),
+      list(track.height = 0.030)
+    )
+  )
+
+  ## Track 1: 刻度 + 标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      axis_h <- 0.10
+      at <- nice_axis_at(sector, xlim[2], drop_penultimate_tick_sectors_cn)
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = nice_axis_lab(at),
+          labels.cex = 0.34,
+          major.tick.length = mm_y(0.50),
+          labels.niceFacing = TRUE,
+          col = "grey30",
+          labels.col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+      }
+
+      ## 关键：宿主科名和属名使用同一种文字方向
+      ## facing = "clockwise" + niceFacing = TRUE：
+      ## 文字沿从圆心指向扇区的方向排布，并自动调整可读方向。
+      if (sector %in% family_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.64,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.92,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.60,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.64,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧宿主科贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_cn) {
+        prop <- genus_source_prop_cn[, sector]
+        prop <- prop[prop > 0]
+
+        if (length(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (fam in names(prop)) {
+            w <- total_width * prop[fam]
+            circos.rect(
+              start,
+              0,
+              start + w,
+              1,
+              col = family_colors_cn[fam],
+              border = NA
+            )
+            start <- start + w
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+out_chord_png <- file.path(chord_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels.png")
+out_chord_pdf <- file.path(chord_dir, "Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels.pdf")
+
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+write.csv(
+  as.data.frame(mat_plot_cn) %>% rownames_to_column("宿主科"),
+  file.path(chord_dir, "host_family_top20_genus_chord_matrix_no_elephant_CN_radial_labels.csv"),
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+summary_txt <- file.path(chord_dir, "host_family_top20_genus_chord_summary_no_elephant_CN_radial_labels.txt")
+
+sink(summary_txt)
+cat("Host family Top20 genus chord summary, no_elephant Chinese radial-label version\n")
+cat("=========================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n")
+cat("Input genus abundance table:\n", genus_table_file, "\n\n")
+cat("Matched valid samples:", length(unique(genus_rel$sample_id)), "\n\n")
+cat("Host family sample counts:\n")
+print(table(meta2$host_family))
+cat("\nTop20 genera by overall mean relative abundance:\n")
+print(top_summary)
+cat("\nMatrix used for plot, after min link filtering:\n")
+print(as.data.frame(mat_plot_cn) %>% rownames_to_column("宿主科"))
+cat("\nmin_link_value:", min_link_value, "\n")
+sink()
+
+cat("图3-4 中文径向标签版完成：", out_chord_png, "\n", sep = "")
+
+cat("\n全部完成！\n")
+cat("图3-1 UpSet 中文版：", out_upset_png, "\n", sep = "")
+cat("图3-4 弦图中文径向标签版：", out_chord_png, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R
+#运行后主要看这两个新文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only.png
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels.png
+#下面这版只改现有脚本 /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R，不重新改计算流程。
+#改动包括：
+#弦图
+#保证每个扇区的最大刻度值显示出来，不再被 circos.axis() 在边界处吞掉。
+#删除容易重叠的倒数第二个刻度值，但保留最大值。
+#缩小外圈标签与刻度之间的距离。
+#缩小外圈标签轨道高度，减少留白。
+#适当保留画布边界，避免放大字体后被截掉。
+#UpSet 图
+#宿主科名字号调到与 x/y 轴名接近。
+#仍然只改中文宿主科名，不改数据、不改排序、不改图形结构。
+#直接运行下面这段：
+cd /mnt/d/ITS_SH_pipeline
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R")
+txt = script.read_text(encoding="utf-8")
+
+# 1. UpSet：把 set names 字体调大到接近 x/y 轴名
+txt = txt.replace(
+    'text.scale = c(1.32, 1.20, 1.20, 1.10, 1.25, 1.03)',
+    'text.scale = c(1.32, 1.20, 1.20, 1.10, 1.38, 1.03)'
+)
+
+# 2. 弦图：缩小画布空白，但保留足够边界
+txt = txt.replace(
+    'canvas.xlim = c(-1.50, 1.50),\n    canvas.ylim = c(-1.50, 1.50),',
+    'canvas.xlim = c(-1.36, 1.36),\n    canvas.ylim = c(-1.36, 1.36),'
+)
+
+# 3. 弦图：缩小外圈标签轨道，减少标签和刻度间留白
+txt = txt.replace(
+    'list(track.height = 0.185),\n      list(track.height = 0.030)',
+    'list(track.height = 0.135),\n      list(track.height = 0.030)'
+)
+
+# 4. 替换 Track 1 中刻度和标签绘制逻辑
+pattern = re.compile(
+r'''      axis_h <- 0\.10
+      at <- nice_axis_at\(sector, xlim\[2\], drop_penultimate_tick_sectors_cn\)
+
+      circos\.lines\(
+        x = c\(xlim\[1\], xlim\[2\]\),
+        y = c\(axis_h, axis_h\),
+        col = "grey30",
+        lwd = 0\.45
+      \)
+
+      if \(!is\.null\(at\) && length\(at\) >= 2\) \{
+        circos\.axis\(
+          h = axis_h,
+          major\.at = at,
+          labels = nice_axis_lab\(at\),
+          labels\.cex = 0\.34,
+          major\.tick\.length = mm_y\(0\.50\),
+          labels\.niceFacing = TRUE,
+          col = "grey30",
+          labels\.col = "grey30",
+          minor\.ticks = 0,
+          direction = "outside"
+        \)
+      \}
+
+      ## 关键：宿主科名和属名使用同一种文字方向
+      ## facing = "clockwise" \+ niceFacing = TRUE：
+      ## 文字沿从圆心指向扇区的方向排布，并自动调整可读方向。
+      if \(sector %in% family_order_plot_cn\) \{
+        circos\.text\(
+          x = mean\(xlim\),
+          y = 0\.64,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c\(0, 0\.5\),
+          cex = 0\.92,
+          font = 2,
+          col = "black"
+        \)
+      \} else \{
+        circos\.text\(
+          x = mean\(xlim\),
+          y = 0\.60,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c\(0, 0\.5\),
+          cex = 0\.64,
+          font = 1,
+          col = "black"
+        \)
+      \}''',
+re.S)
+
+new = r'''      ## 外圈刻度位置。axis_h 越小越贴近外圈彩条。
+      axis_h <- 0.08
+      xmax <- xlim[2]
+      at <- nice_axis_at(sector, xmax, drop_penultimate_tick_sectors_cn)
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+
+        ## circos.axis 在扇区最右边界处有时会吞掉最大刻度值。
+        ## 所以把最大刻度的位置稍微往内移，但标签仍显示真实最大值。
+        at_plot <- at
+        lab_plot <- nice_axis_lab(at)
+
+        max_id <- which.max(at_plot)
+        if (length(max_id) == 1) {
+          at_plot[max_id] <- at_plot[max_id] - diff(xlim) * 0.012
+        }
+
+        circos.axis(
+          h = axis_h,
+          major.at = at_plot,
+          labels = lab_plot,
+          labels.cex = 0.34,
+          major.tick.length = mm_y(0.45),
+          labels.niceFacing = TRUE,
+          col = "grey30",
+          labels.col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+      }
+
+      ## 宿主科名和真菌属名均使用同一种径向文字方向。
+      ## y 值调低，使标签更靠近刻度，只保留刻度数字所需间距。
+      if (sector %in% family_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.34,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.98,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.31,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.68,
+          font = 1,
+          col = "black"
+        )
+      }'''
+
+txt2, n = pattern.subn(new, txt)
+
+if n != 1:
+    raise SystemExit("没有找到弦图 Track 1 的原始代码块，先不要运行。请把脚本中 'axis_h <- 0.10' 附近内容发我。")
+
+script.write_text(txt2, encoding="utf-8")
+print("已完成 UpSet 字体和弦图外圈刻度/标签距离修正。")
+PY
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R
+#UpSet 图没有明显变化，原因大概率是：上一版只是把 text.scale 里控制集合名称的参数稍微从 1.25 改到 1.38，这个幅度太小；而且 UpSetR 对左侧集合名称的位置控制很有限，默认是右对齐靠近点阵区，不会真正“居中”。
+#所以你肉眼看起来几乎没变化。这个不是数据问题，也不是中文映射问题，是 UpSetR 文字参数控制不够明显。
+#现在只改 UpSet 图，不动弦图。下面这段会把 UpSet 图中宿主科名字体明显放大，并尽量让左侧文字在原来那块区域里更接近居中显示。核心改动是：
+#text.scale 第 5 个值从 1.38 提到 1.85
+#适当加宽输出图，避免中文名挤压
+#只重新生成 UpSet 图，不再重复跑弦图
+#直接运行：
+cd /mnt/d/ITS_SH_pipeline
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_and_chord_CN_final.R")
+txt = script.read_text(encoding="utf-8")
+
+# 只改 UpSet 部分两个 upset() 调用里的 text.scale。
+# text.scale 第5个值控制集合名称，也就是宿主科名。
+txt = re.sub(
+    r'text\.scale = c\([^)]+\)',
+    'text.scale = c(1.32, 1.20, 1.20, 1.10, 1.85, 1.03)',
+    txt
+)
+
+# 加宽 UpSet PNG/PDF 输出，让放大的宿主科名不挤。
+txt = txt.replace(
+    'width = 12,\n  height = 8.0,',
+    'width = 13,\n  height = 8.0,'
+)
+
+txt = txt.replace(
+    'width = 5000,\n  height = 3400,',
+    'width = 5600,\n  height = 3400,'
+)
+
+script.write_text(txt, encoding="utf-8")
+print("已把 UpSet 宿主科名字体显著放大，并加宽输出画布。")
+PY
+#为了避免弦图重新跑浪费时间，你可以只运行脚本中的 UpSet 部分。最稳妥做法是新建一个只重绘 UpSet 图的小脚本：
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12A_redraw_upset_CN_only.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("tidyverse", "UpSetR", "showtext", "sysfonts")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(UpSetR)
+  library(showtext)
+  library(sysfonts)
+})
+
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+if (is.na(font_file)) stop("找不到中文字体。")
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+base_dir <- file.path(project_dir, "globalfungi_style_test_no_elephant")
+
+metadata_file <- file.path(base_dir, "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv")
+sh_table_file <- file.path(base_dir, "abundance_tables/SH_abundance_table_no_elephant.tsv")
+upset_dir <- file.path(base_dir, "results/host_family_upset")
+dir.create(upset_dir, recursive = TRUE, showWarnings = FALSE)
+
+family_cn <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+to_cn <- function(x, map_vec) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(map_vec)
+  x2[hit] <- unname(map_vec[x2[hit]])
+  x2
+}
+
+read_sh_table <- function(sh_table_file) {
+  sh_lines <- readLines(sh_table_file, warn = FALSE)
+  sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+  if (grepl("^# Constructed from biom file", sh_lines[1])) {
+    sh_lines <- sh_lines[-1]
+  }
+
+  sh_raw <- read.delim(
+    text = paste(sh_lines, collapse = "\n"),
+    header = TRUE,
+    sep = "\t",
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+  colnames(sh_raw)[1] <- "SH_ID"
+
+  taxonomy_cols <- grep("taxonomy|metadata", colnames(sh_raw), ignore.case = TRUE, value = TRUE)
+  if (length(taxonomy_cols) > 0) {
+    sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+  }
+
+  rownames(sh_raw) <- sh_raw$SH_ID
+  mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+  mode(mat) <- "numeric"
+  mat[is.na(mat)] <- 0
+  mat
+}
+
+meta <- read.csv(metadata_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+sample_col <- c("sampleid", "sample_id", "#SampleID", "SampleID", "sample")[c("sampleid", "sample_id", "#SampleID", "SampleID", "sample") %in% colnames(meta)][1]
+if (is.na(sample_col)) stop("找不到样本ID列。")
+if (!"host_family" %in% colnames(meta)) stop("找不到 host_family 列。")
+
+meta_upset <- meta %>%
+  mutate(
+    sample_id = .data[[sample_col]],
+    host_family = trimws(as.character(host_family))
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    host_family %in% names(family_cn)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+mat_sh <- read_sh_table(sh_table_file)
+
+common_samples <- intersect(colnames(mat_sh), meta_upset$sample_id)
+if (length(common_samples) == 0) stop("SH表和metadata没有共同样本。")
+
+mat_sh <- mat_sh[, common_samples, drop = FALSE]
+
+meta_upset2 <- meta_upset %>%
+  filter(sample_id %in% common_samples) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta_upset2 <- meta_upset2[match(colnames(mat_sh), meta_upset2$sample_id), ]
+
+host_families <- sort(unique(meta_upset2$host_family))
+
+presence_list <- list()
+for (hf in host_families) {
+  samples_hf <- meta_upset2$sample_id[meta_upset2$host_family == hf]
+  sub_mat <- mat_sh[, samples_hf, drop = FALSE]
+  presence_list[[hf]] <- rownames(sub_mat)[rowSums(sub_mat > 0) > 0]
+}
+
+set_size_df <- tibble(
+  host_family = names(presence_list),
+  SH_number = lengths(presence_list)
+) %>%
+  arrange(desc(SH_number))
+
+all_sh <- sort(unique(unlist(presence_list)))
+upset_df <- tibble(SH_ID = all_sh)
+
+for (hf in host_families) {
+  upset_df[[hf]] <- as.integer(upset_df$SH_ID %in% presence_list[[hf]])
+}
+
+upset_input <- as.data.frame(upset_df)
+rownames(upset_input) <- upset_input$SH_ID
+upset_input$SH_ID <- NULL
+
+## 只改显示列名为中文
+upset_input_cn <- upset_input
+colnames(upset_input_cn) <- to_cn(colnames(upset_input_cn), family_cn)
+
+set_order <- set_size_df$host_family
+set_order_cn <- to_cn(set_order, family_cn)
+
+all5_query_cn <- list(
+  query = intersects,
+  params = to_cn(c("Bovidae", "Equidae", "Cervidae", "Suidae", "Rhinocerotidae"), family_cn),
+  color = "#D73027",
+  active = TRUE
+)
+
+out_png <- file.path(upset_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only_v2.png")
+out_pdf <- file.path(upset_dir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only_v2.pdf")
+
+## PDF
+cairo_pdf(out_pdf, width = 13, height = 8.0, family = cn_font, bg = "white")
+upset(
+  upset_input_cn,
+  sets = set_order_cn,
+  nsets = length(set_order_cn),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.85, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query_cn)
+)
+dev.off()
+
+## PNG
+png(out_png, width = 5600, height = 3400, res = 600, type = "cairo", bg = "white")
+upset(
+  upset_input_cn,
+  sets = set_order_cn,
+  nsets = length(set_order_cn),
+  nintersects = 60,
+  group.by = "degree",
+  order.by = "freq",
+  decreasing = TRUE,
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+  text.scale = c(1.32, 1.20, 1.20, 1.10, 1.85, 1.03),
+  point.size = 2.2,
+  line.size = 0.65,
+  mb.ratio = c(0.70, 0.30),
+  main.bar.color = "#4D4D4D",
+  sets.bar.color = "#4D4D4D",
+  matrix.color = "#4D4D4D",
+  shade.color = "#F0F0F0",
+  shade.alpha = 0.6,
+  queries = list(all5_query_cn)
+)
+dev.off()
+
+cat("完成：", out_png, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12A_redraw_upset_CN_only.R
+#这次输出的是新文件，避免你误看旧图缓存：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset/Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only_v2.png
