@@ -1,1 +1,355 @@
+#下面这版是最小修改版：回到你原图的画布比例、柱宽和纵轴刻度字号，只改 X 轴宿主科名、Y 轴标题和图例字号。输出新文件，不覆盖旧图。
+#把下面代码保存为：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/13_redraw_phylum_bar_CN_fontfix_v2.R
+#然后运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/13_redraw_phylum_bar_CN_fontfix_v2.R
+#完整代码如下：
+#!/usr/bin/env Rscript
 
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+phylum_table_file <- file.path(
+  base_dir,
+  "taxonomy",
+  "phylum_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_family_composition_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_fontfix_v2.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_fontfix_v2.pdf"
+)
+
+summary_csv <- file.path(
+  out_dir,
+  "host_family_phylum_mean_relative_abundance_no_elephant_CN_fontfix_v2.csv"
+)
+
+# =========================
+# 2. 中文字体：宋体
+# =========================
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+message("使用中文字体：", font_path)
+
+# =========================
+# 3. 读取 metadata
+# =========================
+message("读取 metadata ...")
+
+meta <- read_csv(metadata_file, show_col_types = FALSE)
+
+find_col <- function(df, patterns) {
+  nms <- colnames(df)
+  for (p in patterns) {
+    hit <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hit) >= 1) return(hit[1])
+  }
+  stop("无法识别所需列。现有列名为：\n", paste(nms, collapse = " | "))
+}
+
+sample_col <- find_col(meta, c(
+  "^sampleid$", "^sample_id$", "^SampleID$", "^#SampleID$", "^sample$"
+))
+
+family_col <- find_col(meta, c(
+  "^host_family$", "^Host_family$", "^family$"
+))
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = .data[[sample_col]],
+    host_family = .data[[family_col]]
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != ""
+  )
+
+message("metadata样本数：", nrow(meta2))
+
+# =========================
+# 4. 读取 phylum 丰度表
+# =========================
+message("读取 phylum 丰度表 ...")
+
+phylum_tab <- read.delim(
+  phylum_table_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+tax_col <- colnames(phylum_tab)[1]
+
+phylum_long <- phylum_tab %>%
+  rename(phylum = all_of(tax_col)) %>%
+  pivot_longer(
+    cols = -phylum,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(abundance = as.numeric(abundance)) %>%
+  inner_join(meta2, by = "sample_id")
+
+message("匹配后样本数：", n_distinct(phylum_long$sample_id))
+
+# =========================
+# 5. 计算样本内相对多度，再按宿主科求平均
+# =========================
+sample_total <- phylum_long %>%
+  group_by(sample_id) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+phylum_rel <- phylum_long %>%
+  left_join(sample_total, by = "sample_id") %>%
+  filter(total_abundance > 0) %>%
+  mutate(rel_abundance = abundance / total_abundance * 100)
+
+family_phylum_mean <- phylum_rel %>%
+  group_by(host_family, phylum) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# =========================
+# 6. 中文名称映射
+# =========================
+family_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Equidae" = "马科",
+  "Cervidae" = "鹿科",
+  "Rhinocerotidae" = "犀科"
+)
+
+phylum_map <- c(
+  "Ascomycota" = "子囊菌门",
+  "Basidiomycota" = "担子菌门",
+  "Neocallimastigomycota" = "新靓鞭菌门",
+  "Fungi_phy_Incertae_sedis" = "真菌门分类地位未定类群",
+  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
+  "Mucoromycota" = "毛霉门",
+  "Mortierellomycota" = "被孢霉门",
+  "Chytridiomycota" = "壶菌门",
+  "Rozellomycota" = "罗兹菌门",
+  "Olpidiomycota" = "油壶菌门",
+  "Glomeromycota" = "球囊霉门",
+  "Zoopagomycota" = "捕虫霉门",
+  "Aphelidiomycota" = "远日菌门",
+  "Blastocladiomycota" = "芽枝霉门",
+  "Basidiobolomycota" = "蛙粪霉门",
+  "Kickxellomycota" = "梳霉门",
+  "Monoblepharomycota" = "单毛菌门",
+  "Sanchytriomycota" = "Sanchytriomycota",
+  "Entorrhizomycota" = "根肿黑粉菌门",
+  "Calcarisporiellomycota" = "小齿梗孢门"
+)
+
+family_order_cn <- c("牛科", "猪科", "马科", "鹿科", "犀科")
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+plot_df <- family_phylum_mean %>%
+  mutate(
+    host_family_cn = recode(host_family, !!!family_map),
+    phylum_cn = ifelse(phylum %in% names(phylum_map), phylum_map[phylum], phylum)
+  ) %>%
+  filter(
+    !is.na(host_family_cn),
+    host_family_cn %in% family_order_cn
+  )
+
+# 补齐组合，保证每个宿主科加总完整
+plot_df <- expand.grid(
+  host_family_cn = family_order_cn,
+  phylum_cn = unique(plot_df$phylum_cn),
+  stringsAsFactors = FALSE
+) %>%
+  left_join(plot_df, by = c("host_family_cn", "phylum_cn")) %>%
+  mutate(
+    mean_relative_abundance = ifelse(
+      is.na(mean_relative_abundance),
+      0,
+      mean_relative_abundance
+    )
+  )
+
+present_phyla <- phylum_order_cn[phylum_order_cn %in% unique(plot_df$phylum_cn)]
+
+plot_df <- plot_df %>%
+  filter(phylum_cn %in% present_phyla) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = family_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  )
+
+write_csv(plot_df, summary_csv)
+
+# =========================
+# 7. 颜色：沿用原中文图风格
+# =========================
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+# =========================
+# 8. 作图：只改指定字体项
+# =========================
+p <- ggplot(
+  plot_df,
+  aes(
+    x = host_family_cn,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.75, color = NA) +
+  scale_fill_manual(values = phylum_colors, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    # 恢复/保持原图纵轴刻度值大小
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 11.2,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.42, "cm"),
+    legend.position = "right"
+  )
+
+# =========================
+# 9. 输出：回到原图比例，不覆盖旧图
+# =========================
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9,
+  height = 6,
+  bg = "white"
+)
+
+message("完成！")
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("汇总表: ", summary_csv)
+#输出文件是:
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_fontfix_v2.png
