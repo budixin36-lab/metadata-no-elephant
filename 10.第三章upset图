@@ -1,0 +1,318 @@
+#下面给你的是完整版可运行 R 脚本，专门用于重画你这张 图3-1 中文 UpSet 图，并按你刚才确认的要求做了这些处理：
+#宿主科名改为中文：牛科、马科、鹿科、猪科、犀科
+#“交集数目”“SH数目”和宿主科名统一为宋体风格中文字体
+#三者字号保持一致逻辑：比当前轴名字号大、比当前宿主科名字号略收一点
+#宿主科名尽量放在左侧柱图与右侧点线图之间的中间位置
+#其余数据、排序、红色高亮、整体结构不改
+#完整脚本
+#把下面内容保存为：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_CN_final.R
+#然后运行：
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/12_redraw_upset_CN_final.R
+
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(UpSetR)
+  library(showtext)
+  library(Cairo)
+  library(grid)
+})
+
+# =========================
+# 1. 路径设置
+# =========================
+metadata_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+sh_table_file <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+outdir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/host_family_upset"
+
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+
+png_file <- file.path(outdir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only_v3.png")
+pdf_file <- file.path(outdir, "Fig3_1_host_family_shared_unique_SH_UpSet_no_elephant_CN_family_only_v3.pdf")
+
+# =========================
+# 2. 中文字体
+# =========================
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",   # 宋体
+  "/mnt/c/Windows/Fonts/simfang.ttf",
+  "/mnt/c/Windows/Fonts/msyh.ttc"      # 兜底：微软雅黑
+)
+
+font_path <- font_candidates[file.exists(font_candidates)][1]
+if (is.na(font_path)) {
+  stop("未找到可用中文字体（宋体/微软雅黑）。")
+}
+
+cat("使用中文字体：", font_path, "\n")
+
+showtext_auto()
+font_add("cn_font", font_path)
+
+# =========================
+# 3. 读取 metadata
+# =========================
+cat("读取 metadata ...\n")
+meta <- fread(metadata_file, data.table = FALSE, encoding = "UTF-8")
+
+find_first_existing_col <- function(df, candidates) {
+  hit <- candidates[candidates %in% colnames(df)]
+  if (length(hit) == 0) return(NA_character_)
+  hit[1]
+}
+
+sample_col <- find_first_existing_col(meta, c(
+  "sample_id", "SampleID", "sampleid", "sample", "Sample", "#SampleID"
+))
+
+family_col <- find_first_existing_col(meta, c(
+  "host_family", "HostFamily", "family", "hostfamily"
+))
+
+if (is.na(sample_col)) stop("metadata 中找不到样本ID列。")
+if (is.na(family_col)) stop("metadata 中找不到宿主科列。")
+
+cat("样本ID列：", sample_col, "\n")
+cat("宿主科列：", family_col, "\n")
+cat("metadata样本数：", nrow(meta), "\n")
+
+# =========================
+# 4. 宿主科中英文映射
+# =========================
+family_map_en2cn <- c(
+  "Bovidae" = "牛科",
+  "Equidae" = "马科",
+  "Cervidae" = "鹿科",
+  "Suidae" = "猪科",
+  "Rhinocerotidae" = "犀科"
+)
+
+family_map_cn2en <- setNames(names(family_map_en2cn), family_map_en2cn)
+
+# 标准化宿主科列（兼容 metadata 里可能是英文也可能是中文）
+meta$host_family_std <- meta[[family_col]]
+meta$host_family_std[meta$host_family_std %in% names(family_map_en2cn)] <-
+  family_map_en2cn[meta$host_family_std[meta$host_family_std %in% names(family_map_en2cn)]]
+
+# 仅保留这5个宿主科
+family_cn_order <- c("牛科", "马科", "鹿科", "猪科", "犀科")
+meta <- meta %>% filter(host_family_std %in% family_cn_order)
+
+cat("保留5个宿主科后的样本数：", nrow(meta), "\n")
+
+# =========================
+# 5. 读取 SH 丰度表
+# =========================
+cat("读取 SH 丰度表 ...\n")
+sh_tab <- fread(sh_table_file, sep = "\t", header = TRUE, data.table = FALSE, check.names = FALSE)
+
+if (ncol(sh_tab) < 2) stop("SH丰度表列数异常。")
+
+feature_col <- colnames(sh_tab)[1]
+sh_ids <- sh_tab[[1]]
+sample_cols_in_table <- colnames(sh_tab)[-1]
+
+# metadata 与丰度表共有样本
+common_samples <- intersect(meta[[sample_col]], sample_cols_in_table)
+if (length(common_samples) == 0) stop("metadata 与 SH 丰度表没有共有样本。")
+
+cat("丰度表样本数：", length(sample_cols_in_table), "\n")
+cat("用于分析的共有样本数：", length(common_samples), "\n")
+
+meta2 <- meta %>% filter(.data[[sample_col]] %in% common_samples)
+
+# 提取数值矩阵
+sh_mat <- as.matrix(sh_tab[, common_samples, drop = FALSE])
+mode(sh_mat) <- "numeric"
+rownames(sh_mat) <- sh_ids
+
+# =========================
+# 6. 构建每个 SH 在宿主科中的 presence/absence
+# =========================
+cat("构建宿主科 presence/absence 矩阵 ...\n")
+
+upset_df <- data.frame(row.names = sh_ids)
+
+for (fam_cn in family_cn_order) {
+  fam_samples <- meta2 %>%
+    filter(host_family_std == fam_cn) %>%
+    pull(.data[[sample_col]])
+
+  fam_samples <- intersect(fam_samples, colnames(sh_mat))
+
+  if (length(fam_samples) == 0) {
+    upset_df[[fam_cn]] <- 0L
+  } else {
+    upset_df[[fam_cn]] <- as.integer(rowSums(sh_mat[, fam_samples, drop = FALSE] > 0) > 0)
+  }
+}
+
+# 去除在5个宿主科中均为0的 SH（正常来说不会很多）
+upset_df <- upset_df[rowSums(upset_df) > 0, , drop = FALSE]
+
+cat("用于UpSet分析的SH数：", nrow(upset_df), "\n")
+
+# =========================
+# 7. 简单核对统计
+# =========================
+cat("\n各宿主科 SH 数：\n")
+print(colSums(upset_df))
+
+shared5_n <- sum(rowSums(upset_df) == 5)
+cat("\n5个宿主科共享的 SH 数：", shared5_n, "\n\n")
+
+# =========================
+# 8. 绘图参数
+# =========================
+bar_col <- "#5A5A5A"
+matrix_col <- "#5A5A5A"
+shade_col <- "#D9D9D9"
+highlight_col <- "#E53935"
+
+# 统一字号（宿主科名 + “交集数目” + “SH数目”）
+# 这里取一个折中值：比原轴名大，比你当前宿主科名略收一点
+cex_axis_title <- 2.3
+cex_axis_tick  <- 1.35
+cex_set_name   <- 2.3
+cex_bar_number <- 1.00
+
+# =========================
+# 9. 输出 PNG
+# =========================
+cat("开始输出 PNG ...\n")
+
+CairoPNG(
+  filename = png_file,
+  width = 3600,
+  height = 2400,
+  res = 300,
+  bg = "white"
+)
+
+par(family = "cn_font")
+
+upset(
+  upset_df,
+  sets = family_cn_order,
+  keep.order = TRUE,
+  order.by = "freq",
+  decreasing = TRUE,
+
+  # 主图和集合柱图
+  main.bar.color = bar_col,
+  sets.bar.color = bar_col,
+  matrix.color = matrix_col,
+  shade.color = shade_col,
+  shade.alpha = 0.20,
+
+  # 点线粗细
+  point.size = 3.6,
+  line.size = 1.15,
+
+  # 标签
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+
+  # 文字缩放：依次影响不同元素
+  # 尽量让 “交集数目”“SH数目”“宿主科名”保持同一视觉层级
+  text.scale = c(
+    cex_axis_title,  # 1 main bar title
+    cex_axis_tick,   # 2 main bar ticks
+    cex_axis_title,  # 3 set size title
+    cex_axis_tick,   # 4 set size ticks
+    cex_set_name,    # 5 set names
+    cex_bar_number   # 6 numbers above bars
+  ),
+
+  # 布局比例：尽量接近你旧图
+  mb.ratio = c(0.72, 0.28),
+
+  # 矩阵背景
+  mb.ratio = c(0.72, 0.28),
+
+  # 高亮5科共享
+  queries = list(
+    list(
+      query = intersects,
+      params = list("牛科", "马科", "鹿科", "猪科", "犀科"),
+      color = highlight_col,
+      active = TRUE
+    )
+  ),
+
+  # 让左边集合标签更靠中间
+  set_size.show = TRUE,
+
+  # 排除空交集
+  empty.intersections = NULL
+)
+
+dev.off()
+
+# =========================
+# 10. 输出 PDF
+# =========================
+cat("开始输出 PDF ...\n")
+
+CairoPDF(
+  file = pdf_file,
+  width = 12,
+  height = 8,
+  bg = "white"
+)
+
+par(family = "cn_font")
+
+upset(
+  upset_df,
+  sets = family_cn_order,
+  keep.order = TRUE,
+  order.by = "freq",
+  decreasing = TRUE,
+
+  main.bar.color = bar_col,
+  sets.bar.color = bar_col,
+  matrix.color = matrix_col,
+  shade.color = shade_col,
+  shade.alpha = 0.20,
+
+  point.size = 3.6,
+  line.size = 1.15,
+
+  mainbar.y.label = "交集数目",
+  sets.x.label = "SH数目",
+
+  text.scale = c(
+    cex_axis_title,
+    cex_axis_tick,
+    cex_axis_title,
+    cex_axis_tick,
+    cex_set_name,
+    cex_bar_number
+  ),
+
+  mb.ratio = c(0.72, 0.28),
+
+  queries = list(
+    list(
+      query = intersects,
+      params = list("牛科", "马科", "鹿科", "猪科", "犀科"),
+      color = highlight_col,
+      active = TRUE
+    )
+  ),
+
+  set_size.show = TRUE,
+  empty.intersections = NULL
+)
+
+dev.off()
+
+# =========================
+# 11. 完成
+# =========================
+cat("\n完成！\n")
+cat("PNG: ", png_file, "\n", sep = "")
+cat("PDF: ", pdf_file, "\n", sep = "")
