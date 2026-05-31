@@ -1,0 +1,367 @@
+#宿主物种间差异类群可以先做到“确定作图板式前的一步”，也就是先完成：
+#基于 no-elephant 数据生成宿主物种属水平 LEfSe 输入文件；
+#运行 lefse_format_input.py；
+#运行 lefse_run.py -l 4.0；
+#得到正式统计结果 .res；
+#暂时不画最终图，等宿主科图版式确认后，再按同一版式处理宿主物种图。
+#一、在新 WSL 终端先生成宿主物种 LEfSe 输入文件
+#注意：这一步用普通 base 环境跑 R，不要在 lefse_py39 里跑。
+conda deactivate
+conda deactivate
+
+cd /mnt/d/ITS_SH_pipeline
+
+cat > scripts/08b_make_lefse_input_host_species_genus_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# Make LEfSe input: host_species genus-level, no-elephant version
+#
+# 目的：
+# 先生成宿主物种间属水平 LEfSe 输入文件。
+# 这一步只做到正式 LEfSe 统计前的数据准备，不涉及最终作图版式。
+#
+# 输入：
+# metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+# genus_abundance_table_no_elephant.tsv
+#
+# 输出：
+# LEfSe_input_genus_host_species_all_no_elephant.txt
+# host_species_label_mapping_no_elephant.csv
+#
+# 注意：
+# - 不使用含象科旧版本；
+# - 不筛 TopN；
+# - 不做 prevalence 过滤；
+# - 去掉纯 Unclassified / 未分类；
+# - 保留 Fungi gen Incertae sedis 等“分类地位未定属/类群”；
+# - 每个样本转为属水平相对丰度百分比；
+# - 宿主物种 class 名中的空格和 × 会转成安全格式，避免 LEfSe 后续解析出错。
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_file <- file.path(
+  base_dir,
+  "taxonomy/genus_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_LEfSe_all_genera_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_input <- file.path(
+  out_dir,
+  "LEfSe_input_genus_host_species_all_no_elephant.txt"
+)
+
+summary_file <- file.path(
+  out_dir,
+  "LEfSe_input_host_species_generation_summary_no_elephant.txt"
+)
+
+mapping_file <- file.path(
+  out_dir,
+  "host_species_label_mapping_no_elephant.csv"
+)
+
+# -----------------------------
+# helper
+# -----------------------------
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA
+  x
+}
+
+make_safe_label <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("×", "x", x)
+  x <- gsub("[[:space:]]+", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
+
+clean_feature_name <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x)
+  x <- gsub("^g_", "", x)
+  x <- gsub("\\|", "_", x)
+  x <- gsub("[[:space:]]+", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
+
+is_pure_unclassified <- function(x) {
+  y <- tolower(trimws(as.character(x)))
+  y %in% c(
+    "", "na", "n/a",
+    "unclassified", "unassigned", "unknown",
+    "unidentified", "uncultured",
+    "not_assigned", "not assigned",
+    "no_rank"
+  )
+}
+
+read_genus_table <- function(file) {
+  lines <- readLines(file, warn = FALSE)
+  lines <- lines[nchar(trimws(lines)) > 0]
+
+  if (length(lines) == 0) {
+    stop("genus abundance table 为空：", file)
+  }
+
+  if (grepl("^# Constructed from biom file", lines[1])) {
+    lines <- lines[-1]
+  }
+
+  tab <- read.delim(
+    text = paste(lines, collapse = "\n"),
+    header = TRUE,
+    sep = "\t",
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+  colnames(tab)[1] <- "genus"
+
+  drop_cols <- grep("taxonomy|metadata", colnames(tab), ignore.case = TRUE, value = TRUE)
+  if (length(drop_cols) > 0) {
+    tab <- tab[, !colnames(tab) %in% drop_cols, drop = FALSE]
+  }
+
+  tab
+}
+
+# -----------------------------
+# 1. metadata
+# -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_sample_cols <- c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run")
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中找不到样本 ID 列。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+if (!"host_species" %in% colnames(meta)) {
+  stop("metadata 中没有 host_species 列。")
+}
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+meta2 <- meta %>%
+  mutate(
+    sample_id = clean_value(.data[[sample_col]]),
+    host_family = clean_value(host_family),
+    host_species = clean_value(host_species)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    !is.na(host_family),
+    !is.na(host_species),
+    host_family %in% family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+# 宿主物种安全标签，避免 LEfSe 自带程序被空格拆分
+species_map <- meta2 %>%
+  distinct(host_species, host_family) %>%
+  mutate(
+    host_species_safe = make_safe_label(host_species)
+  ) %>%
+  arrange(factor(host_family, levels = family_order), host_species)
+
+# 防止安全标签重复
+dup_safe <- species_map$host_species_safe[duplicated(species_map$host_species_safe)]
+if (length(dup_safe) > 0) {
+  stop("host_species_safe 出现重复：", paste(unique(dup_safe), collapse = ", "))
+}
+
+meta2 <- meta2 %>%
+  left_join(
+    species_map %>% select(host_species, host_species_safe),
+    by = "host_species"
+  )
+
+write.csv(
+  species_map,
+  mapping_file,
+  row.names = FALSE
+)
+
+# -----------------------------
+# 2. genus abundance table
+# -----------------------------
+genus_tab <- read_genus_table(genus_file)
+
+sample_cols_all <- setdiff(colnames(genus_tab), "genus")
+
+common_samples <- intersect(sample_cols_all, meta2$sample_id)
+common_samples <- sample_cols_all[sample_cols_all %in% common_samples]
+
+if (length(common_samples) == 0) {
+  stop("genus abundance table 和 metadata 没有匹配到共同样本。")
+}
+
+meta2 <- meta2 %>%
+  filter(sample_id %in% common_samples)
+
+meta2 <- meta2[match(common_samples, meta2$sample_id), ]
+
+genus_tab <- genus_tab %>%
+  select(genus, all_of(common_samples))
+
+genus_mat <- genus_tab %>%
+  column_to_rownames("genus") %>%
+  as.matrix()
+
+storage.mode(genus_mat) <- "numeric"
+genus_mat[is.na(genus_mat)] <- 0
+
+# 去掉纯 Unclassified，但保留 Fungi gen Incertae sedis 这类特征
+keep_features <- !is_pure_unclassified(rownames(genus_mat))
+genus_mat <- genus_mat[keep_features, , drop = FALSE]
+
+# 清洗特征名，重名合并
+feature_clean <- clean_feature_name(rownames(genus_mat))
+genus_mat2 <- rowsum(genus_mat, group = feature_clean, reorder = FALSE)
+genus_mat2 <- genus_mat2[rownames(genus_mat2) != "", , drop = FALSE]
+
+# 转为样本内相对丰度百分比
+sample_sums <- colSums(genus_mat2, na.rm = TRUE)
+
+if (any(sample_sums == 0)) {
+  stop("存在 genus 总丰度为 0 的样本，无法转相对丰度。")
+}
+
+genus_rel <- sweep(genus_mat2, 2, sample_sums, "/") * 100
+genus_rel[is.na(genus_rel)] <- 0
+
+rownames(genus_rel) <- paste0("k__Fungi|g__", rownames(genus_rel))
+
+# -----------------------------
+# 3. write LEfSe input
+# -----------------------------
+class_row <- c("class", as.character(meta2$host_species_safe))
+subclass_row <- c("subclass", rep("no_subclass", nrow(meta2)))
+subject_row <- c("subject", as.character(meta2$sample_id))
+
+feature_table <- as.data.frame(genus_rel) %>%
+  rownames_to_column("ID")
+
+feature_table <- feature_table[, c("ID", meta2$sample_id), drop = FALSE]
+feature_table[] <- lapply(feature_table, as.character)
+
+out <- rbind(
+  class_row,
+  subclass_row,
+  subject_row,
+  as.matrix(feature_table)
+)
+
+write.table(
+  out,
+  out_input,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.csv(
+  meta2 %>% count(host_family, host_species, host_species_safe, sort = TRUE),
+  file.path(out_dir, "LEfSe_host_species_sample_count_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(
+    lefse_feature = rownames(genus_rel),
+    original_or_clean_genus = gsub("^k__Fungi\\|g__", "", rownames(genus_rel))
+  ),
+  file.path(out_dir, "LEfSe_host_species_genus_feature_list_no_elephant.csv"),
+  row.names = FALSE
+)
+
+sink(summary_file)
+cat("LEfSe input generation summary: host_species genus no-elephant\n")
+cat("=============================================================\n\n")
+cat("Input metadata:\n", metadata_file, "\n\n", sep = "")
+cat("Input genus abundance table:\n", genus_file, "\n\n", sep = "")
+cat("Output LEfSe input:\n", out_input, "\n\n", sep = "")
+cat("Matched samples:", nrow(meta2), "\n")
+cat("Genus features for LEfSe:", nrow(genus_rel), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n\n")
+cat("Host species sample counts:\n")
+print(meta2 %>% count(host_family, host_species, host_species_safe, sort = TRUE))
+sink()
+
+cat("\nDone!\n")
+cat("Matched samples:", nrow(meta2), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n")
+cat("Genus features for LEfSe:", nrow(genus_rel), "\n")
+cat("Output:\n", out_input, "\n", sep = "")
+cat("Mapping:\n", mapping_file, "\n", sep = "")
+EOF
+
+Rscript scripts/08b_make_lefse_input_host_species_genus_no_elephant.R
+#二、切换到 lefse_py39 环境，运行宿主物种 LEfSe
+#这一步只做统计，得到 .res，暂时不画最终图。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant
+
+conda activate lefse_py39
+
+lefse_format_input.py \
+  LEfSe_input_genus_host_species_all_no_elephant.txt \
+  host_species_genus_all_no_elephant.in \
+  -c 1 -s 2 -u 3 -o 1000000
+
+lefse_run.py \
+  host_species_genus_all_no_elephant.in \
+  host_species_genus_all_no_elephant.res \
+  -l 4.0
+#运行结束后看输出里这一句：Number of discriminative features with abs LDA score > 4.0 : ...
+#这一步完成后，你应该得到：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant/host_species_genus_all_no_elephant.res
+#这个就是宿主物种间属水平 LEfSe 的正式统计结果。
