@@ -1,0 +1,65 @@
+#下面这段代码会复制你当前 final3 脚本为新脚本，只修改输出文件名和字体设置，不覆盖旧图。
+#它会做到：
+#宿主科名 axis.text.x 改为 16；
+#Y轴名 axis.title.y 改为 16；
+#纵轴刻度值 axis.text.y 保持 13；
+#图例文字保持 11；
+#所有这些文字都显式指定 family = base_family，也就是优先使用脚本前面设置的宋体；
+#输出新文件：CN_fontfix.png/pdf/csv，不覆盖 CN_final3。这次只改你上传脚本最后作图部分的字体参数和输出名，不动计算、补偿到100%、排序和配色逻辑。
+#直接在 WSL 里运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cp \
+/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_final.R \
+/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_fontfix.R
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_fontfix.R")
+txt = script.read_text(encoding="utf-8")
+
+# 1. 输出文件名改成新版本，避免覆盖旧图
+txt = txt.replace(
+    'out_png <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final3.png")',
+    'out_png <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_fontfix.png")'
+)
+
+txt = txt.replace(
+    'out_pdf <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_final3.pdf")',
+    'out_pdf <- file.path(out_dir, "Fig3_5_host_family_function_group_composition_no_elephant_CN_fontfix.pdf")'
+)
+
+txt = txt.replace(
+    'out_csv <- file.path(out_dir, "host_family_function_group_mean_relative_abundance_no_elephant_CN_final3.csv")',
+    'out_csv <- file.path(out_dir, "host_family_function_group_mean_relative_abundance_no_elephant_CN_fontfix.csv")'
+)
+
+# 2. 修改 theme 部分字体：宿主科名和Y轴名一样大，全部显式使用 base_family
+old_theme_block = '''    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.title.y = element_text(size = 16, color = "black"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black"),'''
+
+new_theme_block = '''    axis.text.x = element_text(size = 16, color = "black", family = base_family),
+    axis.text.y = element_text(size = 13, color = "black", family = base_family),
+    axis.title.y = element_text(size = 16, color = "black", family = base_family),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black", family = base_family),'''
+
+if old_theme_block not in txt:
+    raise SystemExit("没有找到预期的 theme 字体代码块。请把脚本最后 theme(...) 部分发我。")
+
+txt = txt.replace(old_theme_block, new_theme_block)
+
+script.write_text(txt, encoding="utf-8")
+print("已生成字体修正版脚本：", script)
+PY
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/10_redraw_host_family_function_group_bar_CN_fontfix.R
+#运行后看这个新图：
+/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_primary_lifestyle_no_elephant/Fig3_5_host_family_function_group_composition_no_elephant_CN_fontfix.png
