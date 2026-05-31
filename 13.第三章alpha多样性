@@ -1,0 +1,1709 @@
+#论文可直接用表：均值 + TukeyHSD 字母，例如 221.01a；ANOVA 行同时给格式化 P 值，例如 <0.001***。
+#自查用表：保留 mean、SD、mean ± SD、ANOVA 原始 P 值、TukeyHSD 全部结果。
+#在wsl终端运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > scripts/05_alpha_diversity_anova_tukey_no_elephant.R <<'EOF'
+# ============================================================
+# Chapter 3 alpha diversity, no-elephant version
+#
+# Project:
+# 基于 ITS 测序的有蹄类动物肠道真菌研究
+#
+# Data version:
+# /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+#
+# Input:
+# 1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+# 2. SH_abundance_table_no_elephant.tsv
+#
+# Output:
+# 1. sample-level alpha diversity table
+# 2. Table 3-1 host_family alpha table for paper
+# 3. Table 3-2 host_species alpha table for paper
+# 4. Excel files containing:
+#    - paper_table
+#    - mean_sd_detail
+#    - ANOVA
+#    - TukeyHSD_all
+#    - TukeyHSD_significant
+#    - sample_count
+#
+# Metrics:
+# Observed_SH, ACE, Chao1, Shannon, Simpson
+#
+# Statistical tests:
+# one-way ANOVA + TukeyHSD
+#
+# Note:
+# - No rarefaction.
+# - Alpha indices are calculated from SH abundance per sample.
+# - Group tables summarize sample-level alpha indices by host_family or host_species.
+# - host_species analysis includes all 23 species.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(openxlsx)
+  library(multcompView)
+})
+
+# -----------------------------
+# 0. Paths and settings
+# -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_alpha_diversity_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_SH", metrics_for_table)
+
+# 物种水平纳入全部物种，不设置 n >= 10 过滤
+species_min_n <- 1
+
+# -----------------------------
+# 1. Helper functions
+# -----------------------------
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(p < 0.001, "<0.001", sprintf("%.4f", p))
+  )
+}
+
+sig_label <- function(p) {
+  case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+clean_group_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c("", "NA", "Na", "na", "N/A", "n/a",
+             "missing", "Missing",
+             "not_recorded", "not recorded", "Not recorded",
+             "not reported", "Not reported")] <- NA
+  x
+}
+
+# 根据 TukeyHSD p adj 生成紧凑字母标注
+get_tukey_letters <- function(df, group_col, metric) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  if (nlevels(dat$group) < 2) {
+    groups <- levels(dat$group)
+    return(setNames(rep("a", length(groups)), groups))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  pvals <- tk[, "p adj"]
+  names(pvals) <- rownames(tk)
+
+  letters <- multcompView::multcompLetters(pvals, threshold = 0.05)$Letters
+
+  # 为了让均值最高的组优先显示为 a，这里按均值从高到低重新映射字母
+  means <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value))
+
+  old_letters <- letters[as.character(means$group)]
+
+  unique_old <- unique(old_letters)
+  new_letters <- letters[as.character(means$group)]
+
+  # 多字母组合可能出现 ab、bc 等，不能简单整体替换。
+  # 这里保留 multcompLetters 的原始字母结果，不强行重排，
+  # 避免复杂组合被错误映射。
+  letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    )
+
+  # 增加 mean ± SD 文本列，方便自查
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      out[[mean_sd_col]] <- sprintf(
+        "%.4f ± %.4f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    } else {
+      out[[mean_sd_col]] <- sprintf(
+        "%.2f ± %.2f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    }
+  }
+
+  out %>% arrange(desc(n))
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  # 给每个指标加 TukeyHSD 字母
+  for (m in metrics) {
+    letters <- get_tukey_letters(df, group_col, m)
+
+    mean_col <- paste0(m, "_mean")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      paper[[m]] <- paste0(
+        sprintf("%.4f", paper[[mean_col]]),
+        letters[as.character(paper$group)]
+      )
+    } else {
+      paper[[m]] <- paste0(
+        sprintf("%.2f", paper[[mean_col]]),
+        letters[as.character(paper$group)]
+      )
+    }
+  }
+
+  paper <- paper %>%
+    select(group, n, all_of(metrics)) %>%
+    arrange(desc(n))
+
+  anova_row <- data.frame(
+    group = "ANOVA（P-value）",
+    n = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    # 设置前 50 列自动宽度，超过实际列数也不会影响结果
+    try(
+      setColWidths(wb, sheet = s, cols = 1:50, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+# -----------------------------
+# 2. Read metadata
+# -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_sample_cols <- c(
+  "sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID"
+)
+
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中没有找到样本 ID 列。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+if (!"host_species" %in% colnames(meta)) {
+  stop("metadata 中没有 host_species 列。")
+}
+
+meta <- meta %>%
+  mutate(
+    sample_id = as.character(.data[[sample_col]]),
+    host_family = clean_group_value(host_family),
+    host_species = clean_group_value(host_species)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    !is.na(host_species)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+# -----------------------------
+# 3. Read SH abundance table
+# -----------------------------
+sh_tab <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)
+
+if (ncol(sh_tab) < 2) {
+  stop("SH abundance table 列数异常，请检查文件。")
+}
+
+# 默认第一列为 SH/feature ID
+feature_col <- colnames(sh_tab)[1]
+
+mat_df <- sh_tab %>%
+  column_to_rownames(feature_col)
+
+# 转成数值矩阵
+mat <- as.matrix(mat_df)
+storage.mode(mat) <- "numeric"
+
+# 判断方向：
+# 理论上 SH_abundance_table_no_elephant.tsv 应该是 feature x sample。
+# 如果发现行名像样本、列名像 SH，则自动转置。
+sample_overlap_cols <- length(intersect(colnames(mat), meta$sample_id))
+sample_overlap_rows <- length(intersect(rownames(mat), meta$sample_id))
+
+if (sample_overlap_rows > sample_overlap_cols) {
+  message("检测到 abundance table 可能为 sample x SH，已自动转置为 SH x sample。")
+  mat <- t(mat)
+}
+
+common_samples <- intersect(colnames(mat), meta$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 和 metadata 没有匹配到共同样本。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta2 <- meta %>%
+  filter(sample_id %in% common_samples)
+
+meta2 <- meta2[match(colnames(mat), meta2$sample_id), ]
+
+if (!all(meta2$sample_id == colnames(mat))) {
+  stop("metadata 与丰度表样本顺序匹配失败。")
+}
+
+if (any(colSums(mat, na.rm = TRUE) == 0)) {
+  stop("仍存在总 reads 为 0 的样本，请检查 no-elephant SH abundance table。")
+}
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Host family number:", length(unique(meta2$host_family)), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n")
+
+# vegan 要求 sample x feature
+comm <- t(mat)
+
+# -----------------------------
+# 4. Calculate alpha diversity
+# -----------------------------
+est <- estimateR(comm)
+
+alpha_df <- data.frame(
+  sample_id = rownames(comm),
+  Observed_SH = specnumber(comm),
+  ACE = as.numeric(est["S.ACE", ]),
+  Chao1 = as.numeric(est["S.chao1", ]),
+  Shannon = diversity(comm, index = "shannon"),
+  Simpson = diversity(comm, index = "simpson"),
+  stringsAsFactors = FALSE
+)
+
+alpha_df <- alpha_df %>%
+  left_join(
+    meta2 %>% select(sample_id, host_family, host_species),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, host_family, host_species)
+
+write.csv(
+  alpha_df,
+  file.path(out_dir, "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 5. Prepare family and species datasets
+# -----------------------------
+alpha_family <- alpha_df %>%
+  filter(!is.na(host_family), host_family != "")
+
+species_keep <- alpha_df %>%
+  count(host_species, sort = TRUE) %>%
+  filter(n >= species_min_n) %>%
+  pull(host_species)
+
+alpha_species <- alpha_df %>%
+  filter(host_species %in% species_keep)
+
+family_sample_count <- alpha_family %>%
+  count(host_family, sort = TRUE)
+
+species_sample_count <- alpha_species %>%
+  count(host_species, sort = TRUE)
+
+write.csv(
+  family_sample_count,
+  file.path(out_dir, "host_family_sample_count_for_alpha_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_sample_count,
+  file.path(out_dir, "host_species_sample_count_for_alpha_no_elephant.csv"),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 6. Host family tables
+# -----------------------------
+family_mean_sd_detail <- make_mean_sd_detail(
+  alpha_family,
+  "host_family",
+  metrics_all
+)
+
+family_anova <- run_anova_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table
+)
+
+family_tukey_all <- run_tukey_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+family_tukey_sig <- run_tukey_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+family_paper_table <- make_paper_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  family_anova
+)
+
+write.csv(
+  family_paper_table,
+  file.path(out_dir, "Table3_1_host_family_alpha_for_paper_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_mean_sd_detail,
+  file.path(out_dir, "Table3_1_host_family_alpha_mean_sd_detail_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_anova,
+  file.path(out_dir, "Table3_1_host_family_alpha_ANOVA_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_tukey_all,
+  file.path(out_dir, "Table3_1_host_family_alpha_TukeyHSD_all_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_tukey_sig,
+  file.path(out_dir, "Table3_1_host_family_alpha_TukeyHSD_significant_no_elephant.csv"),
+  row.names = FALSE
+)
+
+wb1 <- createWorkbook()
+
+addWorksheet(wb1, "paper_table")
+addWorksheet(wb1, "mean_sd_detail")
+addWorksheet(wb1, "ANOVA")
+addWorksheet(wb1, "TukeyHSD_significant")
+addWorksheet(wb1, "TukeyHSD_all")
+addWorksheet(wb1, "sample_count")
+
+writeData(wb1, "paper_table", family_paper_table)
+writeData(wb1, "mean_sd_detail", family_mean_sd_detail)
+writeData(wb1, "ANOVA", family_anova)
+writeData(wb1, "TukeyHSD_significant", family_tukey_sig)
+writeData(wb1, "TukeyHSD_all", family_tukey_all)
+writeData(wb1, "sample_count", family_sample_count)
+
+save_workbook_with_auto_width(
+  wb1,
+  file.path(out_dir, "Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx")
+)
+
+# -----------------------------
+# 7. Host species tables
+# -----------------------------
+species_mean_sd_detail <- make_mean_sd_detail(
+  alpha_species,
+  "host_species",
+  metrics_all
+)
+
+species_anova <- run_anova_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table
+)
+
+species_tukey_all <- run_tukey_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+species_tukey_sig <- run_tukey_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+species_paper_table <- make_paper_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  species_anova
+)
+
+write.csv(
+  species_paper_table,
+  file.path(out_dir, "Table3_2_host_species_alpha_for_paper_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_mean_sd_detail,
+  file.path(out_dir, "Table3_2_host_species_alpha_mean_sd_detail_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_anova,
+  file.path(out_dir, "Table3_2_host_species_alpha_ANOVA_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_tukey_all,
+  file.path(out_dir, "Table3_2_host_species_alpha_TukeyHSD_all_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_tukey_sig,
+  file.path(out_dir, "Table3_2_host_species_alpha_TukeyHSD_significant_no_elephant.csv"),
+  row.names = FALSE
+)
+
+wb2 <- createWorkbook()
+
+addWorksheet(wb2, "paper_table")
+addWorksheet(wb2, "mean_sd_detail")
+addWorksheet(wb2, "ANOVA")
+addWorksheet(wb2, "TukeyHSD_significant")
+addWorksheet(wb2, "TukeyHSD_all")
+addWorksheet(wb2, "sample_count")
+
+writeData(wb2, "paper_table", species_paper_table)
+writeData(wb2, "mean_sd_detail", species_mean_sd_detail)
+writeData(wb2, "ANOVA", species_anova)
+writeData(wb2, "TukeyHSD_significant", species_tukey_sig)
+writeData(wb2, "TukeyHSD_all", species_tukey_all)
+writeData(wb2, "sample_count", species_sample_count)
+
+save_workbook_with_auto_width(
+  wb2,
+  file.path(out_dir, "Table3_2_host_species_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx")
+)
+
+# -----------------------------
+# 8. Summary
+# -----------------------------
+sink(file.path(out_dir, "alpha_diversity_no_elephant_analysis_summary.txt"))
+
+cat("Alpha diversity analysis summary, no-elephant version\n")
+cat("====================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input SH abundance table:\n")
+cat(sh_table_file, "\n\n")
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Host family number:", length(unique(meta2$host_family)), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n\n")
+
+cat("Host family sample counts:\n")
+print(family_sample_count)
+
+cat("\nHost species sample counts:\n")
+print(species_sample_count)
+
+cat("\nHost family ANOVA:\n")
+print(family_anova)
+
+cat("\nHost species ANOVA:\n")
+print(species_anova)
+
+cat("\nSignificant host family TukeyHSD results:\n")
+print(family_tukey_sig)
+
+cat("\nSignificant host species TukeyHSD results:\n")
+print(species_tukey_sig)
+
+sink()
+
+# -----------------------------
+# 9. Console output
+# -----------------------------
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n\n")
+
+cat("Key output files:\n")
+cat("1. alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv\n")
+cat("2. Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx\n")
+cat("3. Table3_2_host_species_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx\n")
+cat("4. Table3_1_host_family_alpha_for_paper_no_elephant.csv\n")
+cat("5. Table3_2_host_species_alpha_for_paper_no_elephant.csv\n")
+cat("6. alpha_diversity_no_elephant_analysis_summary.txt\n\n")
+
+EOF
+#运行：
+Rscript scripts/05_alpha_diversity_anova_tukey_no_elephant.R
+#下面这版 完全不需要 multcompView，只用：tidyverse、vegan、openxlsx
+#你直接覆盖原脚本即可。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > scripts/05_alpha_diversity_anova_tukey_no_elephant.R <<'EOF'
+# ============================================================
+# Chapter 3 alpha diversity, no-elephant version
+#
+# 完全不依赖 multcompView
+#
+# Input:
+# 1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+# 2. SH_abundance_table_no_elephant.tsv
+#
+# Output:
+# 1. sample-level alpha diversity table
+# 2. Table 3-1 host_family alpha table for paper
+# 3. Table 3-2 host_species alpha table for paper
+# 4. Excel files containing:
+#    - paper_table
+#    - mean_sd_detail
+#    - ANOVA
+#    - TukeyHSD_all
+#    - TukeyHSD_significant
+#    - sample_count
+#
+# Metrics:
+# Observed_SH, ACE, Chao1, Shannon, Simpson
+#
+# Statistical tests:
+# one-way ANOVA + TukeyHSD
+#
+# Note:
+# - No rarefaction.
+# - Alpha indices are calculated from SH abundance per sample.
+# - Group tables summarize sample-level alpha indices by host_family or host_species.
+# - host_species analysis includes all species.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(openxlsx)
+})
+
+# -----------------------------
+# 0. Paths and settings
+# -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_alpha_diversity_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_SH", metrics_for_table)
+
+species_min_n <- 1
+
+# -----------------------------
+# 1. Helper functions
+# -----------------------------
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(p < 0.001, "<0.001", sprintf("%.4f", p))
+  )
+}
+
+sig_label <- function(p) {
+  case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+clean_group_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "Na", "na", "N/A", "n/a",
+    "missing", "Missing",
+    "not_recorded", "not recorded", "Not recorded",
+    "not reported", "Not reported"
+  )] <- NA
+  x
+}
+
+# ------------------------------------------------------------
+# 自写 TukeyHSD 字母标注函数
+#
+# 逻辑：
+# 1. 先计算每个组均值，按均值从高到低排序。
+# 2. TukeyHSD p adj < 0.05 的组对视为显著不同。
+# 3. 贪心分配字母：
+#    - 同一个字母下的任意两组都不能显著不同。
+#    - 某组可拥有多个字母。
+#    - 尽量保证差异不显著的组至少共享一个字母。
+#
+# 解释：
+# 同列含相同字母表示差异不显著；
+# 不含相同字母表示差异显著。
+# ------------------------------------------------------------
+make_tukey_letters_no_package <- function(df, group_col, metric, alpha = 0.05) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  groups_ordered <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value)) %>%
+    pull(group) %>%
+    as.character()
+
+  if (length(groups_ordered) == 1) {
+    return(setNames("a", groups_ordered))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  # 显著性矩阵：TRUE = 两组显著不同
+  sig_mat <- matrix(
+    FALSE,
+    nrow = length(groups_ordered),
+    ncol = length(groups_ordered),
+    dimnames = list(groups_ordered, groups_ordered)
+  )
+
+  for (comp in rownames(tk)) {
+    p <- tk[comp, "p adj"]
+
+    # TukeyHSD comparison 形式通常是 group2-group1
+    parts <- strsplit(comp, "-", fixed = TRUE)[[1]]
+
+    if (length(parts) == 2) {
+      g1 <- parts[1]
+      g2 <- parts[2]
+
+      if (g1 %in% groups_ordered && g2 %in% groups_ordered) {
+        if (!is.na(p) && p < alpha) {
+          sig_mat[g1, g2] <- TRUE
+          sig_mat[g2, g1] <- TRUE
+        }
+      }
+    }
+  }
+
+  letters_pool <- c(
+    letters,
+    paste0("a", letters),
+    paste0("b", letters),
+    paste0("c", letters),
+    paste0("d", letters),
+    paste0("e", letters),
+    paste0("f", letters)
+  )
+
+  group_letters <- setNames(rep("", length(groups_ordered)), groups_ordered)
+  letter_groups <- list()
+
+  # 第一步：按均值从高到低分配至少一个字母
+  for (g in groups_ordered) {
+    assigned <- FALSE
+
+    if (length(letter_groups) > 0) {
+      for (li in seq_along(letter_groups)) {
+        members <- letter_groups[[li]]
+
+        # 当前组与这个字母已有所有成员都不能显著不同，才能共享字母
+        can_share <- all(!sig_mat[g, members])
+
+        if (can_share) {
+          letter_groups[[li]] <- c(members, g)
+          group_letters[g] <- paste0(group_letters[g], letters_pool[li])
+          assigned <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!assigned) {
+      new_i <- length(letter_groups) + 1
+      letter_groups[[new_i]] <- g
+      group_letters[g] <- paste0(group_letters[g], letters_pool[new_i])
+    }
+  }
+
+  # 第二步：补充字母，尽量让所有“不显著”的组对共享至少一个字母
+  for (i in seq_along(groups_ordered)) {
+    for (j in seq_along(groups_ordered)) {
+      if (j <= i) next
+
+      g1 <- groups_ordered[i]
+      g2 <- groups_ordered[j]
+
+      if (!sig_mat[g1, g2]) {
+        chars1 <- unlist(strsplit(group_letters[g1], split = ""))
+        chars2 <- unlist(strsplit(group_letters[g2], split = ""))
+
+        # 这里仅适用于单字符字母池前 26 个；
+        # 对多数论文分组已经足够。
+        # 若字母池出现 aa、ab 这类多字符，下面仍然不影响已有分配，
+        # 只是补字母步骤不强行拆解多字符。
+        shared <- length(intersect(chars1, chars2)) > 0
+
+        if (!shared) {
+          # 尝试把 g2 加入 g1 的某个字母组
+          added <- FALSE
+
+          for (li in seq_along(letter_groups)) {
+            members <- letter_groups[[li]]
+
+            if (g1 %in% members && !(g2 %in% members)) {
+              can_add <- all(!sig_mat[g2, members])
+
+              if (can_add) {
+                letter_groups[[li]] <- c(members, g2)
+                group_letters[g2] <- paste0(group_letters[g2], letters_pool[li])
+                added <- TRUE
+                break
+              }
+            }
+          }
+
+          # 如果不行，尝试把 g1 加入 g2 的某个字母组
+          if (!added) {
+            for (li in seq_along(letter_groups)) {
+              members <- letter_groups[[li]]
+
+              if (g2 %in% members && !(g1 %in% members)) {
+                can_add <- all(!sig_mat[g1, members])
+
+                if (can_add) {
+                  letter_groups[[li]] <- c(members, g1)
+                  group_letters[g1] <- paste0(group_letters[g1], letters_pool[li])
+                  added <- TRUE
+                  break
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  group_letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    )
+
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      out[[mean_sd_col]] <- sprintf(
+        "%.4f ± %.4f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    } else {
+      out[[mean_sd_col]] <- sprintf(
+        "%.2f ± %.2f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    }
+  }
+
+  out %>% arrange(desc(n))
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  for (m in metrics) {
+    letter_vec <- make_tukey_letters_no_package(df, group_col, m, alpha = 0.05)
+    mean_col <- paste0(m, "_mean")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      paper[[m]] <- paste0(
+        sprintf("%.4f", paper[[mean_col]]),
+        letter_vec[as.character(paper$group)]
+      )
+    } else {
+      paper[[m]] <- paste0(
+        sprintf("%.2f", paper[[mean_col]]),
+        letter_vec[as.character(paper$group)]
+      )
+    }
+  }
+
+  paper <- paper %>%
+    select(group, n, all_of(metrics)) %>%
+    arrange(desc(n))
+
+  anova_row <- data.frame(
+    group = "ANOVA（P-value）",
+    n = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    try(
+      setColWidths(wb, sheet = s, cols = 1:80, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+# -----------------------------
+# 2. Read metadata
+# -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+possible_sample_cols <- c(
+  "sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID"
+)
+
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中没有找到样本 ID 列。")
+}
+
+if (!"host_family" %in% colnames(meta)) {
+  stop("metadata 中没有 host_family 列。")
+}
+
+if (!"host_species" %in% colnames(meta)) {
+  stop("metadata 中没有 host_species 列。")
+}
+
+meta <- meta %>%
+  mutate(
+    sample_id = as.character(.data[[sample_col]]),
+    host_family = clean_group_value(host_family),
+    host_species = clean_group_value(host_species)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    !is.na(host_species)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+# -----------------------------
+# 3. Read SH abundance table
+# -----------------------------
+sh_tab <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)
+
+if (ncol(sh_tab) < 2) {
+  stop("SH abundance table 列数异常，请检查文件。")
+}
+
+feature_col <- colnames(sh_tab)[1]
+
+mat_df <- sh_tab %>%
+  column_to_rownames(feature_col)
+
+mat <- as.matrix(mat_df)
+storage.mode(mat) <- "numeric"
+
+# 判断方向：
+# 目标方向为 SH x sample。
+sample_overlap_cols <- length(intersect(colnames(mat), meta$sample_id))
+sample_overlap_rows <- length(intersect(rownames(mat), meta$sample_id))
+
+if (sample_overlap_rows > sample_overlap_cols) {
+  message("检测到 abundance table 可能为 sample x SH，已自动转置为 SH x sample。")
+  mat <- t(mat)
+}
+
+common_samples <- intersect(colnames(mat), meta$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 和 metadata 没有匹配到共同样本。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta2 <- meta %>%
+  filter(sample_id %in% common_samples)
+
+meta2 <- meta2[match(colnames(mat), meta2$sample_id), ]
+
+if (!all(meta2$sample_id == colnames(mat))) {
+  stop("metadata 与丰度表样本顺序匹配失败。")
+}
+
+if (any(colSums(mat, na.rm = TRUE) == 0)) {
+  stop("仍存在总 reads 为 0 的样本，请检查 no-elephant SH abundance table。")
+}
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Host family number:", length(unique(meta2$host_family)), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n")
+
+# vegan 要求 sample x feature
+comm <- t(mat)
+
+# -----------------------------
+# 4. Calculate alpha diversity
+# -----------------------------
+est <- estimateR(comm)
+
+alpha_df <- data.frame(
+  sample_id = rownames(comm),
+  Observed_SH = specnumber(comm),
+  ACE = as.numeric(est["S.ACE", ]),
+  Chao1 = as.numeric(est["S.chao1", ]),
+  Shannon = diversity(comm, index = "shannon"),
+  Simpson = diversity(comm, index = "simpson"),
+  stringsAsFactors = FALSE
+)
+
+alpha_df <- alpha_df %>%
+  left_join(
+    meta2 %>% select(sample_id, host_family, host_species),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, host_family, host_species)
+
+write.csv(
+  alpha_df,
+  file.path(out_dir, "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 5. Prepare family and species datasets
+# -----------------------------
+alpha_family <- alpha_df %>%
+  filter(!is.na(host_family), host_family != "")
+
+species_keep <- alpha_df %>%
+  count(host_species, sort = TRUE) %>%
+  filter(n >= species_min_n) %>%
+  pull(host_species)
+
+alpha_species <- alpha_df %>%
+  filter(host_species %in% species_keep)
+
+family_sample_count <- alpha_family %>%
+  count(host_family, sort = TRUE)
+
+species_sample_count <- alpha_species %>%
+  count(host_species, sort = TRUE)
+
+write.csv(
+  family_sample_count,
+  file.path(out_dir, "host_family_sample_count_for_alpha_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_sample_count,
+  file.path(out_dir, "host_species_sample_count_for_alpha_no_elephant.csv"),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 6. Host family tables
+# -----------------------------
+family_mean_sd_detail <- make_mean_sd_detail(
+  alpha_family,
+  "host_family",
+  metrics_all
+)
+
+family_anova <- run_anova_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table
+)
+
+family_tukey_all <- run_tukey_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+family_tukey_sig <- run_tukey_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+family_paper_table <- make_paper_table(
+  alpha_family,
+  "host_family",
+  metrics_for_table,
+  family_anova
+)
+
+write.csv(
+  family_paper_table,
+  file.path(out_dir, "Table3_1_host_family_alpha_for_paper_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_mean_sd_detail,
+  file.path(out_dir, "Table3_1_host_family_alpha_mean_sd_detail_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_anova,
+  file.path(out_dir, "Table3_1_host_family_alpha_ANOVA_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_tukey_all,
+  file.path(out_dir, "Table3_1_host_family_alpha_TukeyHSD_all_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  family_tukey_sig,
+  file.path(out_dir, "Table3_1_host_family_alpha_TukeyHSD_significant_no_elephant.csv"),
+  row.names = FALSE
+)
+
+wb1 <- createWorkbook()
+
+addWorksheet(wb1, "paper_table")
+addWorksheet(wb1, "mean_sd_detail")
+addWorksheet(wb1, "ANOVA")
+addWorksheet(wb1, "TukeyHSD_significant")
+addWorksheet(wb1, "TukeyHSD_all")
+addWorksheet(wb1, "sample_count")
+
+writeData(wb1, "paper_table", family_paper_table)
+writeData(wb1, "mean_sd_detail", family_mean_sd_detail)
+writeData(wb1, "ANOVA", family_anova)
+writeData(wb1, "TukeyHSD_significant", family_tukey_sig)
+writeData(wb1, "TukeyHSD_all", family_tukey_all)
+writeData(wb1, "sample_count", family_sample_count)
+
+save_workbook_with_auto_width(
+  wb1,
+  file.path(out_dir, "Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx")
+)
+
+# -----------------------------
+# 7. Host species tables
+# -----------------------------
+species_mean_sd_detail <- make_mean_sd_detail(
+  alpha_species,
+  "host_species",
+  metrics_all
+)
+
+species_anova <- run_anova_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table
+)
+
+species_tukey_all <- run_tukey_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+species_tukey_sig <- run_tukey_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+species_paper_table <- make_paper_table(
+  alpha_species,
+  "host_species",
+  metrics_for_table,
+  species_anova
+)
+
+write.csv(
+  species_paper_table,
+  file.path(out_dir, "Table3_2_host_species_alpha_for_paper_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_mean_sd_detail,
+  file.path(out_dir, "Table3_2_host_species_alpha_mean_sd_detail_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_anova,
+  file.path(out_dir, "Table3_2_host_species_alpha_ANOVA_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_tukey_all,
+  file.path(out_dir, "Table3_2_host_species_alpha_TukeyHSD_all_no_elephant.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  species_tukey_sig,
+  file.path(out_dir, "Table3_2_host_species_alpha_TukeyHSD_significant_no_elephant.csv"),
+  row.names = FALSE
+)
+
+wb2 <- createWorkbook()
+
+addWorksheet(wb2, "paper_table")
+addWorksheet(wb2, "mean_sd_detail")
+addWorksheet(wb2, "ANOVA")
+addWorksheet(wb2, "TukeyHSD_significant")
+addWorksheet(wb2, "TukeyHSD_all")
+addWorksheet(wb2, "sample_count")
+
+writeData(wb2, "paper_table", species_paper_table)
+writeData(wb2, "mean_sd_detail", species_mean_sd_detail)
+writeData(wb2, "ANOVA", species_anova)
+writeData(wb2, "TukeyHSD_significant", species_tukey_sig)
+writeData(wb2, "TukeyHSD_all", species_tukey_all)
+writeData(wb2, "sample_count", species_sample_count)
+
+save_workbook_with_auto_width(
+  wb2,
+  file.path(out_dir, "Table3_2_host_species_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx")
+)
+
+# -----------------------------
+# 8. Summary
+# -----------------------------
+sink(file.path(out_dir, "alpha_diversity_no_elephant_analysis_summary.txt"))
+
+cat("Alpha diversity analysis summary, no-elephant version\n")
+cat("====================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input SH abundance table:\n")
+cat(sh_table_file, "\n\n")
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Host family number:", length(unique(meta2$host_family)), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n\n")
+
+cat("Host family sample counts:\n")
+print(family_sample_count)
+
+cat("\nHost species sample counts:\n")
+print(species_sample_count)
+
+cat("\nHost family ANOVA:\n")
+print(family_anova)
+
+cat("\nHost species ANOVA:\n")
+print(species_anova)
+
+cat("\nSignificant host family TukeyHSD results:\n")
+print(family_tukey_sig)
+
+cat("\nSignificant host species TukeyHSD results:\n")
+print(species_tukey_sig)
+
+sink()
+
+# -----------------------------
+# 9. Console output
+# -----------------------------
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n\n")
+
+cat("Matched samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Host family number:", length(unique(meta2$host_family)), "\n")
+cat("Host species number:", length(unique(meta2$host_species)), "\n\n")
+
+cat("Key output files:\n")
+cat("1. alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv\n")
+cat("2. Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx\n")
+cat("3. Table3_2_host_species_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx\n")
+cat("4. Table3_1_host_family_alpha_for_paper_no_elephant.csv\n")
+cat("5. Table3_2_host_species_alpha_for_paper_no_elephant.csv\n")
+cat("6. alpha_diversity_no_elephant_analysis_summary.txt\n\n")
+
+EOF
+#运行：
+Rscript scripts/05_alpha_diversity_anova_tukey_no_elephant.R
+#这版不再需要安装 multcompView。运行完成后，重点检查终端输出是不是：
+#Matched samples: 3237
+#SH number: 18188
+#Host family number: 5
+#Host species number: 23
+#主要结果在：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant
+#重点看这两个 Excel：
+#Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#Table3_2_host_species_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#其中：
+#paper_table 是论文表格格式；
+#mean_sd_detail 保留均值、SD、均值±SD；
+#ANOVA 保留原始 P 值 P_value_raw；
+#TukeyHSD_all 保留全部两两比较结果；
+#TukeyHSD_significant 只保留显著两两比较结果。
+#我看了你上传的 SH_abundance_table_no_elephant.tsv，它开头是这种格式：
+## Constructed from biom file
+##OTU ID    CRR279953    CRR279954    CRR279955 ...
+#SH1048232.10FU    0.0    0.0    0.0 ...
+#也就是说，第 1 行只是说明文字，不是真正表头；第 2 行才是真正的列名。
+#但我上一版脚本用了：read.delim(sh_table_file, header = TRUE, ...)
+#R 会把第 1 行 # Constructed from biom file 当作表头。它只有 1 列，而第 2 行有 3238 列，所以就报错：more columns than column names
+#你只需要把读取 SH 表的部分改成 跳过第 1 行，并保留第 2 行的 #OTU ID 作为表头。
+#你可以直接用下面命令自动替换，不用手动找：
+cd /mnt/d/ITS_SH_pipeline
+
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("scripts/05_alpha_diversity_anova_tukey_no_elephant.R")
+txt = script.read_text()
+
+old = '''sh_tab <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)'''
+
+new = '''sh_tab <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\\t",
+  skip = 1,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)'''
+
+if old not in txt:
+    raise SystemExit("没有找到需要替换的 read.delim 代码块，请检查脚本是否和上一版一致。")
+
+script.write_text(txt.replace(old, new))
+print("已修改：读取 SH abundance table 时跳过第 1 行说明文字。")
+PY
+#然后重新运行：
+Rscript scripts/05_alpha_diversity_anova_tukey_no_elephant.R
