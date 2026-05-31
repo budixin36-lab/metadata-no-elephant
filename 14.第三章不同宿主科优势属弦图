@@ -1,0 +1,675 @@
+#下面这版脚本只做一件事：读取当前最终弦图已经生成的矩阵和属侧来源组成表，套用当前可用的中文径向标签版弦图样式，只把宿主科顺序改成“牛科、猪科、鹿科、马科、犀科”。你现在采用的最终弦图代码里，宿主科名和属名都是 facing = "clockwise" 的同方向径向标签，输出名是 Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels.png，所以这版会保留这个样式，只改顺序并输出新文件。
+  cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/12b_redraw_chord_CN_radial_labels_reorder_family_only.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 图3-4 不同宿主科肠道真菌优势属水平组成弦图
+## 中文径向标签版：只修改宿主科顺序，不重新计算 Top20 属
+##
+## 输入：
+## 1. host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv
+## 2. host_family_top20_genus_source_composition_for_chord_no_elephant.csv
+##
+## 只改：
+## 宿主科顺序：
+## Bovidae, Suidae, Cervidae, Equidae, Rhinocerotidae
+## 即：牛科、猪科、鹿科、马科、犀科
+##
+## 不改：
+## 1. Top20 属
+## 2. 弦宽矩阵数值
+## 3. min_link_value 过滤结果
+## 4. 中文属名
+## 5. 中文宿主科名
+## 6. 颜色
+## 7. 当前最终版中文径向标签样式
+## 8. PNG 600 dpi 白底
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R 包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tibble",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/msyh.ttc 或 simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+chord_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant"
+)
+
+mat_input <- file.path(
+  chord_dir,
+  "host_family_top20_genus_chord_matrix_for_plot_minlink_filtered_no_elephant.csv"
+)
+
+source_input <- file.path(
+  chord_dir,
+  "host_family_top20_genus_source_composition_for_chord_no_elephant.csv"
+)
+
+if (!file.exists(mat_input)) {
+  stop("找不到已有弦图矩阵：", mat_input)
+}
+
+if (!file.exists(source_input)) {
+  stop("找不到已有属侧来源组成表：", source_input)
+}
+
+out_chord_png <- file.path(
+  chord_dir,
+  "Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels_family_order_taxonomic.png"
+)
+
+out_chord_pdf <- file.path(
+  chord_dir,
+  "Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels_family_order_taxonomic.pdf"
+)
+
+out_matrix_cn <- file.path(
+  chord_dir,
+  "host_family_top20_genus_chord_matrix_no_elephant_CN_radial_labels_family_order_taxonomic.csv"
+)
+
+out_source_cn <- file.path(
+  chord_dir,
+  "host_family_top20_genus_source_composition_no_elephant_CN_radial_labels_family_order_taxonomic.csv"
+)
+
+summary_txt <- file.path(
+  chord_dir,
+  "host_family_top20_genus_chord_summary_no_elephant_CN_radial_labels_family_order_taxonomic.txt"
+)
+
+cat("输入矩阵：", mat_input, "\n", sep = "")
+cat("输入属侧来源组成表：", source_input, "\n", sep = "")
+
+## =========================
+## 3. 中文映射和顺序
+## =========================
+to_cn <- function(x, map_vec) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(map_vec)
+  x2[hit] <- unname(map_vec[x2[hit]])
+  x2
+}
+
+family_cn <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+genus_cn <- c(
+  "Kazachstania" = "哈萨克酵母属",
+  "Aspergillus" = "曲霉属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Cladonia" = "石蕊属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Cortinarius" = "丝膜菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属"
+)
+
+## 新宿主科顺序：按物种分类层级图逻辑
+family_order_en <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+family_order_cn <- to_cn(family_order_en, family_cn)
+
+family_colors_en <- c(
+  Bovidae = "#D8AA00",
+  Suidae = "#E41A1C",
+  Cervidae = "#2CA02C",
+  Equidae = "#00BFC4",
+  Rhinocerotidae = "#619CFF"
+)
+
+family_colors_cn <- family_colors_en
+names(family_colors_cn) <- to_cn(names(family_colors_en), family_cn)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+drop_penultimate_tick_sectors_cn <- to_cn(
+  c(
+    "Equidae",
+    "Cervidae",
+    "Rhinocerotidae",
+    "Thelebolus",
+    "Ascochyta"
+  ),
+  c(family_cn, genus_cn)
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  ## 对容易重叠的扇区删除倒数第二个刻度，但保留最大值
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 5. 读取已有矩阵，只重排行
+## =========================
+mat_df <- read.csv(
+  mat_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"host_family" %in% colnames(mat_df)) {
+  colnames(mat_df)[1] <- "host_family"
+}
+
+missing_fam <- setdiff(family_order_en, mat_df$host_family)
+
+if (length(missing_fam) > 0) {
+  stop(
+    "已有矩阵缺少以下宿主科：",
+    paste(missing_fam, collapse = ", ")
+  )
+}
+
+mat_df <- mat_df[match(family_order_en, mat_df$host_family), , drop = FALSE]
+
+mat <- as.matrix(
+  mat_df[, setdiff(colnames(mat_df), "host_family"), drop = FALSE]
+)
+
+rownames(mat) <- mat_df$host_family
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 保持已有矩阵中 Top20 属的列顺序
+genus_order_en <- colnames(mat)
+
+## 去掉可能全为 0 的行列，通常不会发生，只是防御
+mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+mat <- mat[, colSums(mat) > 0, drop = FALSE]
+
+genus_order_en <- colnames(mat)
+family_order_plot_en <- rownames(mat)
+
+## =========================
+## 6. 读取已有属侧来源组成表，并按新顺序对齐
+## =========================
+source_df <- read.csv(
+  source_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"genus" %in% colnames(source_df)) {
+  colnames(source_df)[1] <- "genus"
+}
+
+source_family_cols <- intersect(colnames(source_df), family_order_plot_en)
+
+if (length(source_family_cols) == 0) {
+  stop("属侧来源组成表没有匹配到宿主科列。")
+}
+
+source_mat <- as.matrix(
+  source_df[, source_family_cols, drop = FALSE]
+)
+
+rownames(source_mat) <- source_df$genus
+storage.mode(source_mat) <- "numeric"
+source_mat[is.na(source_mat)] <- 0
+
+## 转成 host_family × genus
+genus_source_prop <- t(source_mat)
+
+## 按新顺序、已有 Top20 属对齐
+genus_source_prop <- genus_source_prop[
+  family_order_plot_en,
+  genus_order_en,
+  drop = FALSE
+]
+
+## 如果来源组成表和矩阵不一致，重新用已有 mat 生成来源比例兜底
+if (any(is.na(genus_source_prop))) {
+  warning("属侧来源组成表与矩阵不完全一致，将根据已有矩阵重新生成属侧来源比例。")
+  genus_source_prop <- apply(mat, 2, function(x) {
+    if (sum(x) == 0) {
+      rep(0, length(x))
+    } else {
+      x / sum(x)
+    }
+  })
+  genus_source_prop <- as.matrix(genus_source_prop)
+  rownames(genus_source_prop) <- rownames(mat)
+}
+
+## =========================
+## 7. 转成中文矩阵
+## =========================
+mat_plot_cn <- mat
+rownames(mat_plot_cn) <- to_cn(rownames(mat_plot_cn), family_cn)
+colnames(mat_plot_cn) <- to_cn(colnames(mat_plot_cn), genus_cn)
+
+genus_source_prop_cn <- genus_source_prop
+rownames(genus_source_prop_cn) <- to_cn(rownames(genus_source_prop_cn), family_cn)
+colnames(genus_source_prop_cn) <- to_cn(colnames(genus_source_prop_cn), genus_cn)
+
+family_order_plot_cn <- rownames(mat_plot_cn)
+genus_order_cn <- colnames(mat_plot_cn)
+
+write.csv(
+  as.data.frame(mat_plot_cn) %>% rownames_to_column("宿主科"),
+  out_matrix_cn,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  as.data.frame(t(genus_source_prop_cn)) %>% rownames_to_column("属"),
+  out_source_cn,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("新宿主科顺序：", paste(family_order_plot_cn, collapse = "、"), "\n", sep = "")
+cat("Top20 属顺序保持已有矩阵列顺序。\n")
+
+## =========================
+## 8. 当前最终版中文径向标签弦图函数
+## =========================
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_cn)),
+    genus_order_cn
+  )
+
+  grid_cols <- c(
+    family_colors_cn[family_order_plot_cn],
+    genus_colors[genus_order_cn]
+  )
+
+  link_col_mat <- matrix(
+    NA,
+    nrow = nrow(mat_plot_cn),
+    ncol = ncol(mat_plot_cn)
+  )
+
+  rownames(link_col_mat) <- rownames(mat_plot_cn)
+  colnames(link_col_mat) <- colnames(mat_plot_cn)
+
+  for (g in genus_order_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(
+      genus_colors[g],
+      transparency = 0.45
+    )
+  }
+
+  n_family <- length(family_order_plot_cn)
+  n_genus <- length(genus_order_cn)
+
+  sector_order <- c(genus_order_cn, family_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4, n_family - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.36, 1.36),
+    canvas.ylim = c(-1.36, 1.36),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot_cn,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.035,
+    preAllocateTracks = list(
+      list(track.height = 0.135),
+      list(track.height = 0.030)
+    )
+  )
+
+  ## Track 1: 刻度 + 标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      axis_h <- 0.08
+      at <- nice_axis_at(
+        sector,
+        xlim[2],
+        drop_penultimate_tick_sectors_cn
+      )
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        ## 只画刻度线，刻度数字手动写，避免最大值被吞掉
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.42),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          ## 端点数字略向扇区内部移动，避免裁剪
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.018 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.028 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.34,
+            col = "grey25"
+          )
+        }
+      }
+
+      ## 关键：宿主科名和属名使用同一种文字方向
+      ## facing = "clockwise" + niceFacing = TRUE：
+      ## 文字沿从圆心指向扇区的方向排布，并自动调整可读方向。
+      if (sector %in% family_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.92,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.54,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.64,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧宿主科贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_cn) {
+        prop <- genus_source_prop_cn[, sector]
+        prop <- prop[family_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (fam in names(prop)) {
+            w <- total_width * prop[fam]
+
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start,
+                0,
+                start + w,
+                1,
+                col = family_colors_cn[fam],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 9. 输出
+## =========================
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+sink(summary_txt)
+
+cat("Host family Top20 genus chord redraw summary\n")
+cat("===========================================\n\n")
+cat("This script does NOT recalculate genus relative abundance or Top20 genera.\n")
+cat("It reads the existing filtered chord matrix and source composition table.\n\n")
+
+cat("Input matrix:\n", mat_input, "\n\n", sep = "")
+cat("Input source composition:\n", source_input, "\n\n", sep = "")
+
+cat("New host family order:\n")
+print(family_order_plot_cn)
+
+cat("\nGenera retained from existing matrix:\n")
+print(genus_order_cn)
+
+cat("\nMatrix used for plot:\n")
+print(as.data.frame(mat_plot_cn) %>% rownames_to_column("宿主科"))
+
+cat("\nOutput PNG:\n", out_chord_png, "\n", sep = "")
+cat("Output PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Output reordered CN matrix:\n", out_matrix_cn, "\n", sep = "")
+cat("Output reordered CN source composition:\n", out_source_cn, "\n", sep = "")
+
+sink()
+
+cat("\nDone!\n")
+cat("没有重新计算 Top20 属，只读取已有矩阵并修改宿主科顺序。\n\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Summary:\n", summary_txt, "\n", sep = "")
+
+EOF
+#运行：
+Rscript scripts/12b_redraw_chord_CN_radial_labels_reorder_family_only.R
+#输出新图是：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_4_host_family_top20_genus_chord_enhanced_final_CN_radial_labels_family_order_taxonomic.png
