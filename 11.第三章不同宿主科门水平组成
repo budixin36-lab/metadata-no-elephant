@@ -353,3 +353,253 @@ message("PDF: ", out_pdf)
 message("汇总表: ", summary_csv)
 #输出文件是:
 #/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_fontfix_v2.png
+#完整最小修改版脚本如下：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/13_redraw_phylum_bar_CN_reorder_family_only.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# Fig 3-3 reorder host family only
+#
+# 目的：
+# 只基于已经计算好的宿主科-真菌门平均相对多度汇总表重画图。
+#
+# 不重新读取 metadata。
+# 不重新读取 phylum_abundance_table。
+# 不重新计算样本内相对多度。
+# 不重新计算宿主科平均相对多度。
+#
+# 只修改横轴宿主科顺序：
+# 牛科、猪科、鹿科、马科、犀科
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_family_composition_no_elephant"
+)
+
+# 读取上一版已经计算好的汇总表
+summary_csv_old <- file.path(
+  out_dir,
+  "host_family_phylum_mean_relative_abundance_no_elephant_CN_fontfix_v2.csv"
+)
+
+if (!file.exists(summary_csv_old)) {
+  stop("找不到已计算好的汇总表：", summary_csv_old)
+}
+
+out_png <- file.path(
+  out_dir,
+  "Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_family_order_taxonomic.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_family_order_taxonomic.pdf"
+)
+
+summary_csv_new <- file.path(
+  out_dir,
+  "host_family_phylum_mean_relative_abundance_no_elephant_CN_family_order_taxonomic.csv"
+)
+
+# =========================
+# 2. 中文字体：宋体
+# =========================
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+message("使用中文字体：", font_path)
+
+# =========================
+# 3. 读取已经算好的汇总表
+# =========================
+message("读取已计算好的宿主科-真菌门平均相对多度汇总表 ...")
+
+plot_df <- read_csv(summary_csv_old, show_col_types = FALSE)
+
+needed_cols <- c("host_family_cn", "phylum_cn", "mean_relative_abundance")
+
+missing_cols <- setdiff(needed_cols, colnames(plot_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "汇总表缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(plot_df), collapse = " | ")
+  )
+}
+
+# =========================
+# 4. 只修改宿主科顺序
+# =========================
+family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+present_phyla <- phylum_order_cn[phylum_order_cn %in% unique(plot_df$phylum_cn)]
+
+plot_df <- plot_df %>%
+  filter(
+    host_family_cn %in% family_order_cn,
+    phylum_cn %in% present_phyla
+  ) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = family_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(host_family_cn, phylum_cn)
+
+# 输出一份仅改排序后的汇总表，方便核对
+write_csv(plot_df, summary_csv_new)
+
+# =========================
+# 5. 颜色：完全沿用原中文图风格
+# =========================
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+# =========================
+# 6. 作图：只改横轴顺序
+# =========================
+p <- ggplot(
+  plot_df,
+  aes(
+    x = host_family_cn,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.75, color = NA) +
+  scale_fill_manual(values = phylum_colors, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 11.2,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.42, "cm"),
+    legend.position = "right"
+  )
+
+# =========================
+# 7. 输出：不覆盖旧图
+# =========================
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9,
+  height = 6,
+  bg = "white"
+)
+
+message("完成！")
+message("未重新计算相对多度，只读取已有汇总表并修改横轴宿主科顺序。")
+message("输入汇总表: ", summary_csv_old)
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("排序后汇总表: ", summary_csv_new)
+EOF
+#运行:
+Rscript scripts/13_redraw_phylum_bar_CN_reorder_family_only.R
+#输出新图是：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/Fig3_3_host_family_phylum_stacked_bar_no_elephant_CN_family_order_taxonomic.png
+#这版只是在已有结果基础上改横轴顺序，不做任何重复计算。
