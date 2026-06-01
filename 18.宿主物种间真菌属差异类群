@@ -365,3 +365,460 @@ lefse_run.py \
 #运行结束后看输出里这一句：Number of discriminative features with abs LDA score > 4.0 : ...
 #这一步完成后，你应该得到：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant/host_species_genus_all_no_elephant.res
 #这个就是宿主物种间属水平 LEfSe 的正式统计结果。
+#下面这版是宿主物种间真菌属水平 LEfSe LDA score 图的作图脚本。
+#等你的：host_species_genus_all_no_elephant.res生成后，直接在 lefse_py39 环境、结果目录中运行即可。
+#这版已经按你刚才确认的要求改好：
+#只使用当前 no-elephant 的 23 个宿主物种；
+#不保留不存在的兼容物种；
+#宿主物种顺序严格按你的物种分类层级图；
+#真菌属名中文化，前面不显示 g__；
+#不使用彩虹渐变色；
+#每个物种使用手动指定的离散高对比颜色；
+#如果 .res 里出现不在 23 个物种中的分组，脚本会在终端提示，便于检查；
+#复用宿主科图已经确认可用的 Python/matplotlib 横向 LDA score 图逻辑。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant
+
+cat > plot_host_species_lefse_CN_ordered.py <<'PY'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Plot host-species LEfSe LDA score figure with Chinese labels and fixed species order.
+
+Input:
+  host_species_genus_all_no_elephant.res
+
+Output:
+  Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png
+  Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.pdf
+  Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_plot_data.csv
+
+This script does NOT rerun LEfSe.
+It only replots the existing .res result in a LEfSe-like horizontal bar style.
+"""
+
+from pathlib import Path
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# -----------------------------
+# 1. paths
+# -----------------------------
+res_file = Path("host_species_genus_all_no_elephant.res")
+
+out_png = Path("Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png")
+out_pdf = Path("Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.pdf")
+out_csv = Path("Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_plot_data.csv")
+
+if not res_file.exists():
+    raise SystemExit(
+        f"找不到输入文件：{res_file}\n"
+        "请先确认 lefse_run.py 已经成功生成 host_species_genus_all_no_elephant.res"
+    )
+
+# -----------------------------
+# 2. font
+# -----------------------------
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# -----------------------------
+# 3. host species order and Chinese labels
+# 顺序严格按论文物种分类层级图：
+# 牛科 → 猪科 → 鹿科 → 马科 → 犀科
+# -----------------------------
+species_order_safe = [
+    # Bovidae / 牛科
+    "Bos_taurus",
+    "Bos_grunniens",
+    "Bos_grunniens_x_Bos_taurus",
+    "Bos_bonasus",
+    "Bos_indicus",
+    "Bos_indicus_x_Bos_taurus",
+    "Bos_mutus",
+    "Ovis_aries",
+    "Capra_hircus",
+    "Pantholops_hodgsonii",
+    "Bubalus_bubalis",
+    "Procapra_picticaudata",
+
+    # Suidae / 猪科
+    "Sus_domesticus",
+    "Sus_scrofa",
+
+    # Cervidae / 鹿科
+    "Rangifer_tarandus",
+    "Cervus_nippon",
+    "Cervus_canadensis",
+    "Muntiacus_reevesi",
+    "Muntiacus_crinifrons",
+    "Dama_dama",
+
+    # Equidae / 马科
+    "Equus_caballus",
+    "Equus_kiang",
+
+    # Rhinocerotidae / 犀科
+    "Diceros_bicornis",
+]
+
+species_cn = {
+    "Bos_taurus": "家牛",
+    "Bos_grunniens": "家牦牛",
+    "Bos_grunniens_x_Bos_taurus": "家牦牛×家牛",
+    "Bos_bonasus": "欧洲野牛",
+    "Bos_indicus": "瘤牛",
+    "Bos_indicus_x_Bos_taurus": "瘤牛×家牛",
+    "Bos_mutus": "野牦牛",
+    "Ovis_aries": "绵羊",
+    "Capra_hircus": "家山羊",
+    "Pantholops_hodgsonii": "藏羚",
+    "Bubalus_bubalis": "水牛",
+    "Procapra_picticaudata": "藏原羚",
+    "Sus_domesticus": "家猪",
+    "Sus_scrofa": "野猪",
+    "Rangifer_tarandus": "驯鹿",
+    "Cervus_nippon": "梅花鹿",
+    "Cervus_canadensis": "加拿大马鹿",
+    "Muntiacus_reevesi": "小麂",
+    "Muntiacus_crinifrons": "黑麂",
+    "Dama_dama": "黇鹿",
+    "Equus_caballus": "家马",
+    "Equus_kiang": "藏野驴",
+    "Diceros_bicornis": "黑犀",
+}
+
+species_rank = {sp: i for i, sp in enumerate(species_order_safe)}
+
+# -----------------------------
+# 4. manual high-contrast discrete colors
+# 不使用彩虹渐变色；相邻物种尽量高对比。
+# -----------------------------
+species_colors = {
+    "Bos_taurus": "#E41A1C",                   # red
+    "Bos_grunniens": "#377EB8",               # blue
+    "Bos_grunniens_x_Bos_taurus": "#4DAF4A",  # green
+    "Bos_bonasus": "#984EA3",                 # purple
+    "Bos_indicus": "#FF7F00",                 # orange
+    "Bos_indicus_x_Bos_taurus": "#A65628",    # brown
+    "Bos_mutus": "#F781BF",                   # pink
+    "Ovis_aries": "#1B9E77",                  # teal green
+    "Capra_hircus": "#D95F02",                # deep orange
+    "Pantholops_hodgsonii": "#7570B3",        # blue purple
+    "Bubalus_bubalis": "#66A61E",             # olive green
+    "Procapra_picticaudata": "#E7298A",       # magenta
+
+    "Sus_domesticus": "#000000",              # black
+    "Sus_scrofa": "#999999",                  # grey
+
+    "Rangifer_tarandus": "#00A087",           # green cyan
+    "Cervus_nippon": "#3C5488",               # dark blue
+    "Cervus_canadensis": "#F39B7F",           # salmon
+    "Muntiacus_reevesi": "#8491B4",           # grey blue
+    "Muntiacus_crinifrons": "#91D1C2",        # light cyan green
+    "Dama_dama": "#DC0000",                   # dark red
+
+    "Equus_caballus": "#7E6148",              # brown grey
+    "Equus_kiang": "#00BFC4",                 # cyan
+
+    "Diceros_bicornis": "#B09C85",            # taupe
+}
+
+# -----------------------------
+# 5. genus Chinese translation
+# -----------------------------
+genus_map = {
+    "Aspergillus": "曲霉属",
+    "Saccharomyces": "酵母属",
+    "Neocallimastix": "新靓鞭菌属",
+    "Sporormiella": "小荚孢腔菌属",
+    "Cladonia": "石蕊属",
+    "Cortinarius": "丝膜菌属",
+    "Sordaria": "粪壳属",
+    "Preussia": "光黑壳属",
+    "Thelebolus": "寡囊盘菌属",
+    "Wallemia": "节担菌属",
+    "Khoyollomyces": "Khoyollomyces",
+    "Vishniacozyma": "维希尼克酵母属",
+    "Ascochyta": "壳二孢菌属",
+    "Caecomyces": "隐菌属",
+    "Cladosporium": "枝孢属",
+    "Kazachstania": "哈萨克酵母属",
+    "Penicillium": "青霉属",
+    "Naganishia": "永西酵母属",
+    "Fusarium": "镰孢属",
+    "Cutaneotrichosporon": "皮肤丝孢酵母属",
+    "Trichosporon": "丝孢酵母属",
+    "Trichoderma": "木霉属",
+    "Mucor": "毛霉属",
+    "Rhizopogon": "须腹菌属",
+    "Candida": "假丝酵母属",
+    "Alternaria": "链格孢属",
+    "Ascobolus": "粪盘菌属",
+    "Cheilymenia": "缘刺盘菌属",
+    "Pyrenochaetopsis": "拟棘壳孢属",
+    "Piromyces": "梨壶菌属",
+    "Orpinomyces": "根囊鞭菌属",
+    "Symmetrospora": "对称孢属",
+    "Monascus": "红曲霉属",
+    "Ustilago": "黑粉菌属",
+    "Parascaedosporium": "近赛多孢属",
+    "Neoascochyta": "新壳二孢菌属",
+    "Furcasterigmium": "叉梗壳属",
+    "Pecoramyces": "Pecoramyces",
+    "Feramyces": "Feramyces",
+    "Xeromyces": "Xeromyces",
+    "Oligophagozyma": "Oligophagozyma",
+    "Hanseniaspora": "有孢汉逊酵母属",
+    "Tausonia": "Tausonia",
+
+    # 分类地位未定属 / 类群
+    "Fungi_gen_Incertae_sedis": "真菌属分类地位未定类群",
+    "Fungi_gen_Insertae_sedis": "真菌属分类地位未定类群",
+
+    "Neocallimastigaceae_gen_Incertae_sedis": "新靓鞭菌科分类地位未定属",
+    "Neocallimastigaceae_gen_Insertae_sedis": "新靓鞭菌科分类地位未定属",
+
+    "Agaricales_gen_Incertae_sedis": "蘑菇目分类地位未定属",
+    "Agaricales_gen_Insertae_sedis": "蘑菇目分类地位未定属",
+
+    "Sordariales_gen_Incertae_sedis": "粪壳目分类地位未定属",
+    "Sordariales_gen_Insertae_sedis": "粪壳目分类地位未定属",
+
+    "Agaricomycetes_gen_Incertae_sedis": "蘑菇纲分类地位未定属",
+    "Agaricomycetes_gen_Insertae_sedis": "蘑菇纲分类地位未定属",
+
+    "Ascomycota_gen_Incertae_sedis": "子囊菌门分类地位未定属",
+    "Ascomycota_gen_Insertae_sedis": "子囊菌门分类地位未定属",
+
+    "Pleosporales_gen_Incertae_sedis": "格孢腔菌目分类地位未定属",
+    "Pleosporales_gen_Insertae_sedis": "格孢腔菌目分类地位未定属",
+
+    "Onygenales_gen_Incertae_sedis": "爪甲团囊菌目分类地位未定属",
+    "Onygenales_gen_Insertae_sedis": "爪甲团囊菌目分类地位未定属",
+
+    "Neocallimastigomycota_gen_Incertae_sedis": "新靓鞭菌门分类地位未定属",
+    "Neocallimastigomycota_gen_Insertae_sedis": "新靓鞭菌门分类地位未定属",
+
+    "Pezizales_gen_Incertae_sedis": "盘菌目分类地位未定属",
+    "Pezizales_gen_Insertae_sedis": "盘菌目分类地位未定属",
+}
+
+def translate_feature(feature: str) -> str:
+    f = feature.strip()
+
+    # 去掉常见 LEfSe feature 前缀
+    for prefix in ["k__Fungi|g__", "k__Fungi.g__", "k__Fungi|", "g__"]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+
+    return genus_map.get(f, f)
+
+def normalize_group(group: str) -> str:
+    g = group.strip()
+    g = g.replace("×", "x")
+    g = g.replace(" ", "_")
+    return g
+
+# -----------------------------
+# 6. read LEfSe .res
+# -----------------------------
+rows = []
+unknown_groups = set()
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        # LEfSe .res 常见列：
+        # V1 = feature
+        # V2 = raw value
+        # V3 = enriched group
+        # V4 = LDA score
+        # V5 = p value
+        if len(parts) < 4:
+            continue
+
+        feature_raw = parts[0].strip()
+        group_raw = parts[2].strip()
+        group_safe = normalize_group(group_raw)
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        # 只关注带有富集组且 LDA > 4 的结果
+        if lda < 4.0:
+            continue
+
+        if group_safe not in species_order_safe:
+            if group_safe != "":
+                unknown_groups.add(group_safe)
+            continue
+
+        feature_cn = translate_feature(feature_raw)
+        group_cn = species_cn[group_safe]
+
+        rows.append({
+            "feature": feature_cn,
+            "group_safe": group_safe,
+            "group_cn": group_cn,
+            "lda": lda,
+        })
+
+if unknown_groups:
+    print("警告：.res 中出现不在 23 个目标宿主物种列表中的富集组，已跳过：")
+    for g in sorted(unknown_groups):
+        print("  -", g)
+    print("请检查是否是物种名拼写、×/x、空格或 no-elephant 数据版本问题。")
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带目标宿主物种富集组的结果，请检查 .res 文件。")
+
+# 按固定物种顺序分组；组内按 LDA 从高到低
+rows_sorted = []
+for sp in species_order_safe:
+    sub = [r for r in rows if r["group_safe"] == sp]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# 输出作图数据，方便核对
+with out_csv.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=["feature", "group_safe", "group_cn", "LDA_score"])
+    writer.writeheader()
+    for r in rows_sorted:
+        writer.writerow({
+            "feature": r["feature"],
+            "group_safe": r["group_safe"],
+            "group_cn": r["group_cn"],
+            "LDA_score": r["lda"],
+        })
+
+# -----------------------------
+# 7. plot
+# -----------------------------
+features = [r["feature"] for r in rows_sorted]
+groups_safe = [r["group_safe"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [species_colors[g] for g in groups_safe]
+
+n = len(rows_sorted)
+
+# 物种图差异属会更多，图要更高更宽。
+fig_width = 14.5
+fig_height = max(8.5, n * 0.30 + 2.8)
+
+fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=0.9,
+    height=0.76,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=13)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=13)
+
+xmax = max(ldas)
+x_upper = max(5.2, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=13)
+ax.tick_params(axis="y", length=0)
+
+ax.grid(axis="x", color="black", linewidth=0.9)
+ax.grid(axis="y", visible=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+# 只显示实际进入 LDA>4 结果的物种图例，但顺序仍按固定物种顺序
+present_species = [sp for sp in species_order_safe if sp in set(groups_safe)]
+
+legend_handles = [
+    Patch(facecolor=species_colors[sp], edgecolor="black", label=species_cn[sp])
+    for sp in present_species
+]
+
+# 物种较多，图例放在顶部，多列显示
+legend = ax.legend(
+    handles=legend_handles,
+    loc="upper center",
+    bbox_to_anchor=(0.5, 1.15),
+    ncol=6,
+    frameon=False,
+    prop=font_prop,
+    fontsize=13,
+    handlelength=1.6,
+    columnspacing=1.25,
+    handletextpad=0.5,
+)
+
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(13)
+
+plt.subplots_adjust(
+    left=0.28,
+    right=0.98,
+    top=0.84,
+    bottom=0.08
+)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print("Legend species:", "、".join([species_cn[sp] for sp in present_species]))
+PY
+
+python3 plot_host_species_lefse_CN_ordered.py
+#运行后先看：Fig3_11_host_species_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png
