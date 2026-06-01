@@ -2397,3 +2397,1267 @@ EOF
 #运行：
 Rscript scripts/07d_redraw_host_family_NMDS_zoom_no_elephant_CN.R
 #输出新图：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/Fig3_6_host_family_BrayCurtis_NMDS_no_elephant_CN_zoom_v2.png
+#只重画宿主科 NMDS 图脚本
+#这版不会重新计算：
+#Bray-Curtis 距离；
+#NMDS；
+#Adonis；
+#betadisper。
+#它只读取已有结果文件，重新调整显示范围、点大小和输出图。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > scripts/07e_redraw_host_family_NMDS_zoom_plot_only_no_elephant_CN.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# Plot-only redraw: host family NMDS zoomed main region
+# no-elephant version
+#
+# 只重画图，不重复计算统计：
+# 1. 不读取 SH abundance table；
+# 2. 不重新计算 Bray-Curtis；
+# 3. 不重新运行 NMDS；
+# 4. 不重新运行 Adonis；
+# 5. 不重新运行 betadisper。
+#
+# 读取已有：
+# NMDS_bray_curtis_scores_no_elephant.csv
+# NMDS_bray_curtis_no_elephant_trymax50.rds
+# host_family_adonis_bray_curtis_no_elephant.csv
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_beta_diversity_no_elephant"
+)
+
+score_file <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_scores_no_elephant.csv"
+)
+
+nmds_rds <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_no_elephant_trymax50.rds"
+)
+
+adonis_csv <- file.path(
+  out_dir,
+  "host_family_adonis_bray_curtis_no_elephant.csv"
+)
+
+if (!file.exists(score_file)) {
+  stop("找不到 NMDS scores 文件：", score_file)
+}
+
+if (!file.exists(nmds_rds)) {
+  stop("找不到 NMDS RDS 文件：", nmds_rds)
+}
+
+if (!file.exists(adonis_csv)) {
+  stop(
+    "找不到已有 Adonis 结果文件：", adonis_csv,
+    "\n不能在只作图脚本中重新计算 Adonis。请先确认之前的 Adonis 文件是否存在。"
+  )
+}
+
+display_csv <- file.path(
+  out_dir,
+  "NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv"
+)
+
+outlier_csv <- file.path(
+  out_dir,
+  "NMDS_host_family_outliers_excluded_zoom_v3_plot_only_no_elephant_CN.csv"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "beta_host_family_NMDS_zoom_v3_plot_only_summary_no_elephant.txt"
+)
+
+out_png <- file.path(
+  out_dir,
+  "Fig3_6_host_family_BrayCurtis_NMDS_no_elephant_CN_zoom_v3_plot_only.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig3_6_host_family_BrayCurtis_NMDS_no_elephant_CN_zoom_v3_plot_only.pdf"
+)
+
+# =========================
+# 2. 中文字体
+# =========================
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+font_add("CNFont", regular = font_file)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+# =========================
+# 3. 参数
+# =========================
+iqr_k <- 7
+axis_padding <- 0.05
+
+point_size <- 1.05
+point_alpha <- 0.58
+
+family_order_en <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+family_map_cn <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+family_order_cn <- unname(family_map_cn[family_order_en])
+
+family_colors_cn <- c(
+  "牛科" = "#F03B35",
+  "猪科" = "#D4AE00",
+  "鹿科" = "#55B84A",
+  "马科" = "#2DB7C8",
+  "犀科" = "#7B4AB3"
+)
+
+# =========================
+# 4. 工具函数
+# =========================
+get_iqr_range <- function(x, k = 7) {
+  q1 <- unname(quantile(x, 0.25, na.rm = TRUE))
+  q3 <- unname(quantile(x, 0.75, na.rm = TRUE))
+  iqr <- q3 - q1
+  c(lower = q1 - k * iqr, upper = q3 + k * iqr)
+}
+
+get_padded_range <- function(x, padding = 0.05) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+
+  if (is.na(d) || d == 0) {
+    d <- max(abs(r), 1e-6)
+  }
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+fmt_decimal <- function(x) {
+  x[abs(x) < 1e-12] <- 0
+  sprintf("%.5f", x)
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "host_family")
+
+  if (length(idx) == 0) {
+    idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  }
+
+  if (length(idx) == 0) {
+    stop(
+      "无法从 Adonis 结果中识别模型项。term 列为：",
+      paste(adonis_df$term, collapse = ", ")
+    )
+  }
+
+  idx[1]
+}
+
+# =========================
+# 5. 读取已有 NMDS 和 Adonis 结果
+# =========================
+cat("读取已有 NMDS scores，不重新运行 NMDS：\n")
+cat(score_file, "\n\n", sep = "")
+
+nmds_scores <- read.csv(
+  score_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+nmds <- readRDS(nmds_rds)
+
+if (!all(c("sample_id", "NMDS1", "NMDS2") %in% colnames(nmds_scores))) {
+  stop("NMDS scores 文件缺少 sample_id / NMDS1 / NMDS2 列。")
+}
+
+# 如果没有中文宿主科列，就根据 host_family 生成
+if (!"host_family_cn" %in% colnames(nmds_scores)) {
+  if (!"host_family" %in% colnames(nmds_scores)) {
+    stop("NMDS scores 中没有 host_family 或 host_family_cn，无法按宿主科作图。")
+  }
+
+  nmds_scores <- nmds_scores %>%
+    mutate(
+      host_family_cn = unname(family_map_cn[as.character(host_family)])
+    )
+}
+
+nmds_scores <- nmds_scores %>%
+  filter(!is.na(host_family_cn)) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+cat("读取已有 Adonis 结果，不重新计算 Adonis：\n")
+cat(adonis_csv, "\n\n", sep = "")
+
+adonis_df <- read.csv(
+  adonis_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"term" %in% colnames(adonis_df)) {
+  stop("Adonis CSV 中没有 term 列。")
+}
+
+main_idx <- extract_adonis_main_row(adonis_df)
+
+if (!"R2" %in% colnames(adonis_df)) {
+  stop("Adonis CSV 中没有 R2 列。")
+}
+
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+
+if (is.na(p_col)) {
+  stop("Adonis CSV 中没有 Pr(>F) 或类似 P 值列。")
+}
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+cat("Adonis 标注：", adonis_label, "\n", sep = "")
+cat("NMDS stress = ", nmds$stress, "\n", sep = "")
+
+# =========================
+# 6. IQR 筛点 + 根据显示点实际范围放大主区域
+# =========================
+iqr_x_range <- get_iqr_range(nmds_scores$NMDS1, iqr_k)
+iqr_y_range <- get_iqr_range(nmds_scores$NMDS2, iqr_k)
+
+plot_flag <- nmds_scores$NMDS1 >= iqr_x_range["lower"] &
+  nmds_scores$NMDS1 <= iqr_x_range["upper"] &
+  nmds_scores$NMDS2 >= iqr_y_range["lower"] &
+  nmds_scores$NMDS2 <= iqr_y_range["upper"]
+
+display_df <- nmds_scores[plot_flag, , drop = FALSE]
+outlier_df <- nmds_scores[!plot_flag, , drop = FALSE]
+
+x_range <- get_padded_range(display_df$NMDS1, axis_padding)
+y_range <- get_padded_range(display_df$NMDS2, axis_padding)
+
+write.csv(display_df, display_csv, row.names = FALSE)
+write.csv(outlier_df, outlier_csv, row.names = FALSE)
+
+cat("显示样本数：", nrow(display_df), "\n", sep = "")
+cat("仅从图中隐藏的极端点数：", nrow(outlier_df), "\n", sep = "")
+cat("最终 x 轴范围：", x_range["lower"], " to ", x_range["upper"], "\n", sep = "")
+cat("最终 y 轴范围：", y_range["lower"], " to ", y_range["upper"], "\n", sep = "")
+
+# =========================
+# 7. 只重画图
+# =========================
+stress_label <- paste0(
+  "Bray-Curtis NMDS stress = ",
+  sprintf("%.8f", nmds$stress)
+)
+
+x_anno <- x_range["lower"] + 0.05 * diff(x_range)
+y_anno <- y_range["upper"] - 0.08 * diff(y_range)
+
+p <- ggplot(
+  display_df,
+  aes(
+    x = NMDS1,
+    y = NMDS2,
+    color = host_family_cn
+  )
+) +
+  stat_ellipse(
+    aes(fill = host_family_cn),
+    geom = "polygon",
+    type = "t",
+    level = 0.95,
+    alpha = 0.10,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    aes(group = host_family_cn, color = host_family_cn),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.75,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    size = point_size,
+    alpha = point_alpha
+  ) +
+  annotate(
+    "text",
+    x = x_anno,
+    y = y_anno,
+    label = adonis_label,
+    hjust = 0,
+    vjust = 1,
+    size = 4.6,
+    family = "CNFont",
+    color = "black"
+  ) +
+  scale_color_manual(
+    values = family_colors_cn,
+    breaks = family_order_cn,
+    drop = FALSE,
+    name = NULL
+  ) +
+  scale_fill_manual(
+    values = family_colors_cn,
+    breaks = family_order_cn,
+    drop = FALSE,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = fmt_decimal,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_y_continuous(
+    labels = fmt_decimal,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "NMDS1",
+    y = "NMDS2",
+    color = NULL,
+    caption = stress_label
+  ) +
+  coord_cartesian(
+    xlim = x_range,
+    ylim = y_range,
+    clip = "off"
+  ) +
+  theme_bw(base_size = 14, base_family = "CNFont") +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_blank(),
+    axis.title = element_text(size = 19, colour = "black"),
+    axis.text = element_text(size = 13, colour = "black"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 16, colour = "black"),
+    legend.key = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.key.height = unit(0.62, "cm"),
+    legend.key.width = unit(0.62, "cm"),
+    legend.spacing.y = unit(0.14, "cm"),
+    legend.position = "right",
+    plot.caption = element_text(
+      size = 13,
+      hjust = 0,
+      colour = "black",
+      lineheight = 1.15
+    ),
+    plot.caption.position = "plot",
+    plot.margin = margin(t = 10, r = 28, b = 34, l = 12)
+  ) +
+  guides(
+    color = guide_legend(
+      ncol = 1,
+      byrow = TRUE,
+      override.aes = list(size = 4.2, alpha = 1)
+    )
+  )
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+# =========================
+# 8. Summary
+# =========================
+sink(summary_txt)
+
+cat("Host family NMDS plot-only zoom redraw summary\n")
+cat("=============================================\n\n")
+
+cat("This script did NOT recalculate Bray-Curtis distance.\n")
+cat("This script did NOT rerun NMDS.\n")
+cat("This script did NOT rerun Adonis.\n")
+cat("This script did NOT rerun betadisper.\n")
+cat("It only redrew the figure using existing results.\n\n")
+
+cat("NMDS score CSV:\n", score_file, "\n", sep = "")
+cat("NMDS RDS:\n", nmds_rds, "\n", sep = "")
+cat("Adonis CSV:\n", adonis_csv, "\n\n", sep = "")
+
+cat("NMDS stress:", nmds$stress, "\n")
+cat("Adonis label:", adonis_label, "\n\n")
+
+cat("Display filtering:\n")
+cat("IQR k:", iqr_k, "\n")
+cat("IQR NMDS1 range:", iqr_x_range["lower"], "to", iqr_x_range["upper"], "\n")
+cat("IQR NMDS2 range:", iqr_y_range["lower"], "to", iqr_y_range["upper"], "\n")
+cat("Final x display range:", x_range["lower"], "to", x_range["upper"], "\n")
+cat("Final y display range:", y_range["lower"], "to", y_range["upper"], "\n")
+cat("Displayed samples:", nrow(display_df), "\n")
+cat("Outliers excluded from display only:", nrow(outlier_df), "\n")
+cat("Point size:", point_size, "\n")
+cat("Point alpha:", point_alpha, "\n\n")
+
+cat("Output figure PNG:\n", out_png, "\n", sep = "")
+cat("Output figure PDF:\n", out_pdf, "\n", sep = "")
+cat("Display sample table:\n", display_csv, "\n", sep = "")
+cat("Outlier table:\n", outlier_csv, "\n", sep = "")
+
+sink()
+
+cat("\nDone!\n")
+cat("只重画图，没有重复计算 Bray-Curtis、NMDS、Adonis 或 betadisper。\n")
+cat("输出图：", out_png, "\n", sep = "")
+EOF
+#运行：
+Rscript scripts/07e_redraw_host_family_NMDS_zoom_plot_only_no_elephant_CN.R
+#新输出图：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/Fig3_6_host_family_BrayCurtis_NMDS_no_elephant_CN_zoom_v3_plot_only.png
+#这版脚本的逻辑
+#使用的输入文件
+#已保存 Bray-Curtis 距离矩阵
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/bray_curtis_distance_no_elephant.rds
+#已保存 NMDS 对象
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/NMDS_bray_curtis_no_elephant_trymax50.rds
+#已保存 NMDS scores
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/NMDS_bray_curtis_scores_no_elephant.csv
+#metadata
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#是否重新计算
+#不重新计算 Bray-Curtis
+#不重新运行 NMDS
+#宿主物种的 Adonis / betadisper：
+#如果对应结果文件已经存在，就直接读取
+#如果还不存在，就基于已保存 Bray-Curtis 距离矩阵计算一次并保存
+#（这是因为宿主物种和宿主科不是同一个分组变量，宿主物种的检验结果本来就需要单独有一份）
+#图形逻辑
+#用 ordibar(kind = "sd")
+#不显示全部样本点
+#只显示：
+#每个宿主物种的质心点
+#ordibar 的 SD 十字条
+#物种中文标签
+#同科内物种同色不同形状
+#不同科颜色不同，形状可以重复
+#不单独画 23 个物种的大图例，避免太挤；图中直接标中文名，同时保留宿主科颜色图例
+#输出文件
+#统计结果
+#host_species_adonis_bray_curtis_no_elephant.csv
+#host_species_betadisper_ANOVA_no_elephant.csv
+#host_species_betadisper_permutest_no_elephant.csv
+#中间表
+#host_species_NMDS_plot_data_no_elephant.csv
+#host_species_NMDS_centroid_sd_summary_no_elephant.csv
+#最终图
+#Fig3_7_host_species_BrayCurtis_NMDS_ordibar_sd_no_elephant_CN.png
+#Fig3_7_host_species_BrayCurtis_NMDS_ordibar_sd_no_elephant_CN.pdf
+#下面是完整脚本，直接保存并运行即可。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > scripts/07f_host_species_NMDS_ordibar_no_elephant_CN.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# Host species NMDS (ordibar, kind = "sd"), no-elephant version
+#
+# 逻辑：
+# 1. 不重新计算 Bray-Curtis
+# 2. 不重新运行 NMDS
+# 3. 读取已有 NMDS scores + NMDS RDS
+# 4. 宿主物种 Adonis / betadisper 若已存在则直接读取；
+#    若不存在，则基于已保存 Bray-Curtis 距离矩阵计算一次并保存
+# 5. 图中不显示全部样本点，只显示：
+#    - 宿主物种质心点
+#    - ordibar(kind = "sd") 十字条
+#    - 物种中文标签
+# 6. 同科内物种同色不同形状，不同科颜色不同，形状可重复
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(showtext)
+  library(sysfonts)
+  library(grDevices)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_beta_diversity_no_elephant"
+)
+
+bray_rds <- file.path(
+  out_dir,
+  "bray_curtis_distance_no_elephant.rds"
+)
+
+nmds_rds <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_no_elephant_trymax50.rds"
+)
+
+score_file <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_scores_no_elephant.csv"
+)
+
+if (!file.exists(metadata_file)) stop("找不到 metadata：", metadata_file)
+if (!file.exists(bray_rds)) stop("找不到 Bray-Curtis 距离矩阵：", bray_rds)
+if (!file.exists(nmds_rds)) stop("找不到 NMDS RDS：", nmds_rds)
+if (!file.exists(score_file)) stop("找不到 NMDS scores：", score_file)
+
+# 宿主物种统计结果：若已存在则读取；不存在则计算一次
+adonis_csv <- file.path(out_dir, "host_species_adonis_bray_curtis_no_elephant.csv")
+betadisper_anova_csv <- file.path(out_dir, "host_species_betadisper_ANOVA_no_elephant.csv")
+betadisper_perm_csv <- file.path(out_dir, "host_species_betadisper_permutest_no_elephant.csv")
+
+plot_data_csv <- file.path(out_dir, "host_species_NMDS_plot_data_no_elephant.csv")
+centroid_csv  <- file.path(out_dir, "host_species_NMDS_centroid_sd_summary_no_elephant.csv")
+summary_txt   <- file.path(out_dir, "host_species_NMDS_ordibar_summary_no_elephant_CN.txt")
+
+out_png <- file.path(out_dir, "Fig3_7_host_species_BrayCurtis_NMDS_ordibar_sd_no_elephant_CN.png")
+out_pdf <- file.path(out_dir, "Fig3_7_host_species_BrayCurtis_NMDS_ordibar_sd_no_elephant_CN.pdf")
+
+# =========================
+# 2. 中文字体
+# =========================
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+if (is.na(font_file)) stop("找不到可用中文字体。")
+
+font_add("CNFont", regular = font_file)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+# =========================
+# 3. 参数
+# =========================
+# 坐标范围 padding
+axis_padding <- 0.08
+
+# 标注偏移
+label_cex <- 0.78
+label_offset_x <- 0.00001
+label_offset_y <- 0.000005
+
+# ordibar 线宽
+bar_lwd <- 1.2
+
+# 质心点大小
+point_cex <- 1.25
+
+# 图例
+show_species_legend <- FALSE   # 默认 FALSE，避免 23 个物种图例过挤
+family_legend_cex <- 1.15
+species_legend_cex <- 0.72
+
+# =========================
+# 4. 顺序、颜色、形状映射
+# =========================
+family_order_en <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+family_map_cn <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+family_order_cn <- unname(family_map_cn[family_order_en])
+
+family_colors_cn <- c(
+  "牛科" = "#F03B35",
+  "猪科" = "#D4AE00",
+  "鹿科" = "#55B84A",
+  "马科" = "#2DB7C8",
+  "犀科" = "#7B4AB3"
+)
+
+# 宿主物种顺序：严格按你确认的分类层级图顺序
+species_order_key <- c(
+  # 牛科
+  "Bos_taurus",
+  "Bos_grunniens",
+  "Bos_grunniens_x_Bos_taurus",
+  "Bos_bonasus",
+  "Bos_indicus",
+  "Bos_indicus_x_Bos_taurus",
+  "Bos_mutus",
+  "Ovis_aries",
+  "Capra_hircus",
+  "Pantholops_hodgsonii",
+  "Bubalus_bubalis",
+  "Procapra_picticaudata",
+
+  # 猪科
+  "Sus_domesticus",
+  "Sus_scrofa",
+
+  # 鹿科
+  "Rangifer_tarandus",
+  "Cervus_nippon",
+  "Cervus_canadensis",
+  "Muntiacus_reevesi",
+  "Muntiacus_crinifrons",
+  "Dama_dama",
+
+  # 马科
+  "Equus_caballus",
+  "Equus_kiang",
+
+  # 犀科
+  "Diceros_bicornis"
+)
+
+species_cn_map <- c(
+  "Bos_taurus" = "家牛",
+  "Bos_grunniens" = "家牦牛",
+  "Bos_grunniens_x_Bos_taurus" = "家牦牛×家牛",
+  "Bos_bonasus" = "欧洲野牛",
+  "Bos_indicus" = "瘤牛",
+  "Bos_indicus_x_Bos_taurus" = "瘤牛×家牛",
+  "Bos_mutus" = "野牦牛",
+  "Ovis_aries" = "绵羊",
+  "Capra_hircus" = "家山羊",
+  "Pantholops_hodgsonii" = "藏羚",
+  "Bubalus_bubalis" = "水牛",
+  "Procapra_picticaudata" = "藏原羚",
+  "Sus_domesticus" = "家猪",
+  "Sus_scrofa" = "野猪",
+  "Rangifer_tarandus" = "驯鹿",
+  "Cervus_nippon" = "梅花鹿",
+  "Cervus_canadensis" = "加拿大马鹿",
+  "Muntiacus_reevesi" = "小麂",
+  "Muntiacus_crinifrons" = "黑麂",
+  "Dama_dama" = "黇鹿",
+  "Equus_caballus" = "家马",
+  "Equus_kiang" = "藏野驴",
+  "Diceros_bicornis" = "黑犀"
+)
+
+species_family_map <- c(
+  "Bos_taurus" = "牛科",
+  "Bos_grunniens" = "牛科",
+  "Bos_grunniens_x_Bos_taurus" = "牛科",
+  "Bos_bonasus" = "牛科",
+  "Bos_indicus" = "牛科",
+  "Bos_indicus_x_Bos_taurus" = "牛科",
+  "Bos_mutus" = "牛科",
+  "Ovis_aries" = "牛科",
+  "Capra_hircus" = "牛科",
+  "Pantholops_hodgsonii" = "牛科",
+  "Bubalus_bubalis" = "牛科",
+  "Procapra_picticaudata" = "牛科",
+
+  "Sus_domesticus" = "猪科",
+  "Sus_scrofa" = "猪科",
+
+  "Rangifer_tarandus" = "鹿科",
+  "Cervus_nippon" = "鹿科",
+  "Cervus_canadensis" = "鹿科",
+  "Muntiacus_reevesi" = "鹿科",
+  "Muntiacus_crinifrons" = "鹿科",
+  "Dama_dama" = "鹿科",
+
+  "Equus_caballus" = "马科",
+  "Equus_kiang" = "马科",
+
+  "Diceros_bicornis" = "犀科"
+)
+
+# 同科不同形状，不同科可重复形状
+species_shape_map <- c(
+  # 牛科 12 个
+  "Bos_taurus" = 21,
+  "Bos_grunniens" = 22,
+  "Bos_grunniens_x_Bos_taurus" = 24,
+  "Bos_bonasus" = 25,
+  "Bos_indicus" = 0,
+  "Bos_indicus_x_Bos_taurus" = 1,
+  "Bos_mutus" = 2,
+  "Ovis_aries" = 5,
+  "Capra_hircus" = 6,
+  "Pantholops_hodgsonii" = 15,
+  "Bubalus_bubalis" = 16,
+  "Procapra_picticaudata" = 17,
+
+  # 猪科 2 个
+  "Sus_domesticus" = 21,
+  "Sus_scrofa" = 22,
+
+  # 鹿科 6 个
+  "Rangifer_tarandus" = 21,
+  "Cervus_nippon" = 22,
+  "Cervus_canadensis" = 24,
+  "Muntiacus_reevesi" = 25,
+  "Muntiacus_crinifrons" = 0,
+  "Dama_dama" = 1,
+
+  # 马科 2 个
+  "Equus_caballus" = 21,
+  "Equus_kiang" = 22,
+
+  # 犀科 1 个
+  "Diceros_bicornis" = 21
+)
+
+# =========================
+# 5. 工具函数
+# =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "not applicable", "Not applicable",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "找不到列：", label,
+      "\n尝试列名：", paste(candidates, collapse = ", "),
+      "\n现有列名：", paste(cols, collapse = " | ")
+    )
+  }
+  hit
+}
+
+normalize_species_key <- function(x) {
+  x <- clean_value(x)
+  x <- gsub("×", "x", x)
+  x <- gsub("\\s*[xX]\\s*", " x ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+
+  # 转成脚本统一使用的 key
+  x <- gsub(" ", "_", x)
+  x
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "host_species")
+  if (length(idx) == 0) {
+    idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  }
+  if (length(idx) == 0) {
+    stop("无法从 adonis2 结果中识别模型项。")
+  }
+  idx[1]
+}
+
+get_padded_range <- function(lower_vec, upper_vec, padding = 0.08) {
+  r <- c(min(lower_vec, na.rm = TRUE), max(upper_vec, na.rm = TRUE))
+  d <- diff(r)
+  if (is.na(d) || d == 0) d <- max(abs(r), 1e-6)
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+# =========================
+# 6. 读取 metadata、Bray、NMDS、scores
+# =========================
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+species_col <- pick_col(
+  c("host_species", "Host_species", "species", "hostSpecies"),
+  colnames(meta),
+  "host_species"
+)
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = clean_value(.data[[sample_col]]),
+    host_family = clean_value(.data[[family_col]]),
+    host_species_raw = clean_value(.data[[species_col]])
+  ) %>%
+  mutate(
+    host_species_key = normalize_species_key(host_species_raw)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    !is.na(host_species_key),
+    host_species_key %in% species_order_key
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  mutate(
+    host_family_cn = unname(family_map_cn[host_family]),
+    host_species_cn = unname(species_cn_map[host_species_key]),
+    host_species_cn = factor(host_species_cn, levels = unname(species_cn_map[species_order_key])),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+bray <- readRDS(bray_rds)
+nmds <- readRDS(nmds_rds)
+nmds_scores <- read.csv(score_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+if (!all(c("sample_id", "NMDS1", "NMDS2") %in% colnames(nmds_scores))) {
+  stop("NMDS scores 文件缺少 sample_id / NMDS1 / NMDS2 列。")
+}
+
+bray_labels <- attr(bray, "Labels")
+if (is.null(bray_labels)) stop("Bray-Curtis 距离矩阵没有 Labels。")
+
+# 对齐 metadata 与 Bray labels
+meta_bray <- meta2[match(bray_labels, meta2$sample_id), ]
+if (any(is.na(meta_bray$sample_id)) || !all(meta_bray$sample_id == bray_labels)) {
+  stop("metadata 与 Bray-Curtis 距离矩阵样本顺序匹配失败。")
+}
+
+# 合并 NMDS scores 与 metadata
+plot_df <- nmds_scores %>%
+  select(sample_id, NMDS1, NMDS2) %>%
+  left_join(meta2, by = "sample_id") %>%
+  filter(
+    !is.na(host_species_key),
+    host_species_key %in% species_order_key
+  ) %>%
+  mutate(
+    host_species_key = factor(host_species_key, levels = species_order_key),
+    host_species_cn = factor(host_species_cn, levels = unname(species_cn_map[species_order_key])),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+write.csv(plot_df, plot_data_csv, row.names = FALSE)
+
+cat("NMDS scores 样本数（宿主物种有效样本）：", nrow(plot_df), "\n", sep = "")
+cat("宿主物种数：", length(unique(plot_df$host_species_key)), "\n", sep = "")
+
+# =========================
+# 7. 宿主物种 Adonis / betadisper
+#    已有则读；没有则基于已有 Bray 计算一次并保存
+# =========================
+all_stat_files_exist <- all(file.exists(c(adonis_csv, betadisper_anova_csv, betadisper_perm_csv)))
+
+if (all_stat_files_exist) {
+  cat("读取已存在的宿主物种 Adonis / betadisper 结果，不重复计算。\n")
+  adonis_df <- read.csv(adonis_csv, stringsAsFactors = FALSE, check.names = FALSE)
+  bd_anova <- read.csv(betadisper_anova_csv, stringsAsFactors = FALSE, check.names = FALSE)
+  bd_perm_df <- read.csv(betadisper_perm_csv, stringsAsFactors = FALSE, check.names = FALSE)
+} else {
+  cat("宿主物种 Adonis / betadisper 结果文件不存在，将基于已保存 Bray-Curtis 距离矩阵计算一次。\n")
+
+  adonis_res <- adonis2(
+    bray ~ host_species_key,
+    data = meta_bray,
+    permutations = 999
+  )
+
+  adonis_df <- as.data.frame(adonis_res) %>%
+    rownames_to_column("term")
+
+  write.csv(adonis_df, adonis_csv, row.names = FALSE)
+
+  bd <- betadisper(bray, group = meta_bray$host_species_key)
+
+  bd_anova <- as.data.frame(anova(bd)) %>%
+    rownames_to_column("term")
+
+  bd_perm <- permutest(bd, permutations = 999)
+  bd_perm_df <- as.data.frame(bd_perm$tab) %>%
+    rownames_to_column("term")
+
+  write.csv(bd_anova, betadisper_anova_csv, row.names = FALSE)
+  write.csv(bd_perm_df, betadisper_perm_csv, row.names = FALSE)
+}
+
+main_idx <- extract_adonis_main_row(adonis_df)
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p  <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+cat("宿主物种 ", adonis_label, "\n", sep = "")
+
+# =========================
+# 8. 计算质心与 SD（用于输出表和设定坐标范围）
+#    图中的 SD 十字条将由 ordibar(kind = "sd") 绘制
+# =========================
+centroid_df <- plot_df %>%
+  group_by(host_species_key, host_species_cn, host_family_cn) %>%
+  summarise(
+    n = n(),
+    NMDS1_mean = mean(NMDS1, na.rm = TRUE),
+    NMDS2_mean = mean(NMDS2, na.rm = TRUE),
+    NMDS1_sd = sd(NMDS1, na.rm = TRUE),
+    NMDS2_sd = sd(NMDS2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    shape = unname(species_shape_map[as.character(host_species_key)]),
+    color = unname(family_colors_cn[as.character(host_family_cn)])
+  )
+
+write.csv(centroid_df, centroid_csv, row.names = FALSE)
+
+# 根据“质心 ± SD”的范围确定坐标范围
+x_range <- get_padded_range(
+  centroid_df$NMDS1_mean - centroid_df$NMDS1_sd,
+  centroid_df$NMDS1_mean + centroid_df$NMDS1_sd,
+  padding = axis_padding
+)
+
+y_range <- get_padded_range(
+  centroid_df$NMDS2_mean - centroid_df$NMDS2_sd,
+  centroid_df$NMDS2_mean + centroid_df$NMDS2_sd,
+  padding = axis_padding
+)
+
+# =========================
+# 9. 作图函数
+# =========================
+draw_species_nmds_ordibar <- function(out_file, device = c("png", "pdf")) {
+  device <- match.arg(device)
+
+  if (device == "png") {
+    png(
+      filename = out_file,
+      width = 3400,
+      height = 2500,
+      res = 600,
+      bg = "white"
+    )
+  } else {
+    cairo_pdf(
+      filename = out_file,
+      width = 11.5,
+      height = 8.2,
+      bg = "white"
+    )
+  }
+
+  par(
+    mar = c(5.6, 5.2, 2.0, ifelse(show_species_legend, 13.5, 8.0)),
+    xpd = NA,
+    family = "CNFont"
+  )
+
+  # 先画空白 NMDS 坐标系
+  plot(
+    nmds,
+    type = "n",
+    display = "sites",
+    xlim = x_range,
+    ylim = y_range,
+    xlab = "NMDS1",
+    ylab = "NMDS2",
+    cex.lab = 1.6,
+    cex.axis = 1.1
+  )
+
+  # ordibar：按宿主物种画 SD 十字条
+  # 颜色按宿主科
+  ordibar(
+    nmds,
+    groups = plot_df$host_species_cn,
+    display = "sites",
+    kind = "sd",
+    conf = NULL,
+    label = FALSE,
+    col = unname(centroid_df$color[match(levels(plot_df$host_species_cn), centroid_df$host_species_cn)]),
+    lwd = bar_lwd
+  )
+
+  # 叠加质心点 + 中文标签
+  for (i in seq_len(nrow(centroid_df))) {
+    xi <- centroid_df$NMDS1_mean[i]
+    yi <- centroid_df$NMDS2_mean[i]
+    sp_key <- as.character(centroid_df$host_species_key[i])
+    sp_cn  <- as.character(centroid_df$host_species_cn[i])
+    fam_cn <- as.character(centroid_df$host_family_cn[i])
+
+    pch_i <- unname(species_shape_map[sp_key])
+    col_i <- unname(family_colors_cn[fam_cn])
+
+    # 对于可填充点形状 21-25，用 bg 填色
+    if (pch_i %in% 21:25) {
+      points(
+        xi, yi,
+        pch = pch_i,
+        col = col_i,
+        bg = col_i,
+        cex = point_cex,
+        lwd = 1.0
+      )
+    } else {
+      points(
+        xi, yi,
+        pch = pch_i,
+        col = col_i,
+        cex = point_cex,
+        lwd = 1.1
+      )
+    }
+
+    text(
+      x = xi + label_offset_x,
+      y = yi + label_offset_y,
+      labels = sp_cn,
+      col = col_i,
+      cex = label_cex,
+      pos = 4
+    )
+  }
+
+  # 左上角 Adonis 标注
+  x_anno <- x_range["lower"] + 0.03 * diff(x_range)
+  y_anno <- y_range["upper"] - 0.05 * diff(y_range)
+  text(
+    x = x_anno,
+    y = y_anno,
+    labels = adonis_label,
+    adj = c(0, 1),
+    cex = 1.05
+  )
+
+  # 底部 stress
+  mtext(
+    side = 1,
+    line = 3.9,
+    adj = 0,
+    text = paste0("Bray-Curtis NMDS stress = ", sprintf("%.8f", nmds$stress)),
+    cex = 1.0
+  )
+
+  # 宿主科颜色图例
+  legend(
+    "right",
+    inset = c(-0.12, 0),
+    legend = family_order_cn,
+    col = unname(family_colors_cn[family_order_cn]),
+    pt.bg = unname(family_colors_cn[family_order_cn]),
+    pch = 16,
+    pt.cex = 1.4,
+    bty = "n",
+    cex = family_legend_cex,
+    y.intersp = 1.15,
+    title = NULL
+  )
+
+  # 可选：宿主物种图例（默认关闭，避免太挤）
+  if (show_species_legend) {
+    legend(
+      "topright",
+      inset = c(-0.42, 0),
+      legend = unname(species_cn_map[species_order_key]),
+      pch = unname(species_shape_map[species_order_key]),
+      col = unname(family_colors_cn[species_family_map[species_order_key]]),
+      pt.bg = unname(family_colors_cn[species_family_map[species_order_key]]),
+      bty = "n",
+      cex = species_legend_cex,
+      ncol = 2,
+      title = NULL
+    )
+  }
+
+  dev.off()
+}
+
+# =========================
+# 10. 输出图
+# =========================
+cat("开始绘制宿主物种 NMDS ordibar 图（不重算 Bray-Curtis / NMDS）...\n")
+
+draw_species_nmds_ordibar(out_png, device = "png")
+draw_species_nmds_ordibar(out_pdf, device = "pdf")
+
+# =========================
+# 11. summary
+# =========================
+sink(summary_txt)
+
+cat("Host species NMDS ordibar summary, no-elephant version\n")
+cat("=====================================================\n\n")
+
+cat("This script did NOT recalculate Bray-Curtis distance.\n")
+cat("This script did NOT rerun NMDS.\n")
+
+if (all_stat_files_exist) {
+  cat("Host species Adonis / betadisper were read from existing files.\n")
+} else {
+  cat("Host species Adonis / betadisper were calculated ONCE from the saved Bray-Curtis distance matrix because the result files were missing.\n")
+}
+
+cat("\nInput metadata:\n", metadata_file, "\n", sep = "")
+cat("Input Bray-Curtis RDS:\n", bray_rds, "\n", sep = "")
+cat("Input NMDS RDS:\n", nmds_rds, "\n", sep = "")
+cat("Input NMDS scores CSV:\n", score_file, "\n\n", sep = "")
+
+cat("Host species Adonis CSV:\n", adonis_csv, "\n", sep = "")
+cat("Host species betadisper ANOVA CSV:\n", betadisper_anova_csv, "\n", sep = "")
+cat("Host species betadisper permutest CSV:\n", betadisper_perm_csv, "\n\n", sep = "")
+
+cat("NMDS stress:\n")
+cat(nmds$stress, "\n\n")
+
+cat("Adonis label:\n")
+cat(adonis_label, "\n\n")
+
+cat("Host species counts:\n")
+print(table(plot_df$host_species_cn))
+
+cat("\nCentroid + SD summary:\n")
+print(centroid_df)
+
+cat("\nX range:\n")
+print(x_range)
+
+cat("\nY range:\n")
+print(y_range)
+
+cat("\nOutput PNG:\n", out_png, "\n", sep = "")
+cat("Output PDF:\n", out_pdf, "\n", sep = "")
+cat("Plot data CSV:\n", plot_data_csv, "\n", sep = "")
+cat("Centroid summary CSV:\n", centroid_csv, "\n", sep = "")
+
+sink()
+
+cat("\nDone!\n")
+cat("输出图：", out_png, "\n", sep = "")
+cat("Adonis: ", adonis_label, "\n", sep = "")
+EOF
+#运行：
