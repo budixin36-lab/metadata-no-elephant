@@ -1007,3 +1007,188 @@ cat("文字摘要: ", out_summary_txt, "\n", sep = "")
 EOF
 
 Rscript scripts/16_Bos_continent_primary_lifestyle_bar_no_elephant_CN.R
+#直接在 WSL 终端运行下面这段最小修复补丁。它只替换脚本里的第 9 部分“汇总到样本和大洲水平”，不改前面已经成功的 Table S1 读取、属名匹配、颜色、排序和作图设置。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+script = Path("scripts/16_Bos_continent_primary_lifestyle_bar_no_elephant_CN.R")
+txt = script.read_text(encoding="utf-8")
+
+old = r'''## -----------------------------
+## 9. 汇总到样本和大洲水平
+## -----------------------------
+cat("汇总样本水平功能类群相对多度 ...\n")
+
+genus_long2 <- genus_long %>%
+  mutate(
+    genus_key = normalize_name(Genus)
+  ) %>%
+  left_join(
+    genus_assignment %>%
+      select(genus_key, primary_lifestyle_cn) %>%
+      distinct(),
+    by = "genus_key"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(
+      is.na(primary_lifestyle_cn) | primary_lifestyle_cn == "",
+      "未分类",
+      primary_lifestyle_cn
+    )
+  )
+
+sample_fun <- genus_long2 %>%
+  group_by(sampleid, continent_CN, primary_lifestyle_cn) %>%
+  summarise(
+    rel_abundance = sum(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 保证每个样本所有功能类群齐全
+sample_fun <- sample_fun %>%
+  complete(
+    sampleid,
+    primary_lifestyle_cn = function_order,
+    fill = list(rel_abundance = 0)
+  ) %>%
+  left_join(
+    meta %>% select(sampleid, continent_CN),
+    by = "sampleid"
+  ) %>%
+  distinct()
+
+## 按大洲求平均
+continent_mean <- sample_fun %>%
+  group_by(continent_CN, primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    continent_CN = factor(continent_order, levels = continent_order),
+    primary_lifestyle_cn = function_order,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  arrange(continent_CN, primary_lifestyle_cn)'''
+
+new = r'''## -----------------------------
+## 9. 汇总到样本和大洲水平
+## -----------------------------
+cat("汇总样本水平功能类群相对多度 ...\n")
+
+genus_long2 <- genus_long %>%
+  mutate(
+    genus_key = normalize_name(Genus)
+  ) %>%
+  left_join(
+    genus_assignment %>%
+      select(genus_key, primary_lifestyle_cn) %>%
+      distinct(),
+    by = "genus_key"
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(
+      is.na(primary_lifestyle_cn) | primary_lifestyle_cn == "",
+      "未分类",
+      primary_lifestyle_cn
+    )
+  )
+
+## 关键修复：
+## 先只按 sampleid + primary_lifestyle_cn 汇总；
+## 不在这里带 continent_CN，避免 complete() 后再 join 时生成 continent_CN.x / continent_CN.y。
+sample_fun <- genus_long2 %>%
+  group_by(sampleid, primary_lifestyle_cn) %>%
+  summarise(
+    rel_abundance = sum(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 保证每个有效样本所有功能类群齐全。
+## 使用 valid_samples，而不是 sample_fun 中已有 sampleid，避免少量全0组合缺失。
+sample_fun <- sample_fun %>%
+  complete(
+    sampleid = valid_samples,
+    primary_lifestyle_cn = function_order,
+    fill = list(rel_abundance = 0)
+  )
+
+## 只连接一次大洲信息，保证最终只有一个 continent_CN 列。
+sample_fun <- sample_fun %>%
+  left_join(
+    meta %>%
+      select(sampleid, continent_CN) %>%
+      distinct(),
+    by = "sampleid"
+  ) %>%
+  filter(
+    !is.na(continent_CN),
+    continent_CN %in% continent_order
+  ) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  distinct()
+
+if (!"continent_CN" %in% colnames(sample_fun)) {
+  stop("sample_fun 中没有 continent_CN，请检查 sampleid 与 metadata 的连接。")
+}
+
+## 每个样本的功能类群相对多度加总应接近 100。
+sample_sum_check <- sample_fun %>%
+  group_by(sampleid) %>%
+  summarise(
+    total_relative_abundance = sum(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+bad_sample_sum <- sample_sum_check %>%
+  filter(abs(total_relative_abundance - 100) > 1e-6)
+
+if (nrow(bad_sample_sum) > 0) {
+  warning(
+    "有样本功能类群相对多度加总不等于100，数量：",
+    nrow(bad_sample_sum),
+    "。请查看摘要文件中的检查结果。"
+  )
+}
+
+## 按大洲求平均
+continent_mean <- sample_fun %>%
+  group_by(continent_CN, primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    continent_CN = factor(continent_order, levels = continent_order),
+    primary_lifestyle_cn = function_order,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  arrange(continent_CN, primary_lifestyle_cn)'''
+
+if old not in txt:
+    raise SystemExit(
+        "没有找到需要替换的第9部分代码。说明当前脚本可能已经被改过。\n"
+        "请把脚本中 '## 9. 汇总到样本和大洲水平' 到 '## 10. 作图数据' 之间的内容发我。"
+    )
+
+txt = txt.replace(old, new)
+script.write_text(txt, encoding="utf-8")
+
+print("已完成第9部分最小修复：", script)
+PY
+
+Rscript scripts/16_Bos_continent_primary_lifestyle_bar_no_elephant_CN.R
