@@ -482,3 +482,450 @@ lefse_plot_res.py \
   --class_legend_font_size 11 \
   --max_feature_len 120
 #输出文件：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant/Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN.png
+#下面这版只修改宿主科 LEfSe 作图版 .res，不重跑 LEfSe 统计。它会：
+#从原始统计结果 host_family_genus_all_no_elephant.res 重新生成作图文件；
+#删除真菌属名前面的 g__；
+#把宿主科改成中文；
+#尝试按 牛科、猪科、鹿科、马科、犀科 的顺序重排结果行；
+#重新导出 PNG/PDF。
+#直接在你现在的 lefse_py39 环境里运行即可。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant
+
+python3 - <<'PY'
+from pathlib import Path
+
+src = Path("host_family_genus_all_no_elephant.res")
+dst = Path("host_family_genus_all_no_elephant_plot_CN_ordered.res")
+
+if not src.exists():
+    raise SystemExit(f"找不到原始 LEfSe 结果文件：{src}")
+
+family_map = {
+    "Bovidae": "牛科",
+    "Suidae": "猪科",
+    "Cervidae": "鹿科",
+    "Equidae": "马科",
+    "Rhinocerotidae": "犀科",
+}
+
+family_order_cn = ["牛科", "猪科", "鹿科", "马科", "犀科"]
+family_rank = {name: i for i, name in enumerate(family_order_cn)}
+
+genus_map = {
+    "Aspergillus": "曲霉属",
+    "Saccharomyces": "酵母属",
+    "Neocallimastix": "新靓鞭菌属",
+    "Sporormiella": "小荚孢腔菌属",
+    "Cladonia": "石蕊属",
+    "Cortinarius": "丝膜菌属",
+    "Sordaria": "粪壳属",
+    "Preussia": "光黑壳属",
+    "Thelebolus": "寡囊盘菌属",
+    "Wallemia": "节担菌属",
+    "Khoyollomyces": "Khoyollomyces",
+    "Vishniacozyma": "维希尼克酵母属",
+    "Ascochyta": "壳二孢菌属",
+    "Caecomyces": "隐菌属",
+    "Cladosporium": "枝孢属",
+    "Kazachstania": "哈萨克酵母属",
+    "Penicillium": "青霉属",
+    "Naganishia": "永西酵母属",
+    "Fusarium": "镰孢属",
+    "Cutaneotrichosporon": "皮肤丝孢酵母属",
+    "Trichosporon": "丝孢酵母属",
+    "Trichoderma": "木霉属",
+    "Mucor": "毛霉属",
+    "Rhizopogon": "须腹菌属",
+    "Candida": "假丝酵母属",
+    "Alternaria": "链格孢属",
+    "Ascobolus": "粪盘菌属",
+    "Cheilymenia": "缘刺盘菌属",
+    "Pyrenochaetopsis": "拟棘壳孢属",
+    "Piromyces": "梨壶菌属",
+    "Orpinomyces": "根囊鞭菌属",
+    "Symmetrospora": "对称孢属",
+    "Monascus": "红曲霉属",
+    "Ustilago": "黑粉菌属",
+    "Parascaedosporium": "近赛多孢属",
+    "Neoascochyta": "新壳二孢菌属",
+    "Furcasterigmium": "叉梗壳属",
+    "Pecoramyces": "Pecoramyces",
+    "Feramyces": "Feramyces",
+    "Xeromyces": "Xeromyces",
+    "Oligophagozyma": "Oligophagozyma",
+    "Hanseniaspora": "有孢汉逊酵母属",
+    "Tausonia": "Tausonia",
+
+    # 分类地位未定属 / 类群
+    "Fungi_gen_Incertae_sedis": "真菌属分类地位未定类群",
+    "Fungi_gen_Insertae_sedis": "真菌属分类地位未定类群",
+
+    "Neocallimastigaceae_gen_Incertae_sedis": "新靓鞭菌科分类地位未定属",
+    "Neocallimastigaceae_gen_Insertae_sedis": "新靓鞭菌科分类地位未定属",
+
+    "Agaricales_gen_Incertae_sedis": "蘑菇目分类地位未定属",
+    "Agaricales_gen_Insertae_sedis": "蘑菇目分类地位未定属",
+
+    "Sordariales_gen_Incertae_sedis": "粪壳目分类地位未定属",
+    "Sordariales_gen_Insertae_sedis": "粪壳目分类地位未定属",
+
+    "Agaricomycetes_gen_Incertae_sedis": "蘑菇纲分类地位未定属",
+    "Agaricomycetes_gen_Insertae_sedis": "蘑菇纲分类地位未定属",
+
+    "Ascomycota_gen_Incertae_sedis": "子囊菌门分类地位未定属",
+    "Ascomycota_gen_Insertae_sedis": "子囊菌门分类地位未定属",
+
+    "Pleosporales_gen_Incertae_sedis": "格孢腔菌目分类地位未定属",
+    "Pleosporales_gen_Insertae_sedis": "格孢腔菌目分类地位未定属",
+
+    "Onygenales_gen_Incertae_sedis": "爪甲团囊菌目分类地位未定属",
+    "Onygenales_gen_Insertae_sedis": "爪甲团囊菌目分类地位未定属",
+
+    "Neocallimastigomycota_gen_Incertae_sedis": "新靓鞭菌门分类地位未定属",
+    "Neocallimastigomycota_gen_Insertae_sedis": "新靓鞭菌门分类地位未定属",
+
+    "Pezizales_gen_Incertae_sedis": "盘菌目分类地位未定属",
+    "Pezizales_gen_Insertae_sedis": "盘菌目分类地位未定属",
+}
+
+def translate_feature(feature: str) -> str:
+    f = feature.strip()
+
+    # 去掉常见 LEfSe 前缀
+    for prefix in ["k__Fungi|g__", "k__Fungi.g__", "k__Fungi|", "g__"]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+
+    # 精确翻译
+    if f in genus_map:
+        return genus_map[f]
+
+    # 有些旧文件可能已经是 g__中文，去掉 g__
+    if f.startswith("g__"):
+        f = f[3:]
+
+    return f
+
+rows = []
+with src.open("r", encoding="utf-8", errors="ignore") as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        # LEfSe res 通常至少 5 列：
+        # feature, ?, enriched_group, LDA_score, p_value
+        if len(parts) >= 3:
+            parts[0] = translate_feature(parts[0])
+
+            if parts[2] in family_map:
+                parts[2] = family_map[parts[2]]
+
+        rows.append(parts)
+
+def get_sort_key(parts):
+    group = parts[2] if len(parts) >= 3 else ""
+    lda = None
+
+    # 你的 LEfSe .res 中第4列通常是 LDA score
+    if len(parts) >= 4:
+        try:
+            lda = float(parts[3])
+        except Exception:
+            lda = None
+
+    return (
+        family_rank.get(group, 999),
+        -(lda if lda is not None else -999)
+    )
+
+# 只对有富集组的行排序；没有富集组的行放后面
+rows_sorted = sorted(rows, key=get_sort_key)
+
+with dst.open("w", encoding="utf-8") as out:
+    for parts in rows_sorted:
+        out.write("\t".join(parts) + "\n")
+
+print(f"已生成：{dst}")
+print("已删除左侧特征名前的 g__ 前缀。")
+print("已尝试按宿主科顺序重排：牛科、猪科、鹿科、马科、犀科。")
+PY
+#然后重新导出图：
+export MPLCONFIGDIR=$(pwd)/mpl_config
+export MPLBACKEND=Agg
+
+lefse_plot_res.py \
+  host_family_genus_all_no_elephant_plot_CN_ordered.res \
+  Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered.pdf \
+  --format pdf \
+  --width 10 \
+  --left_space 0.45 \
+  --right_space 0.03 \
+  --feature_font_size 11 \
+  --class_legend_font_size 11 \
+  --max_feature_len 120
+
+lefse_plot_res.py \
+  host_family_genus_all_no_elephant_plot_CN_ordered.res \
+  Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered.png \
+  --format png \
+  --dpi 600 \
+  --width 10 \
+  --left_space 0.45 \
+  --right_space 0.03 \
+  --feature_font_size 11 \
+  --class_legend_font_size 11 \
+  --max_feature_len 120
+#下面这版不再改 lefse_plot_res.py 本体，而是用 Python/matplotlib 复刻 LEfSe 横向 LDA score 图风格。这样能稳定控制：
+#真菌属名前没有 g__；
+#图例顺序固定为 牛科、猪科、鹿科、马科、犀科；
+#柱子也按 牛科、猪科、鹿科、马科、犀科 分组排列；
+#字号、左边距、图例字号都能继续调；
+#不重跑 LEfSe 统计，只读取已经生成的 .res。
+#直接在当前 lefse_py39 环境、当前结果目录运行。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant
+
+cat > plot_host_family_lefse_CN_ordered.py <<'PY'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Plot host-family LEfSe LDA score figure with fixed Chinese legend order.
+
+Input:
+  host_family_genus_all_no_elephant_plot_CN_ordered.res
+
+Output:
+  Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png
+  Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.pdf
+
+This script does NOT rerun LEfSe.
+It only replots the existing .res result in a LEfSe-like horizontal bar style.
+"""
+
+from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# -----------------------------
+# 1. paths
+# -----------------------------
+res_file = Path("host_family_genus_all_no_elephant_plot_CN_ordered.res")
+
+out_png = Path("Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png")
+out_pdf = Path("Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.pdf")
+out_csv = Path("Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_plot_data.csv")
+
+if not res_file.exists():
+    raise SystemExit(f"找不到输入文件：{res_file}")
+
+# -----------------------------
+# 2. font
+# -----------------------------
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# -----------------------------
+# 3. fixed order and colors
+# -----------------------------
+family_order = ["牛科", "猪科", "鹿科", "马科", "犀科"]
+
+# 尽量沿用你当前 LEfSe 图中各宿主科的颜色对应关系：
+# 牛科红色，猪科蓝色，鹿科青色，马科紫色，犀科绿色
+family_colors = {
+    "牛科": "#ff0000",
+    "猪科": "#0000ff",
+    "鹿科": "#14b8b8",
+    "马科": "#bf00bf",
+    "犀科": "#008000",
+}
+
+# -----------------------------
+# 4. read LEfSe .res
+# -----------------------------
+rows = []
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        # LEfSe .res 常见列：
+        # V1 = feature
+        # V2 = raw score / mean
+        # V3 = enriched group
+        # V4 = LDA score
+        # V5 = p value
+        if len(parts) < 4:
+            continue
+
+        feature = parts[0].strip()
+        group = parts[2].strip()
+
+        # 只保留有宿主科富集组的行
+        if group not in family_order:
+            continue
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        # 只画 LDA > 4 的最终差异属
+        if lda < 4.0:
+            continue
+
+        # 去掉可能残留的 g__ 前缀
+        if feature.startswith("g__"):
+            feature = feature[3:]
+
+        rows.append({
+            "feature": feature,
+            "group": group,
+            "lda": lda,
+        })
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带宿主科富集组的结果，请检查 .res 文件。")
+
+# 按固定宿主科顺序分组；组内按 LDA 从高到低
+rows_sorted = []
+for fam in family_order:
+    sub = [r for r in rows if r["group"] == fam]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# 输出作图数据，方便核对
+with out_csv.open("w", encoding="utf-8") as f:
+    f.write("feature,group,LDA_score\n")
+    for r in rows_sorted:
+        f.write(f'{r["feature"]},{r["group"]},{r["lda"]}\n')
+
+# -----------------------------
+# 5. plot
+# -----------------------------
+features = [r["feature"] for r in rows_sorted]
+groups = [r["group"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [family_colors[g] for g in groups]
+
+n = len(rows_sorted)
+
+# 宿主科图只有 14 个属，高度不需要太高
+fig_width = 11.0
+fig_height = max(5.5, n * 0.34 + 1.6)
+
+fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=1.0,
+    height=0.78,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=13)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=13)
+
+xmax = max(ldas)
+x_upper = max(5.2, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=13)
+ax.tick_params(axis="y", length=0)
+
+# 只保留类似 LEfSe 的纵向网格线
+ax.grid(axis="x", color="black", linewidth=0.9)
+ax.grid(axis="y", visible=False)
+
+# 边框风格尽量接近 LEfSe 图
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+# 图例：强制顺序为 牛科、猪科、鹿科、马科、犀科
+legend_handles = [
+    Patch(facecolor=family_colors[fam], edgecolor="black", label=fam)
+    for fam in family_order
+]
+
+legend = ax.legend(
+    handles=legend_handles,
+    labels=family_order,
+    loc="upper center",
+    bbox_to_anchor=(0.5, 1.13),
+    ncol=5,
+    frameon=False,
+    prop=font_prop,
+    fontsize=13,
+    handlelength=1.8,
+    columnspacing=1.8,
+)
+
+# 手动设置 legend 文字字号
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(13)
+
+plt.subplots_adjust(
+    left=0.34,
+    right=0.98,
+    top=0.82,
+    bottom=0.13
+)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print("Legend order:", "、".join(family_order))
+PY
+
+python3 plot_host_family_lefse_CN_ordered.py
+#输出新图是：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_LEfSe_all_genera_no_elephant/Fig3_10_host_family_LEfSe_LDA_score_no_elephant_CN_ordered_fixed.png
+#这版已经不是直接调用 lefse_plot_res.py，但图形样式会尽量贴近你当前能接受的 LEfSe 图，同时可以稳定控制宿主科顺序。先看这张，如果整体版式可以，宿主物种图我就按这套 Python 绘图逻辑继续做。
