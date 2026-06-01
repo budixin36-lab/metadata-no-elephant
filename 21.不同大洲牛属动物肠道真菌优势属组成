@@ -1,0 +1,1541 @@
+#下面这版是完整脚本：重新计算 Bos 大洲子集的属水平平均相对多度、筛选 Top20 优势属、生成弦图矩阵和来源组成表，并绘制图4-3弦图。版式参考你第三章最终弦图的中文径向标签版，包括 circlize、径向标签、属侧来源组成条、PNG 600 dpi 白底、showtext_opts(dpi = 600) 等设置。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+mkdir -p scripts
+
+cat > scripts/15_Bos_continent_top20_genus_chord_no_elephant_CN.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 15_Bos_continent_top20_genus_chord_no_elephant_CN.R
+##
+## 第四章 图4-3：
+## 不同大洲牛属动物肠道真菌 Top20 优势属组成弦图
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. 已筛选好的 Bos 大洲 metadata：
+##      results/chapter4_Bos_continent_no_elephant/Bos_continent_filtered_metadata_no_elephant.csv
+##
+##   2. 属水平丰度表：
+##      taxonomy/genus_abundance_table_no_elephant.tsv
+##
+## 分组：
+##   continent_CN
+##
+## 固定大洲顺序：
+##   亚洲 → 欧洲 → 非洲 → 北美洲
+##
+## 统计口径：
+##   1. 先计算每个样本内属水平相对多度；
+##   2. 再按大洲计算平均相对多度；
+##   3. 按四个大洲平均相对多度之和选择 Top20 优势属；
+##   4. 弦宽表示“大洲 × 属”的平均相对多度；
+##   5. min_link_value 以下的极小连线不画。
+##
+## 不做：
+##   不重新筛选 Bos；
+##   不重新剔除 South America；
+##   不重新生成 taxonomy；
+##   不覆盖第三章图。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R 包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tidyr",
+  "readr",
+  "tibble",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(tibble)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/msyh.ttc 或 simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+filtered_metadata_file <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_no_elephant",
+  "Bos_continent_filtered_metadata_no_elephant.csv"
+)
+
+genus_table_file <- file.path(
+  base_dir,
+  "taxonomy",
+  "genus_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_chord_png <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels.png"
+)
+
+out_chord_pdf <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels.pdf"
+)
+
+out_all_genus_mean <- file.path(
+  out_dir,
+  "Bos_continent_genus_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+out_top20_list <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_list_no_elephant_CN.csv"
+)
+
+out_chord_matrix <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_chord_matrix_no_elephant_CN.csv"
+)
+
+out_chord_matrix_minlink <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv"
+)
+
+out_source_composition <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_source_composition_for_chord_no_elephant_CN.csv"
+)
+
+out_sample_counts <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_chord_sample_counts_no_elephant.csv"
+)
+
+out_untranslated <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_untranslated_names_no_elephant.csv"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_log.txt"
+)
+
+if (!file.exists(filtered_metadata_file)) {
+  stop("找不到 Bos 大洲过滤 metadata：", filtered_metadata_file)
+}
+
+if (!file.exists(genus_table_file)) {
+  stop("找不到属水平丰度表：", genus_table_file)
+}
+
+cat("输入 metadata：", filtered_metadata_file, "\n", sep = "")
+cat("输入 genus table：", genus_table_file, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+continent_order_cn <- c("亚洲", "欧洲", "非洲", "北美洲")
+
+## Top20 优势属
+top_n_genus <- 20
+
+## 极小弦过滤阈值：平均相对多度 < 0.01% 的连线不画
+min_link_value <- 0.01
+
+## =========================
+## 4. 中文映射
+## =========================
+genus_cn_map <- c(
+  "Kazachstania" = "哈萨克酵母属",
+  "Aspergillus" = "曲霉属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Cladonia" = "石蕊属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Cortinarius" = "丝膜菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属",
+  "Candida" = "假丝酵母属",
+  "Pichia" = "毕赤酵母属",
+  "Cyberlindnera" = "赛伯林德纳氏酵母属",
+  "Debaryomyces" = "德巴利酵母属",
+  "Malassezia" = "马拉色菌属",
+  "Acremonium" = "枝顶孢属",
+  "Trichosporon" = "毛孢子菌属",
+  "Mucor" = "毛霉属",
+  "Rhizopus" = "根霉属",
+  "Rhizomucor" = "根毛霉属",
+  "Lichtheimia" = "横梗霉属",
+  "Absidia" = "犁头霉属",
+  "Mortierella" = "被孢霉属",
+  "Piromyces" = "梨囊鞭菌属",
+  "Anaeromyces" = "厌氧鞭菌属",
+  "Orpinomyces" = "奥平鞭菌属"
+)
+
+to_cn <- function(x, map_vec) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(map_vec)
+  x2[hit] <- unname(map_vec[x2[hit]])
+  x2
+}
+
+## =========================
+## 5. 颜色设置
+## =========================
+continent_colors <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "北美洲" = "#F39B7F"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 6. 工具函数：刻度
+## =========================
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else if (xmax >= 5) {
+    at <- c(0, round(xmax / 2, 1), xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 7. 读取 Bos 大洲 metadata
+## =========================
+message("读取 Bos 大洲过滤 metadata ...")
+
+meta <- read_csv(
+  filtered_metadata_file,
+  show_col_types = FALSE
+)
+
+needed_meta_cols <- c("sample_id", "continent_CN")
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "Bos 大洲过滤 metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    continent_CN = as.character(continent_CN)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(continent_CN),
+    continent_CN != "",
+    continent_CN %in% continent_order_cn
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels = continent_order_cn)
+
+sample_counts <- meta2 %>%
+  count(continent_CN, name = "n_samples") %>%
+  tidyr::complete(
+    continent_CN = factor(continent_order_cn, levels = continent_order_cn),
+    fill = list(n_samples = 0)
+  ) %>%
+  arrange(continent_CN)
+
+write_csv(sample_counts, out_sample_counts)
+
+message("Bos metadata 样本数：", nrow(meta2))
+
+## =========================
+## 8. 读取属水平丰度表
+## =========================
+message("读取 genus abundance table ...")
+
+genus_tab <- read.delim(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+tax_col <- colnames(genus_tab)[1]
+
+genus_long <- genus_tab %>%
+  rename(genus = all_of(tax_col)) %>%
+  pivot_longer(
+    cols = -genus,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    genus = as.character(genus),
+    abundance = suppressWarnings(as.numeric(abundance)),
+    abundance = ifelse(is.na(abundance), 0, abundance)
+  ) %>%
+  inner_join(meta2, by = "sample_id")
+
+matched_samples <- n_distinct(genus_long$sample_id)
+
+message("匹配到 genus 表的 Bos 样本数：", matched_samples)
+
+if (matched_samples < 10) {
+  stop("匹配到的样本数过少，请检查 sample_id 是否一致。当前匹配样本数：", matched_samples)
+}
+
+## =========================
+## 9. 计算样本内相对多度，再按大洲平均
+## =========================
+message("计算样本内属水平相对多度，并按大洲求平均 ...")
+
+sample_total <- genus_long %>%
+  group_by(sample_id) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+genus_rel <- genus_long %>%
+  left_join(sample_total, by = "sample_id") %>%
+  filter(total_abundance > 0) %>%
+  mutate(
+    rel_abundance = abundance / total_abundance * 100
+  )
+
+continent_genus_mean <- genus_rel %>%
+  group_by(continent_CN, genus) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    genus_cn = to_cn(genus, genus_cn_map)
+  )
+
+## 补齐大洲 × 属组合
+all_genera <- sort(unique(continent_genus_mean$genus))
+
+continent_genus_mean_full <- expand.grid(
+  continent_CN = continent_order_cn,
+  genus = all_genera,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    continent_genus_mean %>%
+      select(continent_CN, genus, genus_cn, mean_relative_abundance),
+    by = c("continent_CN", "genus")
+  ) %>%
+  mutate(
+    mean_relative_abundance = ifelse(
+      is.na(mean_relative_abundance),
+      0,
+      mean_relative_abundance
+    ),
+    genus_cn = ifelse(
+      is.na(genus_cn),
+      to_cn(genus, genus_cn_map),
+      genus_cn
+    )
+  )
+
+write_csv(continent_genus_mean_full, out_all_genus_mean)
+
+## =========================
+## 10. 筛选 Top20 属
+## =========================
+message("筛选 Top20 优势属 ...")
+
+top20_genus <- continent_genus_mean_full %>%
+  group_by(genus, genus_cn) %>%
+  summarise(
+    sum_mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    mean_of_continent_means = mean(mean_relative_abundance, na.rm = TRUE),
+    max_mean_relative_abundance = max(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(sum_mean_relative_abundance), genus) %>%
+  slice_head(n = top_n_genus)
+
+write_csv(top20_genus, out_top20_list)
+
+top_genus_order_en <- top20_genus$genus
+top_genus_order_cn <- top20_genus$genus_cn
+
+## 未翻译属名
+untranslated <- top20_genus %>%
+  filter(genus == genus_cn) %>%
+  select(genus, genus_cn, sum_mean_relative_abundance)
+
+write_csv(untranslated, out_untranslated)
+
+## =========================
+## 11. 构建弦图矩阵：大洲 × Top20 属
+## =========================
+message("构建弦图矩阵 ...")
+
+chord_df <- continent_genus_mean_full %>%
+  filter(genus %in% top_genus_order_en) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order_cn),
+    genus = factor(genus, levels = top_genus_order_en),
+    genus_cn = factor(genus_cn, levels = top_genus_order_cn)
+  ) %>%
+  arrange(continent_CN, genus)
+
+mat_wide <- chord_df %>%
+  select(continent_CN, genus_cn, mean_relative_abundance) %>%
+  tidyr::pivot_wider(
+    names_from = genus_cn,
+    values_from = mean_relative_abundance,
+    values_fill = 0
+  ) %>%
+  arrange(factor(continent_CN, levels = continent_order_cn))
+
+mat <- as.matrix(mat_wide[, setdiff(colnames(mat_wide), "continent_CN"), drop = FALSE])
+rownames(mat) <- mat_wide$continent_CN
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 保存未过滤矩阵
+write.csv(
+  as.data.frame(mat) %>% rownames_to_column("大洲"),
+  out_chord_matrix,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## 极小连线过滤
+mat_plot <- mat
+mat_plot[mat_plot < min_link_value] <- 0
+
+## 去掉全0行列，理论上行不会全0
+mat_plot <- mat_plot[rowSums(mat_plot) > 0, , drop = FALSE]
+mat_plot <- mat_plot[, colSums(mat_plot) > 0, drop = FALSE]
+
+continent_order_plot_cn <- rownames(mat_plot)
+genus_order_plot_cn <- colnames(mat_plot)
+
+write.csv(
+  as.data.frame(mat_plot) %>% rownames_to_column("大洲"),
+  out_chord_matrix_minlink,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (nrow(mat_plot) < 2 || ncol(mat_plot) < 2) {
+  stop("min_link_value 过滤后可绘制的大洲或属过少，请降低 min_link_value。")
+}
+
+## =========================
+## 12. 属侧来源组成表
+## =========================
+## 每个属由各大洲贡献的比例，用于属扇区内侧色条
+genus_source_prop <- apply(mat_plot, 2, function(x) {
+  if (sum(x) == 0) {
+    rep(0, length(x))
+  } else {
+    x / sum(x)
+  }
+})
+
+genus_source_prop <- as.matrix(genus_source_prop)
+rownames(genus_source_prop) <- rownames(mat_plot)
+
+write.csv(
+  as.data.frame(t(genus_source_prop)) %>% rownames_to_column("属"),
+  out_source_composition,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 13. 弦图函数
+## =========================
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 11.5,
+      height = 11.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_plot_cn)),
+    genus_order_plot_cn
+  )
+
+  grid_cols <- c(
+    genus_colors[genus_order_plot_cn],
+    continent_colors[continent_order_plot_cn]
+  )
+
+  link_col_mat <- matrix(
+    NA,
+    nrow = nrow(mat_plot),
+    ncol = ncol(mat_plot)
+  )
+
+  rownames(link_col_mat) <- rownames(mat_plot)
+  colnames(link_col_mat) <- colnames(mat_plot)
+
+  for (g in genus_order_plot_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(
+      genus_colors[g],
+      transparency = 0.45
+    )
+  }
+
+  n_continent <- length(continent_order_plot_cn)
+  n_genus <- length(genus_order_plot_cn)
+
+  ## 参考第三章最终图：先属，后分组
+  sector_order <- c(genus_order_plot_cn, continent_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4, n_continent - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.36, 1.36),
+    canvas.ylim = c(-1.36, 1.36),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.035,
+    preAllocateTracks = list(
+      list(track.height = 0.135),
+      list(track.height = 0.030)
+    )
+  )
+
+  ## Track 1: 刻度 + 径向标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      axis_h <- 0.08
+
+      at <- nice_axis_at(
+        sector,
+        xlim[2],
+        drop_sectors = character(0)
+      )
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.45
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.42),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          ## 端点数字略往内部移动，避免裁剪
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.018 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.028 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.34,
+            col = "grey25"
+          )
+        }
+      }
+
+      ## 大洲和属都用同方向径向标签，沿用第三章最终样式
+      if (sector %in% continent_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.92,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.54,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.64,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧大洲贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_plot_cn) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[continent_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (ct in names(prop)) {
+            w <- total_width * prop[ct]
+
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start,
+                0,
+                start + w,
+                1,
+                col = continent_colors[ct],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 14. 输出图
+## =========================
+message("绘制弦图 ...")
+
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+## =========================
+## 15. log
+## =========================
+sink(out_log)
+
+cat("Fig4-3 Bos continent Top20 genus chord plot\n")
+cat("===========================================\n\n")
+
+cat("Input files:\n")
+cat("Filtered Bos metadata:", filtered_metadata_file, "\n")
+cat("Genus abundance table:", genus_table_file, "\n\n")
+
+cat("Analysis logic:\n")
+cat("Use already filtered Bos continent metadata from Fig4-1.\n")
+cat("Calculate sample-level genus relative abundance first, then average by continent.\n")
+cat("Top20 genera selected by sum of mean relative abundance across continents.\n")
+cat("Chord width represents continent × genus mean relative abundance.\n")
+cat("Links smaller than min_link_value are set to zero for plotting.\n\n")
+
+cat("Fixed continent order:\n")
+print(continent_order_cn)
+
+cat("\nmin_link_value:", min_link_value, "\n")
+cat("Top N genus:", top_n_genus, "\n")
+
+cat("\nSample counts:\n")
+print(sample_counts)
+
+cat("\nMatched samples in genus table:", matched_samples, "\n")
+
+cat("\nTop20 genera:\n")
+print(top20_genus)
+
+cat("\nUntranslated Top20 genera:\n")
+print(untranslated)
+
+cat("\nChord matrix before min-link filtering:\n")
+print(as.data.frame(mat) %>% rownames_to_column("大洲"))
+
+cat("\nChord matrix after min-link filtering:\n")
+print(as.data.frame(mat_plot) %>% rownames_to_column("大洲"))
+
+cat("\nGenus source composition:\n")
+print(as.data.frame(t(genus_source_prop)) %>% rownames_to_column("属"))
+
+cat("\nOutput files:\n")
+cat("PNG:", out_chord_png, "\n")
+cat("PDF:", out_chord_pdf, "\n")
+cat("All genus mean:", out_all_genus_mean, "\n")
+cat("Top20 list:", out_top20_list, "\n")
+cat("Chord matrix:", out_chord_matrix, "\n")
+cat("Chord matrix minlink:", out_chord_matrix_minlink, "\n")
+cat("Source composition:", out_source_composition, "\n")
+cat("Sample counts:", out_sample_counts, "\n")
+cat("Untranslated genera:", out_untranslated, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Top20 list:\n", out_top20_list, "\n", sep = "")
+cat("Chord matrix:\n", out_chord_matrix_minlink, "\n", sep = "")
+cat("Source composition:\n", out_source_composition, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+
+EOF
+
+Rscript scripts/15_Bos_continent_top20_genus_chord_no_elephant_CN.R
+#只重画弦图，不重新计算 Top20 属和相对多度矩阵。也就是说，直接读取上一版已经生成的：
+#Bos_continent_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv
+#和Bos_continent_top20_genus_source_composition_for_chord_no_elephant_CN.csv
+#然后只做两件事：
+#按你查到的译名替换属名；
+#放大弦图中的大洲名、属名和刻度字体。
+#这样不会改变弦宽、Top20 属筛选结果、相对多度计算结果，也不会覆盖旧图。版式仍然沿用你发来的第三章最终径向标签弦图风格。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/15b_redraw_Bos_continent_top20_genus_chord_CN_label_fontfix.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 15b_redraw_Bos_continent_top20_genus_chord_CN_label_fontfix.R
+##
+## 图4-3 不同大洲牛属动物肠道真菌 Top20 优势属组成弦图
+##
+## 只重画图，不重新计算：
+##   1. 不重新筛选 Bos 样本
+##   2. 不重新计算样本内相对多度
+##   3. 不重新筛选 Top20 属
+##   4. 不改变弦宽矩阵数值
+##
+## 本脚本只做：
+##   1. 根据用户查到的译名补充中文属名
+##   2. 整体放大弦图文字
+##   3. 输出新文件，不覆盖旧图
+##
+## 输入：
+##   Bos_continent_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv
+##   Bos_continent_top20_genus_source_composition_for_chord_no_elephant_CN.csv
+##
+## 输出：
+##   Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_name_fontfix.png
+##   Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_name_fontfix.pdf
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## =========================
+## 0. R 包路径与依赖
+## =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tibble",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/msyh.ttc 或 simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_no_elephant"
+)
+
+mat_input <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv"
+)
+
+source_input <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_source_composition_for_chord_no_elephant_CN.csv"
+)
+
+if (!file.exists(mat_input)) {
+  stop("找不到已有弦图矩阵：", mat_input)
+}
+
+if (!file.exists(source_input)) {
+  stop("找不到已有属侧来源组成表：", source_input)
+}
+
+out_chord_png <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_name_fontfix.png"
+)
+
+out_chord_pdf <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_name_fontfix.pdf"
+)
+
+out_matrix_fixed <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN_name_fontfix.csv"
+)
+
+out_source_fixed <- file.path(
+  out_dir,
+  "Bos_continent_top20_genus_source_composition_for_chord_no_elephant_CN_name_fontfix.csv"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_top20_genus_chord_no_elephant_CN_radial_labels_name_fontfix_log.txt"
+)
+
+cat("输入矩阵：", mat_input, "\n", sep = "")
+cat("输入属侧来源组成表：", source_input, "\n", sep = "")
+
+## =========================
+## 3. 固定顺序与颜色
+## =========================
+continent_order_cn <- c("亚洲", "欧洲", "非洲", "北美洲")
+
+continent_colors <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "北美洲" = "#F39B7F"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 4. 补充中文属名
+## =========================
+## 左侧是上一版图/矩阵中可能出现的名称；
+## 右侧是这次要替换成的显示名称。
+genus_rename_map <- c(
+  "Agaricales_gen_Incertae_sedis" = "蘑菇目分类地位未定属",
+  "Neoascochyta" = "新壳二胞菌属",
+  "Neocallimastigaceae_gen_Incertae_sedis" = "新靓鞭菌科",
+  "Furcasterigmium" = "叉梗壳属",
+  "Phaeosphaeriaceae_gen_Incertae_sedis" = "暗球腔菌科分类地位未定属",
+  "Neocallimastigomycota_gen_Incertae_sedis" = "新靓鞭菌门分类地位未定属",
+  "Ascobolus" = "粪盘菌属"
+)
+
+rename_genus <- function(x) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(genus_rename_map)
+  x2[hit] <- unname(genus_rename_map[x2[hit]])
+  x2
+}
+
+## =========================
+## 5. 工具函数：刻度
+## =========================
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else if (xmax >= 5) {
+    at <- c(0, round(xmax / 2, 1), xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 6. 读取已有矩阵，只改名称
+## =========================
+mat_df <- read.csv(
+  mat_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"大洲" %in% colnames(mat_df)) {
+  colnames(mat_df)[1] <- "大洲"
+}
+
+## 固定大洲顺序
+missing_ct <- setdiff(continent_order_cn, mat_df$大洲)
+if (length(missing_ct) > 0) {
+  stop("矩阵缺少以下大洲：", paste(missing_ct, collapse = ", "))
+}
+
+mat_df <- mat_df[match(continent_order_cn, mat_df$大洲), , drop = FALSE]
+
+old_genus_names <- setdiff(colnames(mat_df), "大洲")
+new_genus_names <- rename_genus(old_genus_names)
+
+mat <- as.matrix(mat_df[, old_genus_names, drop = FALSE])
+rownames(mat) <- mat_df$大洲
+colnames(mat) <- new_genus_names
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 如果替换后出现重复名称，先合并同名列
+if (any(duplicated(colnames(mat)))) {
+  mat <- rowsum(t(mat), group = colnames(mat))
+  mat <- t(mat)
+}
+
+mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+mat <- mat[, colSums(mat) > 0, drop = FALSE]
+
+continent_order_plot_cn <- rownames(mat)
+genus_order_plot_cn <- colnames(mat)
+
+write.csv(
+  as.data.frame(mat) %>% rownames_to_column("大洲"),
+  out_matrix_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 读取属侧来源组成表，只改名称并对齐
+## =========================
+source_df <- read.csv(
+  source_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"属" %in% colnames(source_df)) {
+  colnames(source_df)[1] <- "属"
+}
+
+source_df$属 <- rename_genus(source_df$属)
+
+## 如果替换后出现重复属名，数值列求和
+source_num_cols <- intersect(colnames(source_df), continent_order_cn)
+
+source_df2 <- source_df %>%
+  group_by(属) %>%
+  summarise(
+    across(all_of(source_num_cols), ~sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+source_mat <- as.matrix(
+  source_df2[, source_num_cols, drop = FALSE]
+)
+
+rownames(source_mat) <- source_df2$属
+storage.mode(source_mat) <- "numeric"
+source_mat[is.na(source_mat)] <- 0
+
+## 转成 大洲 × 属
+genus_source_prop <- t(source_mat)
+
+## 对齐矩阵中的大洲和属
+missing_source_genus <- setdiff(genus_order_plot_cn, colnames(genus_source_prop))
+
+if (length(missing_source_genus) > 0) {
+  warning(
+    "属侧来源组成表缺少以下属，将根据弦图矩阵重新计算来源组成：",
+    paste(missing_source_genus, collapse = ", ")
+  )
+
+  genus_source_prop <- apply(mat, 2, function(x) {
+    if (sum(x) == 0) {
+      rep(0, length(x))
+    } else {
+      x / sum(x)
+    }
+  })
+
+  genus_source_prop <- as.matrix(genus_source_prop)
+  rownames(genus_source_prop) <- rownames(mat)
+} else {
+  genus_source_prop <- genus_source_prop[
+    continent_order_plot_cn,
+    genus_order_plot_cn,
+    drop = FALSE
+  ]
+}
+
+write.csv(
+  as.data.frame(t(genus_source_prop)) %>% rownames_to_column("属"),
+  out_source_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 8. 弦图函数：放大字体版
+## =========================
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_plot_cn)),
+    genus_order_plot_cn
+  )
+
+  grid_cols <- c(
+    genus_colors[genus_order_plot_cn],
+    continent_colors[continent_order_plot_cn]
+  )
+
+  link_col_mat <- matrix(
+    NA,
+    nrow = nrow(mat),
+    ncol = ncol(mat)
+  )
+
+  rownames(link_col_mat) <- rownames(mat)
+  colnames(link_col_mat) <- colnames(mat)
+
+  for (g in genus_order_plot_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(
+      genus_colors[g],
+      transparency = 0.45
+    )
+  }
+
+  n_continent <- length(continent_order_plot_cn)
+  n_genus <- length(genus_order_plot_cn)
+
+  sector_order <- c(genus_order_plot_cn, continent_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4.2, n_continent - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+
+    ## 比上一版稍微放大画布，避免放大字体后标签被裁剪
+    canvas.xlim = c(-1.55, 1.55),
+    canvas.ylim = c(-1.55, 1.55),
+
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.038,
+    preAllocateTracks = list(
+      list(track.height = 0.160),
+      list(track.height = 0.032)
+    )
+  )
+
+  ## Track 1: 刻度 + 径向标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      axis_h <- 0.08
+
+      at <- nice_axis_at(
+        sector,
+        xlim[2],
+        drop_sectors = character(0)
+      )
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.50
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.45),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.020 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.030 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+
+            ## 放大刻度数字
+            cex = 0.44,
+            col = "grey25"
+          )
+        }
+      }
+
+      ## 放大大洲名和属名
+      if (sector %in% continent_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.58,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+
+          ## 原来约 0.92，这里放大
+          cex = 1.18,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+
+          ## 原来约 0.64，这里放大
+          cex = 0.78,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧大洲贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_plot_cn) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[continent_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (ct in names(prop)) {
+            w <- total_width * prop[ct]
+
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start,
+                0,
+                start + w,
+                1,
+                col = continent_colors[ct],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 9. 输出图
+## =========================
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+## =========================
+## 10. log
+## =========================
+sink(summary_txt)
+
+cat("Fig4-3 Bos continent Top20 genus chord redraw: name + font fix\n")
+cat("==============================================================\n\n")
+
+cat("This script does NOT recalculate Top20 genera or relative abundance.\n")
+cat("It only replaces selected genus names and redraws the chord plot with larger fonts.\n\n")
+
+cat("Input matrix:\n", mat_input, "\n", sep = "")
+cat("Input source composition:\n", source_input, "\n\n", sep = "")
+
+cat("Name replacements:\n")
+print(genus_rename_map)
+
+cat("\nContinent order:\n")
+print(continent_order_plot_cn)
+
+cat("\nGenus order after name replacement:\n")
+print(genus_order_plot_cn)
+
+cat("\nChord matrix used for plot:\n")
+print(as.data.frame(mat) %>% rownames_to_column("大洲"))
+
+cat("\nSource composition used for genus inner bars:\n")
+print(as.data.frame(t(genus_source_prop)) %>% rownames_to_column("属"))
+
+cat("\nOutput files:\n")
+cat("PNG:", out_chord_png, "\n")
+cat("PDF:", out_chord_pdf, "\n")
+cat("Renamed matrix:", out_matrix_fixed, "\n")
+cat("Renamed source composition:", out_source_fixed, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("没有重新计算 Top20 属或相对多度，只替换属名并放大字体。\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Renamed matrix:\n", out_matrix_fixed, "\n", sep = "")
+cat("Renamed source composition:\n", out_source_fixed, "\n", sep = "")
+cat("Log:\n", summary_txt, "\n", sep = "")
+
+EOF
+
+Rscript scripts/15b_redraw_Bos_continent_top20_genus_chord_CN_label_fontfix.R
