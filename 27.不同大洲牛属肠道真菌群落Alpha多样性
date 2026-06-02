@@ -1,0 +1,916 @@
+#下面这版是完整脚本，用于生成“不同大洲牛属动物肠道真菌群落 Alpha 多样性指数表”。它沿用你第三章最终 Alpha 脚本逻辑：SH 表计算样本水平 alpha 指数 → 按分组求均值 → one-way ANOVA → TukeyHSD → 生成字母标注表；同时保留最终修正过的 skip = 1 读取 SH abundance table 方式。
+#这次输入使用：
+#Bos Americas metadata：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#SH abundance table：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#不会使用旧 North America 版本 metadata，也不会重做 SH 注释或 taxonomy。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+mkdir -p scripts
+
+cat > scripts/17_Bos_continent_Americas_alpha_diversity_ANOVA_Tukey_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# 17_Bos_continent_Americas_alpha_diversity_ANOVA_Tukey_no_elephant.R
+#
+# 第四章：
+# 不同大洲牛属动物肠道真菌群落 Alpha 多样性指数表
+#
+# 数据版本：
+#   globalfungi_style_test_no_elephant
+#
+# 分析对象：
+#   Bos 属样本
+#   North America + South America 已合并为 Americas / 美洲
+#
+# 输入：
+#   1. Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#   2. SH_abundance_table_no_elephant.tsv
+#
+# 统计口径：
+#   1. 基于 SH abundance table 计算每个样本 alpha 多样性；
+#   2. alpha 指数包括 Observed_SH、ACE、Chao1、Shannon、Simpson；
+#   3. 论文表展示 ACE、Chao1、Shannon、Simpson；
+#   4. 按 continent_CN 分组求均值；
+#   5. one-way ANOVA + TukeyHSD；
+#   6. 表中小写字母来自 TukeyHSD，P < 0.05。
+#
+# 注意：
+#   不重新筛选 Bos；
+#   不重新生成 SH 表；
+#   不重新做 taxonomy；
+#   不使用旧 North America 版本 metadata。
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(openxlsx)
+})
+
+# -----------------------------
+# 0. 路径与参数
+# -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+continent_order <- c("亚洲", "欧洲", "非洲", "美洲")
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_SH", metrics_for_table)
+
+out_alpha_sample <- file.path(
+  out_dir,
+  "Bos_continent_Americas_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_paper_no_n_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_for_paper_no_n_no_elephant.csv"
+)
+
+out_paper_with_n_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_for_paper_with_n_no_elephant.csv"
+)
+
+out_mean_sd_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_mean_sd_detail_no_elephant.csv"
+)
+
+out_anova_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_ANOVA_no_elephant.csv"
+)
+
+out_tukey_all_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_TukeyHSD_all_no_elephant.csv"
+)
+
+out_tukey_sig_csv <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_sample_count_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_sample_count_for_alpha_no_elephant.csv"
+)
+
+out_xlsx <- file.path(
+  out_dir,
+  "Table4_x_Bos_continent_Americas_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+out_summary <- file.path(
+  out_dir,
+  "Bos_continent_Americas_alpha_analysis_summary_no_elephant.txt"
+)
+
+if (!file.exists(metadata_file)) {
+  stop("找不到 Bos Americas metadata：", metadata_file)
+}
+
+if (!file.exists(sh_table_file)) {
+  stop("找不到 SH abundance table：", sh_table_file)
+}
+
+cat("metadata_file: ", metadata_file, "\n", sep = "")
+cat("sh_table_file: ", sh_table_file, "\n", sep = "")
+
+# -----------------------------
+# 1. 工具函数
+# -----------------------------
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(p < 0.001, "<0.001", sprintf("%.4f", p))
+  )
+}
+
+sig_label <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+clean_group_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "Na", "na", "N/A", "n/a",
+    "missing", "Missing",
+    "not_recorded", "not recorded", "Not recorded",
+    "not reported", "Not reported",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA_character_
+  x
+}
+
+# ------------------------------------------------------------
+# 自写 TukeyHSD 字母标注函数
+# 不依赖 multcompView
+#
+# 表达：
+# 同列含相同小写字母表示组间差异不显著；
+# 不含相同小写字母表示组间差异显著。
+# ------------------------------------------------------------
+make_tukey_letters_no_package <- function(df, group_col, metric, alpha = 0.05) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  groups_ordered <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value)) %>%
+    pull(group) %>%
+    as.character()
+
+  if (length(groups_ordered) == 1) {
+    return(setNames("a", groups_ordered))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  sig_mat <- matrix(
+    FALSE,
+    nrow = length(groups_ordered),
+    ncol = length(groups_ordered),
+    dimnames = list(groups_ordered, groups_ordered)
+  )
+
+  for (comp in rownames(tk)) {
+    p <- tk[comp, "p adj"]
+    parts <- strsplit(comp, "-", fixed = TRUE)[[1]]
+
+    if (length(parts) == 2) {
+      g1 <- parts[1]
+      g2 <- parts[2]
+
+      if (g1 %in% groups_ordered && g2 %in% groups_ordered) {
+        if (!is.na(p) && p < alpha) {
+          sig_mat[g1, g2] <- TRUE
+          sig_mat[g2, g1] <- TRUE
+        }
+      }
+    }
+  }
+
+  letters_pool <- letters
+  group_letters <- setNames(rep("", length(groups_ordered)), groups_ordered)
+  letter_groups <- list()
+
+  # 第一步：按均值从高到低给每个组至少分配一个字母
+  for (g in groups_ordered) {
+    assigned <- FALSE
+
+    if (length(letter_groups) > 0) {
+      for (li in seq_along(letter_groups)) {
+        members <- letter_groups[[li]]
+        can_share <- all(!sig_mat[g, members])
+
+        if (can_share) {
+          letter_groups[[li]] <- c(members, g)
+          group_letters[g] <- paste0(group_letters[g], letters_pool[li])
+          assigned <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!assigned) {
+      new_i <- length(letter_groups) + 1
+
+      if (new_i > length(letters_pool)) {
+        stop("分组过多，字母池不够。")
+      }
+
+      letter_groups[[new_i]] <- g
+      group_letters[g] <- paste0(group_letters[g], letters_pool[new_i])
+    }
+  }
+
+  # 第二步：尽量让所有不显著组对共享至少一个字母
+  for (i in seq_along(groups_ordered)) {
+    for (j in seq_along(groups_ordered)) {
+      if (j <= i) next
+
+      g1 <- groups_ordered[i]
+      g2 <- groups_ordered[j]
+
+      if (!sig_mat[g1, g2]) {
+        chars1 <- unlist(strsplit(group_letters[g1], split = ""))
+        chars2 <- unlist(strsplit(group_letters[g2], split = ""))
+
+        shared <- length(intersect(chars1, chars2)) > 0
+
+        if (!shared) {
+          added <- FALSE
+
+          for (li in seq_along(letter_groups)) {
+            members <- letter_groups[[li]]
+
+            if (g1 %in% members && !(g2 %in% members)) {
+              can_add <- all(!sig_mat[g2, members])
+
+              if (can_add) {
+                letter_groups[[li]] <- c(members, g2)
+                group_letters[g2] <- paste0(group_letters[g2], letters_pool[li])
+                added <- TRUE
+                break
+              }
+            }
+          }
+
+          if (!added) {
+            for (li in seq_along(letter_groups)) {
+              members <- letter_groups[[li]]
+
+              if (g2 %in% members && !(g1 %in% members)) {
+                can_add <- all(!sig_mat[g1, members])
+
+                if (can_add) {
+                  letter_groups[[li]] <- c(members, g1)
+                  group_letters[g1] <- paste0(group_letters[g1], letters_pool[li])
+                  added <- TRUE
+                  break
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  group_letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics, group_order = NULL) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    out[[mean_sd_col]] <- sprintf(
+      "%.2f ± %.2f",
+      out[[mean_col]],
+      out[[sd_col]]
+    )
+  }
+
+  if (!is.null(group_order)) {
+    out <- out %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  out
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table, group_order = NULL, include_n = TRUE) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  for (m in metrics) {
+    letter_vec <- make_tukey_letters_no_package(df, group_col, m, alpha = 0.05)
+    mean_col <- paste0(m, "_mean")
+
+    paper[[m]] <- paste0(
+      sprintf("%.2f", paper[[mean_col]]),
+      letter_vec[as.character(paper$group)]
+    )
+  }
+
+  if (!is.null(group_order)) {
+    paper <- paper %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  if (include_n) {
+    paper <- paper %>% select(group, n, all_of(metrics))
+  } else {
+    paper <- paper %>% select(group, all_of(metrics))
+  }
+
+  if (include_n) {
+    anova_row <- data.frame(
+      group = "ANOVA（P 值）",
+      n = NA_integer_,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    anova_row <- data.frame(
+      group = "ANOVA（P 值）",
+      stringsAsFactors = FALSE
+    )
+  }
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    try(
+      setColWidths(wb, sheet = s, cols = 1:80, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+# -----------------------------
+# 2. 读取 Bos Americas metadata
+# -----------------------------
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c("sample_id", "continent_CN")
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "Bos Americas metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    continent_CN = clean_group_value(continent_CN)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(continent_CN),
+    continent_CN %in% continent_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  select(sample_id, continent_CN)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels = continent_order)
+
+cat("Bos Americas metadata samples:", nrow(meta2), "\n")
+cat("Sample counts by continent:\n")
+print(table(meta2$continent_CN))
+
+# -----------------------------
+# 3. 读取 SH abundance table
+# -----------------------------
+# 注意：
+# SH_abundance_table_no_elephant.tsv 第一行是：
+# # Constructed from biom file
+# 第二行才是真正表头，因此必须 skip = 1。
+sh_tab <- read.delim(
+  sh_table_file,
+  header = TRUE,
+  sep = "\t",
+  skip = 1,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (ncol(sh_tab) < 2) {
+  stop("SH abundance table 列数异常，请检查文件。")
+}
+
+feature_col <- colnames(sh_tab)[1]
+
+feature_ids <- as.character(sh_tab[[feature_col]])
+
+mat_df <- sh_tab[, setdiff(colnames(sh_tab), feature_col), drop = FALSE]
+
+for (cc in colnames(mat_df)) {
+  mat_df[[cc]] <- suppressWarnings(as.numeric(as.character(mat_df[[cc]])))
+  mat_df[[cc]][is.na(mat_df[[cc]])] <- 0
+}
+
+mat <- as.matrix(mat_df)
+rownames(mat) <- feature_ids
+storage.mode(mat) <- "numeric"
+
+# 目标方向：SH × sample
+sample_overlap_cols <- length(intersect(colnames(mat), meta2$sample_id))
+sample_overlap_rows <- length(intersect(rownames(mat), meta2$sample_id))
+
+if (sample_overlap_rows > sample_overlap_cols) {
+  message("检测到 abundance table 可能为 sample × SH，已自动转置为 SH × sample。")
+  mat <- t(mat)
+}
+
+common_samples <- intersect(colnames(mat), meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 和 Bos Americas metadata 没有匹配到共同样本。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% common_samples)
+
+meta_use <- meta_use[match(colnames(mat), meta_use$sample_id), ]
+
+if (!all(meta_use$sample_id == colnames(mat))) {
+  stop("metadata 与丰度表样本顺序匹配失败。")
+}
+
+if (any(colSums(mat, na.rm = TRUE) == 0)) {
+  stop("仍存在总 reads 为 0 的样本，请检查 Bos Americas SH abundance subset。")
+}
+
+cat("Matched Bos samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Continent number:", length(unique(meta_use$continent_CN)), "\n")
+
+# vegan 要求 sample × feature
+comm <- t(mat)
+
+# -----------------------------
+# 4. 计算 alpha 多样性
+# -----------------------------
+cat("Calculating alpha diversity ...\n")
+
+est <- estimateR(comm)
+
+alpha_df <- data.frame(
+  sample_id = rownames(comm),
+  Observed_SH = specnumber(comm),
+  ACE = as.numeric(est["S.ACE", ]),
+  Chao1 = as.numeric(est["S.chao1", ]),
+  Shannon = diversity(comm, index = "shannon"),
+  Simpson = diversity(comm, index = "simpson"),
+  stringsAsFactors = FALSE
+)
+
+alpha_df <- alpha_df %>%
+  left_join(
+    meta_use %>% select(sample_id, continent_CN),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, continent_CN)
+
+write.csv(
+  alpha_df,
+  out_alpha_sample,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# -----------------------------
+# 5. 分组统计与检验
+# -----------------------------
+alpha_continent <- alpha_df %>%
+  filter(!is.na(continent_CN), continent_CN != "")
+
+alpha_continent$continent_CN <- factor(
+  alpha_continent$continent_CN,
+  levels = continent_order
+)
+
+continent_sample_count <- alpha_continent %>%
+  count(continent_CN, name = "n") %>%
+  mutate(continent_CN = factor(continent_CN, levels = continent_order)) %>%
+  arrange(continent_CN)
+
+write.csv(
+  continent_sample_count,
+  out_sample_count_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+continent_mean_sd_detail <- make_mean_sd_detail(
+  alpha_continent,
+  "continent_CN",
+  metrics_all,
+  group_order = continent_order
+)
+
+continent_anova <- run_anova_table(
+  alpha_continent,
+  "continent_CN",
+  metrics_for_table
+)
+
+continent_tukey_all <- run_tukey_table(
+  alpha_continent,
+  "continent_CN",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+continent_tukey_sig <- run_tukey_table(
+  alpha_continent,
+  "continent_CN",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+continent_paper_with_n <- make_paper_table(
+  alpha_continent,
+  "continent_CN",
+  metrics_for_table,
+  continent_anova,
+  group_order = continent_order,
+  include_n = TRUE
+)
+
+continent_paper_no_n <- make_paper_table(
+  alpha_continent,
+  "continent_CN",
+  metrics_for_table,
+  continent_anova,
+  group_order = continent_order,
+  include_n = FALSE
+)
+
+write.csv(
+  continent_paper_no_n,
+  out_paper_no_n_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_paper_with_n,
+  out_paper_with_n_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_mean_sd_detail,
+  out_mean_sd_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_anova,
+  out_anova_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_tukey_all,
+  out_tukey_all_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_tukey_sig,
+  out_tukey_sig_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# -----------------------------
+# 6. Excel 汇总
+# -----------------------------
+wb <- createWorkbook()
+
+addWorksheet(wb, "paper_table_no_n")
+addWorksheet(wb, "paper_table_with_n")
+addWorksheet(wb, "mean_sd_detail")
+addWorksheet(wb, "ANOVA")
+addWorksheet(wb, "TukeyHSD_significant")
+addWorksheet(wb, "TukeyHSD_all")
+addWorksheet(wb, "sample_count")
+addWorksheet(wb, "sample_alpha")
+
+writeData(wb, "paper_table_no_n", continent_paper_no_n)
+writeData(wb, "paper_table_with_n", continent_paper_with_n)
+writeData(wb, "mean_sd_detail", continent_mean_sd_detail)
+writeData(wb, "ANOVA", continent_anova)
+writeData(wb, "TukeyHSD_significant", continent_tukey_sig)
+writeData(wb, "TukeyHSD_all", continent_tukey_all)
+writeData(wb, "sample_count", continent_sample_count)
+writeData(wb, "sample_alpha", alpha_df)
+
+save_workbook_with_auto_width(wb, out_xlsx)
+
+# -----------------------------
+# 7. Summary
+# -----------------------------
+sink(out_summary)
+
+cat("Bos continent Americas alpha diversity analysis, no-elephant version\n")
+cat("====================================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input SH abundance table:\n")
+cat(sh_table_file, "\n\n")
+
+cat("Important reading rule:\n")
+cat("The first line of SH abundance table is a BIOM comment line, so read.delim uses skip = 1.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n")
+cat("No old North America-only Bos continent metadata\n\n")
+
+cat("Grouping:\n")
+cat("continent_CN, fixed order: 亚洲 → 欧洲 → 非洲 → 美洲\n")
+cat("Americas = North America + South America, already merged in input metadata.\n\n")
+
+cat("Matched Bos samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Continent number:", length(unique(meta_use$continent_CN)), "\n\n")
+
+cat("Sample counts:\n")
+print(continent_sample_count)
+
+cat("\nANOVA:\n")
+print(continent_anova)
+
+cat("\nSignificant TukeyHSD results:\n")
+print(continent_tukey_sig)
+
+cat("\nPaper table without n:\n")
+print(continent_paper_no_n)
+
+cat("\nPaper table with n:\n")
+print(continent_paper_with_n)
+
+cat("\nMean ± SD detail:\n")
+print(continent_mean_sd_detail)
+
+cat("\nOutput files:\n")
+cat("Sample alpha:", out_alpha_sample, "\n")
+cat("Paper table no n:", out_paper_no_n_csv, "\n")
+cat("Paper table with n:", out_paper_with_n_csv, "\n")
+cat("Mean SD:", out_mean_sd_csv, "\n")
+cat("ANOVA:", out_anova_csv, "\n")
+cat("Tukey all:", out_tukey_all_csv, "\n")
+cat("Tukey significant:", out_tukey_sig_csv, "\n")
+cat("Excel:", out_xlsx, "\n")
+
+sink()
+
+# -----------------------------
+# 8. Console output
+# -----------------------------
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n\n")
+
+cat("Matched Bos samples:", ncol(mat), "\n")
+cat("SH number:", nrow(mat), "\n")
+cat("Continent number:", length(unique(meta_use$continent_CN)), "\n\n")
+
+cat("Key output files:\n")
+cat("1. ", out_alpha_sample, "\n", sep = "")
+cat("2. ", out_xlsx, "\n", sep = "")
+cat("3. ", out_paper_no_n_csv, "\n", sep = "")
+cat("4. ", out_paper_with_n_csv, "\n", sep = "")
+cat("5. ", out_summary, "\n", sep = "")
+
+cat("\nPaper table without n:\n")
+print(continent_paper_no_n)
+
+EOF
+
+Rscript scripts/17_Bos_continent_Americas_alpha_diversity_ANOVA_Tukey_no_elephant.R
+#最关键的 Excel 在这里：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Table4_x_Bos_continent_Americas_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#论文表格最接近你截图格式的是 paper_table_no_n 工作表和：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Table4_x_Bos_continent_Americas_alpha_for_paper_no_n_no_elephant.csv
