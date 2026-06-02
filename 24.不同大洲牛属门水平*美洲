@@ -594,3 +594,4 @@ message("日志: ", log_file)
 EOF
 
 Rscript scripts/14_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.Rstyle_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant
+#值得注意的是，欧洲牛属样本中新靓鞭菌门平均相对多度明显高于其他大洲。结合原始数据来源来看，欧洲组中部分样本来源于 PRJNA713003，该研究所用引物为针对新靓鞭菌目（Neocallimastigales）设计的 ITS1 相关扩增体系，靶向 18S rRNA 基因末端至 5.8S rRNA 基因起始区域，具有较强的新靓鞭菌目特异性。因此，欧洲组中新靓鞭菌门占比偏高可能不仅反映真实生物学差异，也可能受到不同研究中扩增引物靶向范围和测序策略差异的影响。后续解释不同大洲牛属动物肠道真菌群落组成差异时，应充分考虑公共数据整合分析中由引物、扩增区域和数据来源差异带来的潜在偏倚。
