@@ -1,201 +1,8 @@
-#下面给你写出完整的新作图脚本，用于不同大洲牛属动物肠道真菌优势属组成弦图（图 4-3），基于 no-elephant 数据 并与图 4-1、图 4-2 大洲分组保持一致（亚洲、欧洲、非洲、美洲）。这版脚本会从头计算 Top20 属和大洲平均相对多度，不再用旧 North America 版本矩阵，同时保留弦图原始板式和中文属名映射。
+#下面这版是完整重写后的图 4-3 作图脚本，这次会：
+#读取新 Americas 合并版 Bos metadata；重新计算属水平样本内相对多度与大洲平均相对多度；重新筛选 Top20 优势属；弦图板式严格参考第三章最终中文径向标签版；补全你刚刚列出的所有真菌门和真菌属中文译名，并新增 Wickerhamomyces = 威克汉姆酵母属。第三章最终弦图参考代码的核心是“同方向径向标签、属扇区内侧来源组成条、PNG 600 dpi 白底、sector 顺序先属后分组”，这版已按这个逻辑写入。
 cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
 
 mkdir -p scripts
-
-cat > scripts/15_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.R <<'EOF'
-#!/usr/bin/env Rscript
-
-# ============================================================
-# 15_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.R
-#
-# 第四章 图4-3：
-# 不同大洲牛属动物优势属弦图
-# 数据版本：globalfungi_style_test_no_elephant
-# 分组：亚洲、欧洲、非洲、美洲
-# 基于新图4-1筛选的 Bos 样本
-# ============================================================
-
-options(stringsAsFactors = FALSE)
-options(scipen = 999)
-
-suppressPackageStartupMessages({
-  library(dplyr)
-  library(tidyr)
-  library(readr)
-  library(circlize)
-  library(showtext)
-  library(sysfonts)
-})
-
-# =========================
-# 1. 路径
-# =========================
-base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
-
-metadata_file <- file.path(
-  base_dir,
-  "results",
-  "chapter4_Bos_continent_Americas_no_elephant",
-  "Bos_continent_Americas_filtered_metadata_no_elephant.csv"
-)
-
-genus_table_file <- file.path(
-  base_dir,
-  "taxonomy",
-  "genus_abundance_table_no_elephant.tsv"
-)
-
-out_dir <- file.path(
-  base_dir,
-  "results",
-  "chapter4_Bos_continent_Americas_no_elephant"
-)
-
-dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-
-out_png <- file.path(out_dir, "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.png")
-out_pdf <- file.path(out_dir, "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.pdf")
-
-summary_csv <- file.path(out_dir, "Bos_continent_Americas_top20_genus_chord_matrix_no_elephant_CN.csv")
-source_comp_csv <- file.path(out_dir, "Bos_continent_Americas_top20_genus_source_composition_no_elephant_CN.csv")
-log_file <- file.path(out_dir, "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_log.txt")
-
-# =========================
-# 2. 中文字体
-# =========================
-font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
-font_add("songti", font_path)
-showtext_auto()
-showtext_opts(dpi = 600)
-
-# =========================
-# 3. 固定顺序
-# =========================
-continent_order_cn <- c("亚洲","欧洲","非洲","美洲")
-phylum_map <- c(
-  "Ascomycota" = "子囊菌门",
-  "Basidiomycota" = "担子菌门",
-  "Mucoromycota" = "毛霉门",
-  "Mortierellomycota" = "被孢霉门",
-  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
-  "Neocallimastigomycota" = "新靓鞭菌门",
-  "Chytridiomycota" = "壶菌门",
-  "Rozellomycota" = "罗兹菌门",
-  "Olpidiomycota" = "油壶菌门",
-  "Glomeromycota" = "球囊霉门",
-  "Zoopagomycota" = "捕虫霉门",
-  "Aphelidiomycota" = "远日菌门",
-  "Blastocladiomycota" = "芽枝霉门",
-  "Basidiobolomycota" = "蛙粪霉门",
-  "Kickxellomycota" = "梳霉门",
-  "Monoblepharomycota" = "单毛菌门",
-  "Sanchytriomycota" = "Sanchytriomycota",
-  "Entorrhizomycota" = "根肿黑粉菌门",
-  "Calcarisporiellomycota" = "小齿梗孢门"
-)
-
-# =========================
-# 4. 读取 Bos metadata
-# =========================
-meta <- read_csv(metadata_file, show_col_types = FALSE) %>%
-  filter(continent_CN %in% continent_order_cn) %>%
-  distinct(sample_id, .keep_all=TRUE)
-
-# =========================
-# 5. 读取属水平丰度表
-# =========================
-genus_tab <- read.delim(genus_table_file, sep="\t", check.names = FALSE, comment.char = "")
-
-tax_col <- colnames(genus_tab)[1]
-genus_long <- genus_tab %>%
-  rename(genus = all_of(tax_col)) %>%
-  pivot_longer(cols=-genus, names_to="sample_id", values_to="abundance") %>%
-  mutate(abundance = as.numeric(abundance)) %>%
-  filter(!is.na(abundance)) %>%
-  inner_join(meta %>% select(sample_id, continent_CN), by="sample_id")
-
-# =========================
-# 6. 样本内相对多度
-# =========================
-genus_rel <- genus_long %>%
-  group_by(sample_id) %>%
-  mutate(rel_abundance=abundance/sum(abundance)*100) %>%
-  ungroup()
-
-# =========================
-# 7. 按大洲平均相对多度
-# =========================
-genus_mean <- genus_rel %>%
-  group_by(continent_CN, genus) %>%
-  summarise(mean_rel=mean(rel_abundance, na.rm=TRUE), .groups="drop") %>%
-  ungroup()
-
-# 选 Top20 属（按四大洲平均相对多度之和排序）
-top20_genus <- genus_mean %>%
-  group_by(genus) %>%
-  summarise(sum_rel=sum(mean_rel), .groups="drop") %>%
-  arrange(desc(sum_rel)) %>%
-  slice_head(n=20) %>%
-  pull(genus)
-
-genus_top <- genus_mean %>% filter(genus %in% top20_genus)
-
-# 构建弦图矩阵
-chord_mat <- genus_top %>%
-  pivot_wider(names_from=genus, values_from=mean_rel, values_fill=0) %>%
-  column_to_rownames("continent_CN")
-
-write_csv(as.data.frame(chord_mat), summary_csv)
-
-# 属侧来源组成表
-source_comp <- genus_top %>%
-  pivot_wider(names_from=continent_CN, values_from=mean_rel, values_fill=0)
-write_csv(source_comp, source_comp_csv)
-
-# =========================
-# 8. 弦图绘制
-# =========================
-message("绘制弦图 ...")
-png(out_png, width=12, height=12, units="in", res=600, bg="white")
-chordDiagram(chord_mat,
-             annotationTrack="grid",
-             preAllocateTracks=1,
-             transparency=0.25,
-             directional=0,
-             annotationTrackHeight=0.1)
-dev.off()
-
-pdf(out_pdf, width=12, height=12, bg="white")
-chordDiagram(chord_mat,
-             annotationTrack="grid",
-             preAllocateTracks=1,
-             transparency=0.25,
-             directional=0,
-             annotationTrackHeight=0.1)
-dev.off()
-
-# =========================
-# 9. 输出 log
-# =========================
-sink(log_file)
-cat("Bos continent Americas Top20 genus chord, no-elephant\n")
-cat("Input metadata:", metadata_file,"\n")
-cat("Input genus abundance:", genus_table_file,"\n")
-cat("Number of samples:", nrow(meta),"\n")
-cat("Continent order:", paste(continent_order_cn, collapse=", "),"\n")
-cat("Top20 genus:", paste(top20_genus, collapse=", "),"\n")
-cat("Output PNG:", out_png,"\n")
-cat("Output PDF:", out_pdf,"\n")
-cat("Chord matrix CSV:", summary_csv,"\n")
-cat("Source composition CSV:", source_comp_csv,"\n")
-sink()
-
-EOF
-
-Rscript scripts/15_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.R
-#直接用下面这版完整覆盖原脚本。这版不再使用 column_to_rownames()，也不依赖 tibble::column_to_rownames()。
-cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
 
 cat > scripts/15_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.R <<'EOF'
 #!/usr/bin/env Rscript
@@ -230,7 +37,16 @@ cat > scripts/15_Bos_continent_Americas_top20_genus_chord_no_elephant_CN.R <<'EO
 ##   4. 弦宽表示“大洲 × 属”的平均相对多度；
 ##   5. min_link_value 以下的极小连线不画。
 ##
-## 注意：
+## 板式：
+##   参考第三章最终弦图：
+##   - circlize
+##   - 中文径向标签
+##   - 属名和大洲名均 facing = "clockwise"
+##   - 属扇区内侧大洲来源组成条
+##   - PNG 600 dpi 白底
+##   - showtext_opts(dpi = 600)
+##
+## 不做：
 ##   不重新筛选 Bos；
 ##   不重新生成 taxonomy；
 ##   不重新做 SH 注释；
@@ -408,16 +224,48 @@ top_n_genus <- 20
 min_link_value <- 0.01
 
 ## =========================
-## 4. 中文属名映射
+## 4. 中文真菌门名映射
+## 本脚本主要用于属水平弦图，phylum_cn_map 不参与作图，
+## 但保留在脚本中，方便后续同一套译名体系复用和 log 记录。
+## =========================
+phylum_cn_map <- c(
+  "Ascomycota" = "子囊菌门",
+  "Basidiomycota" = "担子菌门",
+  "Mucoromycota" = "毛霉门",
+  "Mortierellomycota" = "被孢霉门",
+  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
+  "Fungi_phy_Incertae_sedis" = "真菌门分类地位未定类群",
+  "Neocallimastigomycota" = "新靓鞭菌门",
+  "Chytridiomycota" = "壶菌门",
+  "Rozellomycota" = "罗兹菌门",
+  "Olpidiomycota" = "油壶菌门",
+  "Glomeromycota" = "球囊霉门",
+  "Zoopagomycota" = "捕虫霉门",
+  "Aphelidiomycota" = "远日菌门",
+  "Blastocladiomycota" = "芽枝霉门",
+  "Basidiobolomycota" = "蛙粪霉门",
+  "Kickxellomycota" = "梳霉门",
+  "Monoblepharomycota" = "单毛菌门",
+  "Sanchytriomycota" = "Sanchytriomycota",
+  "Entorrhizomycota" = "根肿黑粉菌门",
+  "Calcarisporiellomycota" = "小齿梗孢门"
+)
+
+## =========================
+## 5. 中文属名映射
 ## =========================
 genus_cn_map <- c(
   "Kazachstania" = "哈萨克酵母属",
   "Aspergillus" = "曲霉属",
   "Thelebolus" = "寡囊盘菌属",
   "Ascochyta" = "壳二孢菌属",
+
+  ## 注意：同一个英文形式在门水平和属水平都有可能出现；
+  ## 本脚本是属水平弦图，因此这里翻译为“真菌属分类地位未定类群”。
   "Fungi phy Incertae sedis" = "真菌属分类地位未定类群",
   "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
   "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+
   "Caecomyces" = "隐菌属",
   "Wallemia" = "节担菌属",
   "Cladosporium" = "枝孢属",
@@ -443,6 +291,9 @@ genus_cn_map <- c(
   "Phaeosphaeriaceae_gen_Incertae_sedis" = "暗球腔菌科分类地位未定属",
   "Neocallimastigomycota_gen_Incertae_sedis" = "新靓鞭菌门分类地位未定属",
   "Ascobolus" = "粪盘菌属",
+  "Wickerhamomyces" = "威克汉姆酵母属",
+
+  ## 备用常见属名，防止 Top20 中出现未翻译
   "Candida" = "假丝酵母属",
   "Pichia" = "毕赤酵母属",
   "Cyberlindnera" = "赛伯林德纳氏酵母属",
@@ -469,7 +320,8 @@ to_cn <- function(x, map_vec) {
 }
 
 ## =========================
-## 5. 颜色
+## 6. 颜色设置
+## 美洲沿用旧北美洲颜色。
 ## =========================
 continent_colors <- c(
   "亚洲" = "#E64B35",
@@ -486,7 +338,7 @@ genus_base_cols <- c(
 )
 
 ## =========================
-## 6. 工具函数
+## 7. 工具函数：刻度
 ## =========================
 fmt_tick <- function(x) {
   ifelse(
@@ -507,8 +359,6 @@ nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
     }
   } else if (xmax >= 15) {
     at <- c(0, 10, xmax)
-  } else if (xmax >= 5) {
-    at <- c(0, round(xmax / 2, 1), xmax)
   } else {
     at <- c(0, xmax)
   }
@@ -516,6 +366,7 @@ nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
   at <- at[at >= 0 & at <= xmax]
   at <- unique(round(at, 6))
 
+  ## 对容易重叠的扇区删除倒数第二个刻度，但保留最大值
   if (sector %in% drop_sectors && length(at) >= 3) {
     at <- at[-(length(at) - 1)]
   }
@@ -538,7 +389,7 @@ write_csv_base <- function(df, file) {
 }
 
 ## =========================
-## 7. 读取 Bos 大洲合并 metadata
+## 8. 读取 Bos 大洲合并 metadata
 ## =========================
 message("读取 Bos 大洲合并 metadata ...")
 
@@ -588,7 +439,7 @@ write_csv(sample_counts, out_sample_counts)
 message("Bos metadata 样本数：", nrow(meta2))
 
 ## =========================
-## 8. 读取属水平丰度表
+## 9. 读取属水平丰度表
 ## =========================
 message("读取 genus abundance table ...")
 
@@ -627,7 +478,7 @@ if (matched_samples < 10) {
 }
 
 ## =========================
-## 9. 计算样本内相对多度，再按大洲平均
+## 10. 计算样本内相对多度，再按大洲平均
 ## =========================
 message("计算样本内属水平相对多度，并按大洲求平均 ...")
 
@@ -655,6 +506,7 @@ continent_genus_mean <- genus_rel %>%
     genus_cn = to_cn(genus, genus_cn_map)
   )
 
+## 补齐大洲 × 属组合
 all_genera <- sort(unique(continent_genus_mean$genus))
 
 continent_genus_mean_full <- expand.grid(
@@ -683,7 +535,7 @@ continent_genus_mean_full <- expand.grid(
 write_csv(continent_genus_mean_full, out_all_genus_mean)
 
 ## =========================
-## 10. 筛选 Top20 属
+## 11. 筛选 Top20 属
 ## =========================
 message("筛选 Top20 优势属 ...")
 
@@ -710,7 +562,9 @@ untranslated <- top20_genus %>%
 write_csv(untranslated, out_untranslated)
 
 ## =========================
-## 11. 构建弦图矩阵：大洲 × Top20 属
+## 12. 构建弦图矩阵：大洲 × Top20 属
+## 若多个英文属名映射到同一个中文名，这里按中文名合并，
+## 避免 pivot_wider 因重复列名出错。
 ## =========================
 message("构建弦图矩阵 ...")
 
@@ -719,12 +573,18 @@ chord_df <- continent_genus_mean_full %>%
   mutate(
     continent_CN = factor(continent_CN, levels = continent_order_cn),
     genus = factor(genus, levels = top_genus_order_en),
-    genus_cn = factor(genus_cn, levels = top_genus_order_cn)
+    genus_cn = factor(genus_cn, levels = unique(top_genus_order_cn))
   ) %>%
-  arrange(continent_CN, genus)
+  group_by(continent_CN, genus_cn) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(continent_CN, genus_cn)
+
+genus_order_plot_all <- unique(as.character(chord_df$genus_cn))
 
 mat_wide <- chord_df %>%
-  select(continent_CN, genus_cn, mean_relative_abundance) %>%
   tidyr::pivot_wider(
     names_from = genus_cn,
     values_from = mean_relative_abundance,
@@ -737,10 +597,12 @@ rownames(mat) <- as.character(mat_wide$continent_CN)
 storage.mode(mat) <- "numeric"
 mat[is.na(mat)] <- 0
 
+## 保存未过滤矩阵
 mat_out <- as.data.frame(mat, check.names = FALSE)
 mat_out <- cbind("大洲" = rownames(mat), mat_out)
 write_csv_base(mat_out, out_chord_matrix)
 
+## 极小连线过滤
 mat_plot <- mat
 mat_plot[mat_plot < min_link_value] <- 0
 
@@ -759,7 +621,8 @@ if (nrow(mat_plot) < 2 || ncol(mat_plot) < 2) {
 }
 
 ## =========================
-## 12. 属侧来源组成表
+## 13. 属侧来源组成表
+## 每个属由各大洲贡献的比例，用于属扇区内侧色条
 ## =========================
 genus_source_prop <- apply(mat_plot, 2, function(x) {
   if (sum(x) == 0) {
@@ -777,7 +640,7 @@ source_out <- cbind("属" = rownames(source_out), source_out)
 write_csv_base(source_out, out_source_composition)
 
 ## =========================
-## 13. 弦图函数
+## 14. 弦图函数：严格参考第三章最终径向标签版
 ## =========================
 plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
   type <- match.arg(type)
@@ -785,8 +648,8 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
   if (type == "png") {
     png(
       outfile,
-      width = 12.5,
-      height = 12.5,
+      width = 11.5,
+      height = 11.5,
       units = "in",
       res = 600,
       bg = "white",
@@ -795,8 +658,8 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
   } else {
     cairo_pdf(
       outfile,
-      width = 12.5,
-      height = 12.5,
+      width = 11.5,
+      height = 11.5,
       family = cn_font,
       bg = "white"
     )
@@ -835,12 +698,13 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
   n_continent <- length(continent_order_plot_cn)
   n_genus <- length(genus_order_plot_cn)
 
+  ## 关键：先属，后大洲，沿用第三章最终图样式
   sector_order <- c(genus_order_plot_cn, continent_order_plot_cn)
 
   gap_after <- c(
     rep(1.4, n_genus - 1),
     18,
-    rep(4.2, n_continent - 1),
+    rep(4, n_continent - 1),
     18
   )
 
@@ -849,8 +713,8 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
     gap.after = gap_after,
     track.margin = c(0.002, 0.002),
     cell.padding = c(0, 0, 0, 0),
-    canvas.xlim = c(-1.55, 1.55),
-    canvas.ylim = c(-1.55, 1.55),
+    canvas.xlim = c(-1.36, 1.36),
+    canvas.ylim = c(-1.36, 1.36),
     points.overflow.warning = FALSE
   )
 
@@ -862,13 +726,14 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
     transparency = 0,
     directional = 0,
     annotationTrack = c("grid"),
-    annotationTrackHeight = 0.038,
+    annotationTrackHeight = 0.035,
     preAllocateTracks = list(
-      list(track.height = 0.160),
-      list(track.height = 0.032)
+      list(track.height = 0.135),
+      list(track.height = 0.030)
     )
   )
 
+  ## Track 1: 刻度 + 标签
   circos.trackPlotRegion(
     track.index = 1,
     ylim = c(0, 1),
@@ -879,7 +744,6 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
       xrange <- xlim[2] - xlim[1]
 
       axis_h <- 0.08
-
       at <- nice_axis_at(
         sector,
         xlim[2],
@@ -890,7 +754,7 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
         x = c(xlim[1], xlim[2]),
         y = c(axis_h, axis_h),
         col = "grey30",
-        lwd = 0.50
+        lwd = 0.45
       )
 
       if (!is.null(at) && length(at) >= 2) {
@@ -898,7 +762,7 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
           h = axis_h,
           major.at = at,
           labels = FALSE,
-          major.tick.length = mm_y(0.45),
+          major.tick.length = mm_y(0.42),
           col = "grey30",
           minor.ticks = 0,
           direction = "outside"
@@ -909,10 +773,11 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
         for (ii in seq_along(at)) {
           xx <- at[ii]
 
+          ## 端点数字略向扇区内部移动，避免裁剪
           if (abs(xx - xlim[1]) < 1e-8) {
-            xx2 <- xlim[1] + 0.020 * xrange
+            xx2 <- xlim[1] + 0.018 * xrange
           } else if (abs(xx - xlim[2]) < 1e-8) {
-            xx2 <- xlim[2] - 0.030 * xrange
+            xx2 <- xlim[2] - 0.028 * xrange
           } else {
             xx2 <- xx
           }
@@ -924,25 +789,14 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
             facing = "clockwise",
             niceFacing = TRUE,
             adj = c(0.5, 0.5),
-            cex = 0.44,
+            cex = 0.34,
             col = "grey25"
           )
         }
       }
 
+      ## 关键：大洲名和属名使用同一种文字方向
       if (sector %in% continent_order_plot_cn) {
-        circos.text(
-          x = mean(xlim),
-          y = 0.58,
-          labels = sector,
-          facing = "clockwise",
-          niceFacing = TRUE,
-          adj = c(0, 0.5),
-          cex = 1.18,
-          font = 2,
-          col = "black"
-        )
-      } else {
         circos.text(
           x = mean(xlim),
           y = 0.56,
@@ -950,7 +804,19 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
           facing = "clockwise",
           niceFacing = TRUE,
           adj = c(0, 0.5),
-          cex = 0.78,
+          cex = 0.92,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.54,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.64,
           font = 1,
           col = "black"
         )
@@ -958,6 +824,7 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
     }
   )
 
+  ## Track 2: 属扇区内侧大洲贡献组成条
   circos.trackPlotRegion(
     track.index = 2,
     ylim = c(0, 1),
@@ -1000,7 +867,7 @@ plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
 }
 
 ## =========================
-## 14. 输出图
+## 15. 输出图
 ## =========================
 message("绘制弦图 ...")
 
@@ -1008,7 +875,7 @@ plot_chord_cn_radial(out_chord_png, "png")
 plot_chord_cn_radial(out_chord_pdf, "pdf")
 
 ## =========================
-## 15. log
+## 16. log
 ## =========================
 sink(out_log)
 
@@ -1030,7 +897,8 @@ cat("North America and South America are already merged as Americas / 美洲.\n"
 cat("Calculate sample-level genus relative abundance first, then average by continent.\n")
 cat("Top20 genera selected by sum of mean relative abundance across continents.\n")
 cat("Chord width represents continent × genus mean relative abundance.\n")
-cat("Links smaller than min_link_value are set to zero for plotting.\n\n")
+cat("Links smaller than min_link_value are set to zero for plotting.\n")
+cat("Plot style follows Chapter 3 final radial-label chord plot.\n\n")
 
 cat("Fixed continent order:\n")
 print(continent_order_cn)
@@ -1057,6 +925,12 @@ print(mat_plot_out)
 
 cat("\nGenus source composition:\n")
 print(source_out)
+
+cat("\nPhylum translation map stored in script:\n")
+print(phylum_cn_map)
+
+cat("\nGenus translation map stored in script:\n")
+print(genus_cn_map)
 
 cat("\nOutput files:\n")
 cat("PNG:", out_chord_png, "\n")
