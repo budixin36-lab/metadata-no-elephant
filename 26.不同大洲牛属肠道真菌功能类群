@@ -1603,3 +1603,426 @@ cat("Log:\n", out_log, "\n", sep = "")
 EOF
 
 Rscript scripts/16b_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix.R
+#对，这次只改外边框/主题样式，不重算、不改数值、不改颜色、不改功能类群顺序。脚本会读取上一版已经生成的：
+#Bos_continent_Americas_genus_function_group_mean_relative_abundance_no_elephant_CN_name_colorfix.csv
+#然后重画为只保留 x、y 轴、不显示四边框的版本，沿用第三章最终 theme_classic() 板式。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/16c_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix_classic.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 16c_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix_classic.R
+##
+## 图4-4 不同大洲牛属动物肠道真菌属水平功能类群组成图
+##
+## 只重画，不重算：
+##   1. 不重新匹配 FungalTraits Table S1
+##   2. 不重新计算样本内相对多度
+##   3. 不改变各大洲功能类群平均相对多度数值
+##   4. 不改变功能类群名称、顺序和颜色
+##
+## 本次只修改：
+##   1. 去掉四边封闭框
+##   2. 改为 theme_classic()
+##   3. 只保留 x、y 轴
+##
+## 输出新文件，不覆盖上一版。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## -----------------------------
+## 0. R 包路径与依赖
+## -----------------------------
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "ggplot2",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## -----------------------------
+## 1. 路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+input_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_function_group_mean_relative_abundance_no_elephant_CN_name_colorfix.csv"
+)
+
+if (!file.exists(input_csv)) {
+  stop("找不到上一版 name_colorfix 数据表：", input_csv)
+}
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix_classic.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix_classic.pdf"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix_classic_log.txt"
+)
+
+cat("Input CSV: ", input_csv, "\n", sep = "")
+
+## -----------------------------
+## 2. 中文字体
+## -----------------------------
+base_family <- "cnfont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+sysfonts::font_add(base_family, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("Font file: ", font_file, "\n", sep = "")
+
+## -----------------------------
+## 3. 读取上一版已修正名称和颜色顺序的数据
+## -----------------------------
+plot_df <- read.csv(
+  input_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_cols <- c("continent_CN", "function_group_cn", "mean_relative_abundance")
+missing_cols <- setdiff(needed_cols, colnames(plot_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "输入表缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(plot_df), collapse = " | ")
+  )
+}
+
+## -----------------------------
+## 4. 固定大洲顺序和功能类群顺序
+## -----------------------------
+continent_order <- c("亚洲", "欧洲", "非洲", "美洲")
+
+function_order <- c(
+  "未定义腐生菌",
+  "花蜜/树液腐生菌",
+  "植物病原菌",
+  "凋落物腐生菌",
+  "动物内共生菌",
+  "粪生腐生菌",
+  "土壤腐生菌",
+  "地衣型真菌",
+  "外生菌根真菌",
+  "木腐菌",
+  "动物寄生菌",
+  "煤烟菌",
+  "附生菌",
+  "叶内生菌",
+  "真菌寄生菌",
+  "地衣寄生菌",
+  "花粉腐生菌",
+  "根内生菌",
+  "原生生物寄生菌",
+  "丛枝菌根真菌",
+  "藻类寄生菌",
+  "苔藓共生菌",
+  "未定义共生菌",
+  "动物相关菌",
+  "节肢动物相关菌",
+  "藻类外共生菌",
+  "食细菌型",
+  "食藻/食原生生物型",
+  "未分类"
+)
+
+## 只保留实际出现的功能类群，并保持上一版顺序
+present_groups <- plot_df %>%
+  group_by(function_group_cn) %>%
+  summarise(total_mean = sum(mean_relative_abundance), .groups = "drop") %>%
+  filter(total_mean > 0) %>%
+  pull(function_group_cn)
+
+present_groups <- function_order[function_order %in% present_groups]
+
+extra_groups <- setdiff(unique(plot_df$function_group_cn), function_order)
+extra_groups <- extra_groups[
+  extra_groups %in% present_groups
+]
+
+present_groups <- c(present_groups, sort(extra_groups))
+
+plot_df <- plot_df %>%
+  filter(function_group_cn %in% present_groups) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    function_group_cn = factor(function_group_cn, levels = present_groups)
+  ) %>%
+  arrange(continent_CN, function_group_cn)
+
+## -----------------------------
+## 5. 沿用上一版 name_colorfix 配色
+## -----------------------------
+function_colors <- c(
+  "未定义腐生菌"       = "#E41A1C",
+  "花蜜/树液腐生菌"   = "#1B9E77",
+  "凋落物腐生菌"       = "#7570B3",
+  "粪生腐生菌"         = "#66A61E",
+  "土壤腐生菌"         = "#D95F02",
+  "木腐菌"             = "#E6AB02",
+  "花粉腐生菌"         = "#386CB0",
+
+  "植物病原菌"         = "#377EB8",
+  "动物寄生菌"         = "#984EA3",
+  "藻类寄生菌"         = "#F781BF",
+  "原生生物寄生菌"     = "#A65628",
+  "地衣寄生菌"         = "#FF7F00",
+  "真菌寄生菌"         = "#B2182B",
+  "未定义病原菌"       = "#C51B8A",
+
+  "地衣型真菌"         = "#4DAF4A",
+  "外生菌根真菌"       = "#00A6D6",
+  "丛枝菌根真菌"       = "#8DA0CB",
+  "苔藓共生菌"         = "#A6D854",
+  "未定义共生菌"       = "#E78AC3",
+  "动物内共生菌"       = "#009E73",
+  "藻类外共生菌"       = "#17BECF",
+
+  "叶内生菌"           = "#FDB462",
+  "根内生菌"           = "#80B1D3",
+  "附生菌"             = "#6A3D9A",
+
+  "煤烟菌"             = "#4D4D4D",
+  "动物相关菌"         = "#BC80BD",
+  "节肢动物相关菌"     = "#B3DE69",
+  "食细菌型"           = "#8C564B",
+  "食藻/食原生生物型" = "#1F78B4",
+
+  "未分类"             = "#C9C9C9"
+)
+
+missing_color <- setdiff(present_groups, names(function_colors))
+
+if (length(missing_color) > 0) {
+  stop(
+    "以下功能类群缺少颜色：",
+    paste(missing_color, collapse = ", ")
+  )
+}
+
+used_colors <- function_colors[present_groups]
+
+## -----------------------------
+## 6. 检查加总
+## -----------------------------
+sum_check <- plot_df %>%
+  group_by(continent_CN) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+
+cat("各大洲加总检查：\n")
+print(sum_check)
+
+## -----------------------------
+## 7. 作图：关键是 theme_classic + panel.border = element_blank()
+## -----------------------------
+p <- ggplot(
+  plot_df,
+  aes(
+    x = continent_CN,
+    y = mean_relative_abundance,
+    fill = function_group_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +
+  scale_fill_manual(
+    values = used_colors,
+    breaks = present_groups,
+    drop = TRUE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  theme_classic(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.20, "cm"),
+
+    axis.text.x = element_text(
+      size = 16,
+      color = "black",
+      family = base_family
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      color = "black",
+      family = base_family
+    ),
+    axis.title.y = element_text(
+      size = 16,
+      color = "black",
+      family = base_family
+    ),
+
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 11,
+      color = "black",
+      family = base_family
+    ),
+    legend.key.size = unit(0.45, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE
+    )
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+## -----------------------------
+## 8. log
+## -----------------------------
+sink(out_log)
+
+cat("Fig4-4 Bos continent Americas function group bar redraw: classic axis style\n")
+cat("=========================================================================\n\n")
+
+cat("This script does NOT recalculate FungalTraits annotation or relative abundance.\n")
+cat("It only redraws the existing name_colorfix result with theme_classic style.\n\n")
+
+cat("Input CSV:\n", input_csv, "\n\n", sep = "")
+cat("Output PNG:\n", out_png, "\n", sep = "")
+cat("Output PDF:\n", out_pdf, "\n\n", sep = "")
+
+cat("Theme change:\n")
+cat("theme_bw + panel.border removed.\n")
+cat("theme_classic + panel.border = element_blank().\n")
+cat("Only x and y axes are kept.\n\n")
+
+cat("Font file:\n", font_file, "\n\n", sep = "")
+
+cat("Continent order:\n")
+print(continent_order)
+
+cat("\nFunctional group order used:\n")
+print(present_groups)
+
+cat("\nColor mapping used:\n")
+print(used_colors)
+
+cat("\nSum check by continent:\n")
+print(sum_check)
+
+sink()
+
+cat("\nDone!\n")
+cat("只重画，不重算；已改为无四边框、只保留 x/y 轴。\n")
+cat("PNG:\n", out_png, "\n", sep = "")
+cat("PDF:\n", out_pdf, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+
+EOF
+
+Rscript scripts/16c_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix_classic.R
