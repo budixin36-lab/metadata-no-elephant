@@ -1823,3 +1823,626 @@ cat("Log:\n", summary_txt, "\n", sep = "")
 EOF
 
 Rscript scripts/15b_redraw_Bos_continent_Americas_top20_genus_chord_CN_fontfix.R
+#这次修改方案
+#输入文件
+#仍然使用你已经确认可用的 Americas 版弦图数据，不重算：
+#弦图矩阵
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv
+#属侧来源组成表
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_top20_genus_source_composition_for_chord_no_elephant_CN.csv
+#是否重算
+#不重算。
+#只重画图。
+#改动内容
+#把错误译名：
+#Neocallimastigaceae_gen_Incertae_sedis -> 新靓鞭菌科
+#改为正确译名：
+#Neocallimastigaceae_gen_Incertae_sedis -> 新靓鞭菌科分类地位未定属
+#不改动内容
+#不改变 Top20 属
+#不改变弦宽矩阵数值
+#不改变大洲顺序（亚洲、欧洲、非洲、美洲）
+#不改变版式、字体放大参数、画布大小
+#输出文件名
+#为了不覆盖上一版图，建议输出新文件名：
+#Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_radial_labels_fontfix_namefix.png
+#Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_radial_labels_fontfix_namefix.pdf
+#下面直接给你完整重画脚本。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/15c_redraw_Bos_continent_Americas_top20_genus_chord_CN_fontfix_namefix.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 15c_redraw_Bos_continent_Americas_top20_genus_chord_CN_fontfix_namefix.R
+##
+## 只重画图，不重算 Top20 属或矩阵
+## 本次仅修正属名：
+## Neocallimastigaceae_gen_Incertae_sedis -> 新靓鞭菌科分类地位未定属
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_Americas_no_elephant"
+)
+
+mat_input <- file.path(
+  out_dir,
+  "Bos_continent_Americas_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv"
+)
+
+source_input <- file.path(
+  out_dir,
+  "Bos_continent_Americas_top20_genus_source_composition_for_chord_no_elephant_CN.csv"
+)
+
+if (!file.exists(mat_input)) {
+  stop("找不到已有弦图矩阵：", mat_input)
+}
+
+if (!file.exists(source_input)) {
+  warning("找不到已有属侧来源组成表，将根据矩阵重新生成：", source_input)
+}
+
+out_chord_png <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_radial_labels_fontfix_namefix.png"
+)
+
+out_chord_pdf <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_radial_labels_fontfix_namefix.pdf"
+)
+
+out_matrix_fixed <- file.path(
+  out_dir,
+  "Bos_continent_Americas_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN_fontfix_namefix.csv"
+)
+
+out_source_fixed <- file.path(
+  out_dir,
+  "Bos_continent_Americas_top20_genus_source_composition_for_chord_no_elephant_CN_fontfix_namefix.csv"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "Fig4_3_Bos_continent_Americas_top20_genus_chord_no_elephant_CN_radial_labels_fontfix_namefix_log.txt"
+)
+
+## =========================
+## 3. 固定顺序与颜色
+## =========================
+continent_order_cn <- c("亚洲", "欧洲", "非洲", "美洲")
+
+continent_colors <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "美洲" = "#F39B7F"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 4. 中文属名修正
+## =========================
+genus_rename_map <- c(
+  "Kazachstania" = "哈萨克酵母属",
+  "Aspergillus" = "曲霉属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi phy Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Cladonia" = "石蕊属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Cortinarius" = "丝膜菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属",
+  "Scedosporium" = "赛多孢属",
+  "Nothophoma" = "近茎点霉属",
+  "Suillus" = "乳牛肝菌属",
+  "Agaricales_gen_Incertae_sedis" = "蘑菇目分类地位未定属",
+  "Neoascochyta" = "新壳二胞菌属",
+  "Neocallimastigaceae_gen_Incertae_sedis" = "新靓鞭菌科分类地位未定属",
+  "Furcasterigmium" = "叉梗壳属",
+  "Phaeosphaeriaceae_gen_Incertae_sedis" = "暗球腔菌科分类地位未定属",
+  "Neocallimastigomycota_gen_Incertae_sedis" = "新靓鞭菌门分类地位未定属",
+  "Ascobolus" = "粪盘菌属",
+  "Wickerhamomyces" = "威克汉姆酵母属",
+  "Piromyces" = "梨囊鞭菌属",
+  "Trichosporon" = "毛孢子菌属",
+  "Orpinomyces" = "奥平鞭菌属"
+)
+
+rename_genus <- function(x) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(genus_rename_map)
+  x2[hit] <- unname(genus_rename_map[x2[hit]])
+  x2
+}
+
+## =========================
+## 5. 工具函数：刻度
+## =========================
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) at <- c(at, xmax)
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else if (xmax >= 5) {
+    at <- c(0, round(xmax / 2, 1), xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 6. 读取矩阵并统一属名
+## =========================
+mat_df <- read.csv(
+  mat_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"大洲" %in% colnames(mat_df)) {
+  colnames(mat_df)[1] <- "大洲"
+}
+
+mat_df <- mat_df[match(continent_order_cn, mat_df$大洲), , drop = FALSE]
+
+old_genus_names <- setdiff(colnames(mat_df), "大洲")
+new_genus_names <- rename_genus(old_genus_names)
+
+mat <- as.matrix(mat_df[, old_genus_names, drop = FALSE])
+rownames(mat) <- mat_df$大洲
+colnames(mat) <- new_genus_names
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+if (any(duplicated(colnames(mat)))) {
+  mat <- rowsum(t(mat), group = colnames(mat))
+  mat <- t(mat)
+}
+
+mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+mat <- mat[, colSums(mat) > 0, drop = FALSE]
+
+continent_order_plot_cn <- rownames(mat)
+genus_order_plot_cn <- colnames(mat)
+
+write.csv(
+  cbind("大洲" = rownames(mat), as.data.frame(mat, check.names = FALSE)),
+  out_matrix_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 读取来源组成表；若不匹配则重建
+## =========================
+rebuild_source <- TRUE
+genus_source_prop <- NULL
+
+if (file.exists(source_input)) {
+  source_df <- read.csv(
+    source_input,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  if (!"属" %in% colnames(source_df)) {
+    colnames(source_df)[1] <- "属"
+  }
+
+  source_df$属 <- rename_genus(source_df$属)
+
+  source_num_cols <- intersect(colnames(source_df), continent_order_cn)
+
+  if (length(source_num_cols) == length(continent_order_cn)) {
+    source_df2 <- source_df %>%
+      group_by(属) %>%
+      summarise(
+        across(all_of(source_num_cols), ~sum(.x, na.rm = TRUE)),
+        .groups = "drop"
+      )
+
+    source_mat <- as.matrix(source_df2[, continent_order_cn, drop = FALSE])
+    rownames(source_mat) <- source_df2$属
+    storage.mode(source_mat) <- "numeric"
+    source_mat[is.na(source_mat)] <- 0
+
+    source_try <- t(source_mat)
+
+    source_has_all <- all(continent_order_plot_cn %in% rownames(source_try)) &&
+      all(genus_order_plot_cn %in% colnames(source_try))
+
+    if (source_has_all) {
+      genus_source_prop <- source_try[
+        continent_order_plot_cn,
+        genus_order_plot_cn,
+        drop = FALSE
+      ]
+      rebuild_source <- FALSE
+    }
+  }
+}
+
+if (rebuild_source) {
+  message("来源组成表与矩阵列名不完全一致，已根据弦图矩阵重新计算属侧来源组成。")
+
+  genus_source_prop <- apply(mat, 2, function(x) {
+    if (sum(x) == 0) rep(0, length(x)) else x / sum(x)
+  })
+
+  genus_source_prop <- as.matrix(genus_source_prop)
+  rownames(genus_source_prop) <- rownames(mat)
+}
+
+write.csv(
+  cbind("属" = colnames(genus_source_prop), as.data.frame(t(genus_source_prop), check.names = FALSE)),
+  out_source_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 8. 绘图函数：保持 fontfix 版式
+## =========================
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_plot_cn)),
+    genus_order_plot_cn
+  )
+
+  grid_cols <- c(
+    genus_colors[genus_order_plot_cn],
+    continent_colors[continent_order_plot_cn]
+  )
+
+  link_col_mat <- matrix(NA, nrow = nrow(mat), ncol = ncol(mat))
+  rownames(link_col_mat) <- rownames(mat)
+  colnames(link_col_mat) <- colnames(mat)
+
+  for (g in genus_order_plot_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(genus_colors[g], transparency = 0.45)
+  }
+
+  n_continent <- length(continent_order_plot_cn)
+  n_genus <- length(genus_order_plot_cn)
+  sector_order <- c(genus_order_plot_cn, continent_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4.2, n_continent - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.55, 1.55),
+    canvas.ylim = c(-1.55, 1.55),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.038,
+    preAllocateTracks = list(
+      list(track.height = 0.160),
+      list(track.height = 0.032)
+    )
+  )
+
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+      axis_h <- 0.08
+
+      at <- nice_axis_at(sector, xlim[2], drop_sectors = character(0))
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.50
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.45),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.020 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.030 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.44,
+            col = "grey25"
+          )
+        }
+      }
+
+      if (sector %in% continent_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.58,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 1.18,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.78,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_plot_cn) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[continent_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (ct in names(prop)) {
+            w <- total_width * prop[ct]
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start, 0, start + w, 1,
+                col = continent_colors[ct],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 9. 输出图
+## =========================
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+## =========================
+## 10. log
+## =========================
+sink(summary_txt)
+
+cat("Fig4-3 Bos continent Americas Top20 genus chord redraw: fontfix + namefix\n")
+cat("=========================================================================\n\n")
+cat("This script does NOT recalculate Top20 genera or relative abundance.\n")
+cat("It only redraws the chord plot and fixes genus translation.\n\n")
+
+cat("Corrected translation:\n")
+cat("Neocallimastigaceae_gen_Incertae_sedis -> 新靓鞭菌科分类地位未定属\n\n")
+
+cat("Input matrix:\n", mat_input, "\n", sep = "")
+cat("Input source composition:\n", source_input, "\n", sep = "")
+cat("Source composition rebuilt from matrix:", rebuild_source, "\n\n")
+
+cat("Font file:\n", font_file, "\n\n", sep = "")
+cat("Genus order after name replacement:\n")
+print(genus_order_plot_cn)
+
+cat("\nOutput files:\n")
+cat("PNG:", out_chord_png, "\n")
+cat("PDF:", out_chord_pdf, "\n")
+cat("Renamed matrix:", out_matrix_fixed, "\n")
+cat("Source composition:", out_source_fixed, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("已修正属名：Neocallimastigaceae_gen_Incertae_sedis -> 新靓鞭菌科分类地位未定属\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Log:\n", summary_txt, "\n", sep = "")
+
+EOF
+
+Rscript scripts/15c_redraw_Bos_continent_Americas_top20_genus_chord_CN_fontfix_namefix.R
