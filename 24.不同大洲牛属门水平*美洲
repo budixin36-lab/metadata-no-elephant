@@ -1,0 +1,596 @@
+#下面是完整作图脚本。它会读取上一轮已经确认可用的 Americas 合并版 Bos metadata，不会再重新筛选 Bos，也不会重新做 taxonomy，只重算门水平相对多度并重画图 4-2。
+#输入文件
+#Bos 合并大洲 metadata：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#门水平丰度表：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/phylum_abundance_table_no_elephant.tsv
+#是否重算
+#不重算 SH 注释、不重算 taxonomy、不重算门水平丰度表。
+#只重新计算 Bos 样本内门水平相对多度，并按合并后的大洲分组求平均。
+#统计口径 / 计算单位
+#先计算每个样本内各门相对多度，再按大洲计算平均相对多度，单位为 %。
+#分组顺序为：亚洲 → 欧洲 → 非洲 → 美洲。
+#输出目录
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant
+#不改动内容
+#沿用参考代码中“样本内相对多度 → 大洲平均相对多度”的计算逻辑，沿用图 3-3 / 旧图 4-2 的门中文名映射、配色、宋体、白底、PNG 600 dpi 和右侧图例风格。参考代码的旧逻辑是直接读取旧 Bos 过滤 metadata，这次只把输入 metadata、分组顺序和输出文件名改为 Americas 版本。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+mkdir -p scripts
+
+cat > scripts/14_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# 14_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.R
+#
+# 第四章 图4-2：
+# 不同大洲牛属动物肠道真菌门水平组成图
+#
+# 数据版本：
+#   globalfungi_style_test_no_elephant
+#
+# 分析对象：
+#   已由新图4-1筛选确认的 Bos 属样本
+#   North America + South America 已合并为 Americas / 美洲
+#
+# 输入 metadata：
+#   results/chapter4_Bos_continent_Americas_no_elephant/
+#   Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#
+# 分组变量：
+#   continent_CN
+#
+# 固定分组顺序：
+#   亚洲 → 欧洲 → 非洲 → 美洲
+#
+# 统计口径：
+#   1. 读取 phylum_abundance_table_no_elephant.tsv
+#   2. 筛选 Bos 大洲合并子集样本
+#   3. 先计算每个样本内各门相对多度
+#   4. 再按大洲计算样本内相对多度的平均值
+#
+# 图形：
+#   100% 堆叠柱状图
+#   纵轴：平均相对多度（%）
+#
+# 注意：
+#   不重新筛选 Bos
+#   不重新生成 taxonomy
+#   不重新做 SH 注释
+#   不覆盖旧图
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+filtered_metadata_file <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_Americas_no_elephant",
+  "Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+phylum_table_file <- file.path(
+  base_dir,
+  "taxonomy",
+  "phylum_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_Bos_continent_Americas_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_2_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_2_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.pdf"
+)
+
+summary_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_phylum_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+sample_count_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_phylum_sample_counts_no_elephant.csv"
+)
+
+sample_level_rel_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_phylum_sample_relative_abundance_no_elephant_CN.csv"
+)
+
+top_phylum_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_phylum_top5_by_continent_no_elephant_CN.csv"
+)
+
+sum_check_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_phylum_sum_check_no_elephant_CN.csv"
+)
+
+log_file <- file.path(
+  out_dir,
+  "Fig4_2_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN_log.txt"
+)
+
+if (!file.exists(filtered_metadata_file)) {
+  stop("找不到 Bos 大洲合并 metadata：", filtered_metadata_file)
+}
+
+if (!file.exists(phylum_table_file)) {
+  stop("找不到门水平丰度表：", phylum_table_file)
+}
+
+# =========================
+# 2. 中文字体：宋体
+# =========================
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+message("使用中文字体：", font_path)
+
+# =========================
+# 3. 固定顺序
+# =========================
+continent_order_cn <- c("亚洲", "欧洲", "非洲", "美洲")
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+# =========================
+# 4. 中文名称映射：沿用第三章门水平组成图
+# =========================
+phylum_map <- c(
+  "Ascomycota" = "子囊菌门",
+  "Basidiomycota" = "担子菌门",
+  "Neocallimastigomycota" = "新靓鞭菌门",
+  "Fungi_phy_Incertae_sedis" = "真菌门分类地位未定类群",
+  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
+  "Fungi_phy_Incertae_sedis_fungi" = "真菌门分类地位未定类群",
+  "Mucoromycota" = "毛霉门",
+  "Mortierellomycota" = "被孢霉门",
+  "Chytridiomycota" = "壶菌门",
+  "Rozellomycota" = "罗兹菌门",
+  "Olpidiomycota" = "油壶菌门",
+  "Glomeromycota" = "球囊霉门",
+  "Zoopagomycota" = "捕虫霉门",
+  "Aphelidiomycota" = "远日菌门",
+  "Blastocladiomycota" = "芽枝霉门",
+  "Basidiobolomycota" = "蛙粪霉门",
+  "Kickxellomycota" = "梳霉门",
+  "Monoblepharomycota" = "单毛菌门",
+  "Sanchytriomycota" = "Sanchytriomycota",
+  "Entorrhizomycota" = "根肿黑粉菌门",
+  "Calcarisporiellomycota" = "小齿梗孢门"
+)
+
+# =========================
+# 5. 颜色：沿用第三章 / 旧图4-2风格
+# =========================
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+# =========================
+# 6. 读取 Bos Americas metadata
+# =========================
+message("读取 Bos 大洲合并 metadata ...")
+
+meta <- read_csv(
+  filtered_metadata_file,
+  show_col_types = FALSE
+)
+
+needed_meta_cols <- c("sample_id", "continent_CN")
+
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "Bos 大洲合并 metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    continent_CN = as.character(continent_CN)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(continent_CN),
+    continent_CN != "",
+    continent_CN %in% continent_order_cn
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels = continent_order_cn)
+
+message("Bos metadata 样本数：", nrow(meta2))
+
+sample_counts <- meta2 %>%
+  count(continent_CN, name = "n_samples") %>%
+  complete(
+    continent_CN = factor(continent_order_cn, levels = continent_order_cn),
+    fill = list(n_samples = 0)
+  ) %>%
+  arrange(continent_CN)
+
+write_csv(sample_counts, sample_count_csv)
+
+# =========================
+# 7. 读取 phylum 丰度表
+# =========================
+message("读取 phylum 丰度表 ...")
+
+phylum_tab <- read.delim(
+  phylum_table_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+tax_col <- colnames(phylum_tab)[1]
+
+phylum_long <- phylum_tab %>%
+  rename(phylum = all_of(tax_col)) %>%
+  pivot_longer(
+    cols = -phylum,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    abundance = suppressWarnings(as.numeric(abundance)),
+    abundance = ifelse(is.na(abundance), 0, abundance)
+  ) %>%
+  inner_join(meta2, by = "sample_id")
+
+matched_samples <- n_distinct(phylum_long$sample_id)
+
+message("匹配到 phylum 表的 Bos 样本数：", matched_samples)
+
+if (matched_samples < 10) {
+  stop("匹配到的样本数过少，请检查 sample_id 是否一致。当前匹配样本数：", matched_samples)
+}
+
+# =========================
+# 8. 计算样本内相对多度
+# =========================
+message("计算样本内门水平相对多度 ...")
+
+sample_total <- phylum_long %>%
+  group_by(sample_id) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+phylum_rel <- phylum_long %>%
+  left_join(sample_total, by = "sample_id") %>%
+  filter(total_abundance > 0) %>%
+  mutate(
+    rel_abundance = abundance / total_abundance * 100,
+    phylum_cn = ifelse(
+      phylum %in% names(phylum_map),
+      phylum_map[phylum],
+      phylum
+    )
+  )
+
+sample_level_rel <- phylum_rel %>%
+  select(
+    sample_id,
+    continent_CN,
+    phylum,
+    phylum_cn,
+    abundance,
+    total_abundance,
+    rel_abundance
+  )
+
+write_csv(sample_level_rel, sample_level_rel_csv)
+
+# =========================
+# 9. 按大洲计算平均相对多度
+# =========================
+message("按大洲计算平均相对多度 ...")
+
+continent_phylum_mean <- phylum_rel %>%
+  group_by(continent_CN, phylum_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+all_present_phyla <- unique(continent_phylum_mean$phylum_cn)
+
+present_phyla <- phylum_order_cn[phylum_order_cn %in% all_present_phyla]
+
+# 对于没有写入 phylum_order_cn 的门，放在最后，避免丢失
+extra_phyla <- setdiff(all_present_phyla, present_phyla)
+present_phyla <- c(present_phyla, sort(extra_phyla))
+
+plot_df <- expand.grid(
+  continent_CN = continent_order_cn,
+  phylum_cn = present_phyla,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    continent_phylum_mean,
+    by = c("continent_CN", "phylum_cn")
+  ) %>%
+  mutate(
+    mean_relative_abundance = ifelse(
+      is.na(mean_relative_abundance),
+      0,
+      mean_relative_abundance
+    ),
+    continent_CN = factor(continent_CN, levels = continent_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(continent_CN, phylum_cn)
+
+write_csv(plot_df, summary_csv)
+
+# 检查每个大洲是否约等于 100%
+sum_check <- plot_df %>%
+  group_by(continent_CN) %>%
+  summarise(
+    sum_mean_relative_abundance = sum(mean_relative_abundance),
+    .groups = "drop"
+  )
+
+write_csv(sum_check, sum_check_csv)
+
+top_table <- plot_df %>%
+  arrange(continent_CN, desc(mean_relative_abundance)) %>%
+  group_by(continent_CN) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+write_csv(top_table, top_phylum_csv)
+
+# =========================
+# 10. 如出现未定义颜色的门，自动补充灰色
+# =========================
+missing_color_phyla <- setdiff(present_phyla, names(phylum_colors))
+
+if (length(missing_color_phyla) > 0) {
+  warning(
+    "以下门没有预设颜色，将自动使用灰色：",
+    paste(missing_color_phyla, collapse = ", ")
+  )
+
+  auto_cols <- rep("#BDBDBD", length(missing_color_phyla))
+  names(auto_cols) <- missing_color_phyla
+  phylum_colors <- c(phylum_colors, auto_cols)
+}
+
+phylum_colors_use <- phylum_colors[present_phyla]
+
+# =========================
+# 11. 作图
+# =========================
+message("绘图 ...")
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = continent_CN,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.75, color = NA) +
+  scale_fill_manual(
+    values = phylum_colors_use,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.line = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    axis.ticks = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 11.2,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.42, "cm"),
+    legend.position = "right",
+    plot.margin = margin(t = 6, r = 6, b = 6, l = 6)
+  )
+
+# =========================
+# 12. 输出
+# =========================
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9,
+  height = 6,
+  bg = "white"
+)
+
+# =========================
+# 13. log
+# =========================
+sink(log_file)
+
+cat("Fig4-2 Bos continent Americas phylum stacked bar, no-elephant\n")
+cat("==============================================================\n\n")
+
+cat("Input files:\n")
+cat("Filtered Bos Americas metadata:", filtered_metadata_file, "\n")
+cat("Phylum abundance table:", phylum_table_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis logic:\n")
+cat("Use already filtered Bos continent metadata from new Fig4-1.\n")
+cat("North America and South America are already merged as Americas / 美洲.\n")
+cat("Do not re-filter Bos here.\n")
+cat("Do not regenerate taxonomy.\n")
+cat("Calculate sample-level relative abundance first, then average by continent.\n\n")
+
+cat("Fixed continent order:\n")
+print(continent_order_cn)
+
+cat("\nSample counts:\n")
+print(sample_counts)
+
+cat("\nMatched samples in phylum table:", matched_samples, "\n")
+
+cat("\nPhylum order used in plot:\n")
+print(present_phyla)
+
+cat("\nSum check by continent:\n")
+print(sum_check)
+
+cat("\nTop phyla by continent:\n")
+print(top_table)
+
+cat("\nOutput files:\n")
+cat("PNG:", out_png, "\n")
+cat("PDF:", out_pdf, "\n")
+cat("Summary CSV:", summary_csv, "\n")
+cat("Sample counts CSV:", sample_count_csv, "\n")
+cat("Sample-level relative abundance CSV:", sample_level_rel_csv, "\n")
+cat("Top phylum CSV:", top_phylum_csv, "\n")
+cat("Sum check CSV:", sum_check_csv, "\n")
+
+sink()
+
+message("完成！")
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("汇总表: ", summary_csv)
+message("样本数表: ", sample_count_csv)
+message("样本水平相对多度表: ", sample_level_rel_csv)
+message("Top5门水平表: ", top_phylum_csv)
+message("Sum check表: ", sum_check_csv)
+message("日志: ", log_file)
+
+EOF
+
+Rscript scripts/14_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.Rstyle_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant
