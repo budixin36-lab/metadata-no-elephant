@@ -1,0 +1,1605 @@
+#这次脚本用于：不同大洲牛属动物肠道真菌属水平功能类群组成图。
+#输入是 Americas 合并版 Bos metadata、no-elephant 属水平丰度表和 FungalTraits Table S1。
+#统计口径沿用第三章最终版：先计算每个样本内属水平相对多度，再按 primary_lifestyle 汇总，最后按大洲求平均相对多度。
+#图形板式沿用第三章 CN_fontfix 版：中文字体、白底、600 dpi、横轴 16、Y 轴标题 16、纵轴刻度 13、图例文字 11、无图例标题，并用 coord_cartesian() 避免顶部被裁剪。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+mkdir -p scripts
+
+cat > scripts/16_Bos_continent_Americas_genus_primary_lifestyle_bar_no_elephant_CN_fontfix.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 16_Bos_continent_Americas_genus_primary_lifestyle_bar_no_elephant_CN_fontfix.R
+##
+## 第四章：
+## 不同大洲牛属动物肠道真菌属水平功能类群组成图
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. Bos Americas metadata：
+##      results/chapter4_Bos_continent_Americas_no_elephant/
+##      Bos_continent_Americas_filtered_metadata_no_elephant.csv
+##
+##   2. 属水平丰度表：
+##      taxonomy/genus_abundance_table_no_elephant.tsv
+##
+##   3. FungalTraits Table S1:
+##      Table S1. Traits of genera.xlsx
+##
+## 计算口径：
+##   1. 使用属水平丰度表；
+##   2. 以 FungalTraits Table S1 的 primary_lifestyle 为功能类群注释依据；
+##   3. 属名直接匹配为主；
+##   4. COMMENT on genus 中明确 “synonym of XXX” 的记录作为保守辅助；
+##   5. 未匹配、缺失 primary_lifestyle、undefined/unknown 合并显示为“未分类”；
+##   6. 每个样本内先计算属水平相对多度；
+##   7. 再按功能类群汇总；
+##   8. 最后按大洲求平均相对多度。
+##
+## 分组：
+##   continent_CN
+##
+## 固定顺序：
+##   亚洲 → 欧洲 → 非洲 → 美洲
+##
+## 输出：
+##   PNG 600 dpi 白底
+##   PDF
+##   属功能类群匹配表
+##   样本水平功能类群相对多度表
+##   大洲平均相对多度表
+##   摘要 log
+##
+## 不做：
+##   不重新筛选 Bos；
+##   不重新生成 taxonomy；
+##   不重新做 SH 注释；
+##   不使用旧 North America 版本 metadata。
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## -----------------------------
+## 0. R 包路径与依赖
+## -----------------------------
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "data.table",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "openxlsx",
+  "ggplot2",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## -----------------------------
+## 1. 路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+genus_table_file <- file.path(
+  base_dir,
+  "taxonomy/genus_abundance_table_no_elephant.tsv"
+)
+
+traits_file_candidates <- c(
+  "/mnt/c/Users/hp/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/d/Downloads/Table S1. Traits of genera.xlsx",
+  "/mnt/data/Table S1. Traits of genera.xlsx",
+  "/mnt/data/Table S1. Traits of genera(2).xlsx"
+)
+
+traits_file <- traits_file_candidates[file.exists(traits_file_candidates)][1]
+
+if (is.na(traits_file)) {
+  stop(
+    "找不到 FungalTraits Table S1 文件。已尝试路径：\n",
+    paste(traits_file_candidates, collapse = "\n")
+  )
+}
+
+if (!file.exists(metadata_file)) {
+  stop("找不到 Bos Americas metadata：", metadata_file)
+}
+
+if (!file.exists(genus_table_file)) {
+  stop("找不到属水平丰度表：", genus_table_file)
+}
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_fontfix.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_fontfix.pdf"
+)
+
+out_continent_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_function_group_mean_relative_abundance_no_elephant_CN_fontfix.csv"
+)
+
+out_sample_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_function_group_sample_relative_abundance_no_elephant_CN_fontfix.csv"
+)
+
+out_assign_tsv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_primary_lifestyle_assignment_no_elephant_CN_fontfix.tsv"
+)
+
+out_match_summary_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_primary_lifestyle_match_summary_no_elephant_CN_fontfix.csv"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_fontfix_log.txt"
+)
+
+cat("metadata_file: ", metadata_file, "\n", sep = "")
+cat("genus_table_file: ", genus_table_file, "\n", sep = "")
+cat("traits_file: ", traits_file, "\n", sep = "")
+
+## -----------------------------
+## 2. 中文字体：沿用第三章 fontfix 思路
+## -----------------------------
+base_family <- "cnfont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+sysfonts::font_add(base_family, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("font_file: ", font_file, "\n", sep = "")
+
+## -----------------------------
+## 3. 工具函数
+## -----------------------------
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+normalize_name <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*", "", x)
+  x <- gsub("_", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- gsub("\\bsp\\.?$", "", x, ignore.case = TRUE)
+  x <- gsub("\\bspp\\.?$", "", x, ignore.case = TRUE)
+  x <- trimws(x)
+
+  ## 如果是物种名形式，只取第一个词作为属名
+  x <- sapply(strsplit(x, "\\s+"), function(v) {
+    if (length(v) == 0) return(NA_character_)
+    v[1]
+  }, USE.NAMES = FALSE)
+
+  x <- tolower(x)
+
+  x[x %in% c(
+    "",
+    "na", "nan", "null",
+    "unassigned", "unclassified", "uncultured", "unknown",
+    "fungi", "fungal", "incertae", "incertae sedis"
+  )] <- NA_character_
+
+  x
+}
+
+extract_synonym_target <- function(comment) {
+  comment <- as.character(comment)
+  comment[is.na(comment)] <- ""
+
+  hit <- stringr::str_match(
+    comment,
+    regex("synonym of\\s+([A-Za-z][A-Za-z.-]*)", ignore_case = TRUE)
+  )[, 2]
+
+  normalize_name(hit)
+}
+
+normalize_lifestyle <- function(x) {
+  x <- tolower(as.character(x))
+  x <- gsub("_", " ", x)
+  x <- gsub("-", " ", x)
+  x <- gsub("/", " / ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x
+}
+
+map_primary_lifestyle <- function(x) {
+  if (is.na(x) || trimws(as.character(x)) == "") return("未分类")
+
+  y <- normalize_lifestyle(x)
+
+  ## 腐生类
+  if (y %in% c("wood saprotroph")) return("木材腐生型")
+  if (y %in% c("litter saprotroph")) return("凋落物腐生型")
+  if (y %in% c("soil saprotroph")) return("土壤腐生型")
+  if (y %in% c("unspecified saprotroph", "undefined saprotroph")) return("未明确腐生型")
+  if (y %in% c("dung saprotroph")) return("粪生腐生型")
+  if (y %in% c(
+    "nectar saprotroph",
+    "tap saprotroph",
+    "nectar / tap saprotroph",
+    "nectar tap saprotroph",
+    "nectar/tap saprotroph"
+  )) return("花蜜/树液腐生型")
+  if (y %in% c("pollen saprotroph")) return("花粉腐生型")
+
+  ## 病原 / 寄生类
+  if (y %in% c("plant pathogen")) return("植物病原型")
+  if (y %in% c("animal parasite", "animal pathogen")) return("动物寄生型")
+  if (y %in% c("algal parasite")) return("藻类寄生型")
+  if (y %in% c("protozoan parasite", "protistan parasite")) return("原生生物寄生型")
+  if (y %in% c("lichen parasite")) return("地衣寄生型")
+  if (y %in% c("fungal parasite", "mycoparasite")) return("真菌寄生型")
+  if (y %in% c("unspecified pathotroph", "undefined pathogen", "unspecified pathogen")) return("未定义病原菌")
+
+  ## 共生类
+  if (y %in% c("lichenized", "lichenised")) return("地衣型真菌")
+  if (y %in% c("ectomycorrhizal")) return("外生菌根型")
+  if (y %in% c("arbuscular mycorrhizal")) return("丛枝菌根型")
+  if (y %in% c("bryophilous", "moss symbiont")) return("苔藓共生型")
+  if (y %in% c("unspecified symbiotroph", "undefined symbiotroph")) return("未明确共生型")
+  if (y %in% c("animal endosymbiont")) return("动物内共生型")
+  if (y %in% c("algal epibiont", "algal ectosymbiont")) return("藻类外共生型")
+
+  ## 内生 / 附生
+  if (y %in% c("foliar endophyte", "leaf endophyte")) return("叶内生型")
+  if (y %in% c("root endophyte")) return("根内生型")
+  if (y %in% c("epiphyte")) return("附生型")
+
+  ## 其他
+  if (y %in% c("sooty mold", "sooty mould")) return("煤烟菌")
+  if (y %in% c("animal associated", "animal-associated")) return("动物相关型")
+  if (y %in% c("arthropod associated", "arthropod-associated")) return("节肢动物相关型")
+  if (y %in% c("bacterivore", "bacterivorous")) return("食细菌型")
+  if (y %in% c(
+    "algivorous / protistivorous",
+    "algivorous/protistivorous",
+    "algivorous protistivorous"
+  )) return("食藻/食原生生物型")
+
+  ## generic undefined / unknown 合并为未分类
+  if (y %in% c("undefined", "unspecified", "unassigned", "unknown", "na")) return("未分类")
+
+  ## 未覆盖类型先归未分类，避免英文进入图例
+  "未分类"
+}
+
+## -----------------------------
+## 4. 顺序与配色
+## -----------------------------
+continent_order <- c("亚洲", "欧洲", "非洲", "美洲")
+
+function_order <- c(
+  "木材腐生型",
+  "凋落物腐生型",
+  "土壤腐生型",
+  "未明确腐生型",
+  "粪生腐生型",
+  "花蜜/树液腐生型",
+  "花粉腐生型",
+
+  "植物病原型",
+  "动物寄生型",
+  "藻类寄生型",
+  "原生生物寄生型",
+  "地衣寄生型",
+  "真菌寄生型",
+  "未定义病原菌",
+
+  "地衣型真菌",
+  "外生菌根型",
+  "丛枝菌根型",
+  "苔藓共生型",
+  "未明确共生型",
+  "动物内共生型",
+  "藻类外共生型",
+
+  "叶内生型",
+  "根内生型",
+  "附生型",
+
+  "煤烟菌",
+  "动物相关型",
+  "节肢动物相关型",
+  "食细菌型",
+  "食藻/食原生生物型",
+
+  "未分类"
+)
+
+function_colors <- c(
+  "木材腐生型"     = "#E69F00",
+  "凋落物腐生型"   = "#F0C808",
+  "土壤腐生型"     = "#C49000",
+  "未明确腐生型"   = "#8C510A",
+  "粪生腐生型"     = "#D95F02",
+  "花蜜/树液腐生型" = "#F3B562",
+  "花粉腐生型"     = "#B8860B",
+
+  "植物病原型"     = "#F50F18",
+  "动物寄生型"     = "#9B59B6",
+  "藻类寄生型"     = "#E67AB6",
+  "原生生物寄生型" = "#D77FB4",
+  "地衣寄生型"     = "#FA8072",
+  "真菌寄生型"     = "#B2182B",
+  "未定义病原菌"   = "#C51B8A",
+
+  "地衣型真菌"     = "#11A579",
+  "外生菌根型"     = "#1F9E89",
+  "丛枝菌根型"     = "#66A61E",
+  "苔藓共生型"     = "#A6D854",
+  "未明确共生型"   = "#2CA25F",
+  "动物内共生型"   = "#00A087",
+  "藻类外共生型"   = "#4DBBD5",
+
+  "叶内生型"       = "#73A2D1",
+  "根内生型"       = "#4A7BD0",
+  "附生型"         = "#6A51A3",
+
+  "煤烟菌"         = "#5E5E5E",
+  "动物相关型"     = "#7A52A5",
+  "节肢动物相关型" = "#8DA0CB",
+  "食细菌型"       = "#4C78A8",
+  "食藻/食原生生物型" = "#A6CEE3",
+
+  "未分类"         = "#C9C9C9"
+)
+
+## -----------------------------
+## 5. 读取 Bos Americas metadata
+## -----------------------------
+cat("读取 Bos Americas metadata ...\n")
+
+meta <- fread(
+  metadata_file,
+  data.table = FALSE
+)
+
+needed_cols <- c("sample_id", "continent_CN")
+missing_cols <- setdiff(needed_cols, colnames(meta))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "Bos Americas metadata 缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sampleid = as.character(sample_id),
+    continent_CN = as.character(continent_CN)
+  ) %>%
+  filter(
+    !is.na(sampleid),
+    sampleid != "",
+    !is.na(continent_CN),
+    continent_CN != "",
+    continent_CN %in% continent_order
+  ) %>%
+  distinct(sampleid, .keep_all = TRUE)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels = continent_order)
+
+cat("Bos Americas 样本数：", nrow(meta2), "\n", sep = "")
+cat("大洲样本数：\n")
+print(table(meta2$continent_CN))
+
+## -----------------------------
+## 6. 读取属水平丰度表
+## -----------------------------
+cat("\n读取 genus abundance table ...\n")
+
+genus_tab <- fread(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE,
+  quote = ""
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus_abundance_table_no_elephant.tsv 读取失败，列数异常。")
+}
+
+names(genus_tab)[1] <- "Genus_raw"
+
+sample_cols <- intersect(meta2$sampleid, names(genus_tab))
+
+if (length(sample_cols) == 0) {
+  stop("属水平丰度表中找不到与 Bos Americas metadata 对应的样本列。")
+}
+
+genus_tab <- genus_tab[, c("Genus_raw", sample_cols), drop = FALSE]
+
+for (cc in sample_cols) {
+  genus_tab[[cc]] <- suppressWarnings(as.numeric(genus_tab[[cc]]))
+  genus_tab[[cc]][is.na(genus_tab[[cc]])] <- 0
+}
+
+genus_tab$Genus <- normalize_name(genus_tab$Genus_raw)
+genus_tab$Genus[is.na(genus_tab$Genus)] <- "unclassified"
+
+genus_tab2 <- genus_tab %>%
+  select(Genus, all_of(sample_cols)) %>%
+  group_by(Genus) %>%
+  summarise(
+    across(everything(), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+cat("属水平丰度表合并后属数：", nrow(genus_tab2), "\n", sep = "")
+
+## 长表
+genus_long <- genus_tab2 %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sampleid",
+    values_to = "abundance"
+  ) %>%
+  left_join(meta2, by = "sampleid")
+
+sample_total <- genus_long %>%
+  group_by(sampleid) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+valid_samples <- sample_total %>%
+  filter(total_abundance > 0) %>%
+  pull(sampleid)
+
+genus_long <- genus_long %>%
+  filter(sampleid %in% valid_samples) %>%
+  left_join(sample_total, by = "sampleid") %>%
+  mutate(
+    rel_abundance = ifelse(total_abundance > 0, abundance / total_abundance * 100, 0)
+  )
+
+meta_use <- meta2 %>%
+  filter(sampleid %in% valid_samples)
+
+cat("用于分析的 Bos 样本数：", length(valid_samples), "\n", sep = "")
+
+## -----------------------------
+## 7. 读取 FungalTraits Table S1
+## -----------------------------
+cat("\n读取 FungalTraits Table S1 ...\n")
+
+sheet_names <- openxlsx::getSheetNames(traits_file)
+sheet_name <- if ("data" %in% sheet_names) "data" else sheet_names[1]
+
+traits_raw <- openxlsx::read.xlsx(
+  traits_file,
+  sheet = sheet_name,
+  check.names = FALSE
+)
+
+cat("Table S1 sheet: ", sheet_name, "\n", sep = "")
+cat("Table S1 行数：", nrow(traits_raw), "\n", sep = "")
+cat("Table S1 列名：\n")
+print(colnames(traits_raw))
+
+genus_col <- "GENUS"
+primary_col <- "primary_lifestyle"
+
+if (!genus_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 GENUS 列。")
+}
+
+if (!primary_col %in% colnames(traits_raw)) {
+  stop("Table S1 中找不到 primary_lifestyle 列。")
+}
+
+comment_col <- if ("COMMENT on genus" %in% colnames(traits_raw)) {
+  "COMMENT on genus"
+} else if ("COMMENT.on.genus" %in% colnames(traits_raw)) {
+  "COMMENT.on.genus"
+} else {
+  NA_character_
+}
+
+traits_core <- traits_raw %>%
+  transmute(
+    accepted_name = as.character(.data[[genus_col]]),
+    comment_on_genus = if (!is.na(comment_col)) as.character(.data[[comment_col]]) else NA_character_,
+    primary_lifestyle = as.character(.data[[primary_col]])
+  ) %>%
+  mutate(
+    genus_key = normalize_name(accepted_name),
+    primary_lifestyle_cn = vapply(primary_lifestyle, map_primary_lifestyle, character(1)),
+    synonym_target_key = extract_synonym_target(comment_on_genus)
+  ) %>%
+  filter(!is.na(genus_key), genus_key != "")
+
+cat("Table S1 可用属记录数：", nrow(traits_core), "\n", sep = "")
+cat("Table S1 唯一 GENUS 数：", dplyr::n_distinct(traits_core$genus_key), "\n", sep = "")
+
+## 直接 GENUS 匹配表
+direct_map <- traits_core %>%
+  group_by(genus_key) %>%
+  summarise(
+    accepted_name_joined = paste(unique(accepted_name), collapse = "; "),
+    primary_lifestyle_joined = paste(unique(na.omit(primary_lifestyle)), collapse = "; "),
+    n_lifestyle_cn = n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]) == 1,
+      unique(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)])[1],
+      "未分类"
+    ),
+    comment_joined = paste(unique(na.omit(comment_on_genus)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    direct_status = ifelse(primary_lifestyle_cn == "未分类", "direct_missing_or_ambiguous", "direct")
+  )
+
+## COMMENT on genus 中 synonym of X 的保守 fallback
+synonym_map <- traits_core %>%
+  filter(!is.na(synonym_target_key), synonym_target_key != "") %>%
+  group_by(synonym_target_key) %>%
+  summarise(
+    synonym_source_genera = paste(unique(accepted_name), collapse = "; "),
+    synonym_lifestyle_joined = paste(unique(na.omit(primary_lifestyle)), collapse = "; "),
+    n_lifestyle_cn = n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]),
+    primary_lifestyle_cn = ifelse(
+      n_distinct(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)]) == 1,
+      unique(primary_lifestyle_cn[!is.na(primary_lifestyle_cn)])[1],
+      "未分类"
+    ),
+    synonym_comments = paste(unique(na.omit(comment_on_genus)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(primary_lifestyle_cn != "未分类")
+
+cat("COMMENT synonym fallback 可用 target 数：", nrow(synonym_map), "\n", sep = "")
+
+## -----------------------------
+## 8. 匹配 genus -> primary_lifestyle
+## -----------------------------
+cat("\n匹配 genus 与 primary_lifestyle ...\n")
+
+genus_assignment <- genus_tab2 %>%
+  transmute(
+    Genus = Genus,
+    genus_key = Genus
+  ) %>%
+  left_join(
+    direct_map %>%
+      select(
+        genus_key,
+        accepted_name_joined,
+        direct_primary_lifestyle = primary_lifestyle_joined,
+        direct_lifestyle_cn = primary_lifestyle_cn,
+        direct_status,
+        direct_comment = comment_joined
+      ),
+    by = "genus_key"
+  ) %>%
+  left_join(
+    synonym_map %>%
+      select(
+        synonym_target_key,
+        synonym_source_genera,
+        synonym_lifestyle_joined,
+        synonym_lifestyle_cn = primary_lifestyle_cn,
+        synonym_comments
+      ),
+    by = c("genus_key" = "synonym_target_key")
+  ) %>%
+  mutate(
+    match_method = case_when(
+      !is.na(direct_lifestyle_cn) & direct_lifestyle_cn != "未分类" ~ "direct_GENUS",
+      (is.na(direct_lifestyle_cn) | direct_lifestyle_cn == "未分类") &
+        !is.na(synonym_lifestyle_cn) &
+        synonym_lifestyle_cn != "未分类" ~ "synonym_comment_fallback",
+      !is.na(direct_status) & direct_status == "direct_missing_or_ambiguous" ~ "direct_missing_or_ambiguous",
+      TRUE ~ "unmatched"
+    ),
+    primary_lifestyle_cn = case_when(
+      !is.na(direct_lifestyle_cn) & direct_lifestyle_cn != "未分类" ~ direct_lifestyle_cn,
+      (is.na(direct_lifestyle_cn) | direct_lifestyle_cn == "未分类") &
+        !is.na(synonym_lifestyle_cn) &
+        synonym_lifestyle_cn != "未分类" ~ synonym_lifestyle_cn,
+      TRUE ~ "未分类"
+    ),
+    primary_lifestyle_cn = ifelse(
+      primary_lifestyle_cn %in% c("未定义型", "未分类"),
+      "未分类",
+      primary_lifestyle_cn
+    )
+  )
+
+write.table(
+  genus_assignment,
+  file = out_assign_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+match_summary <- genus_assignment %>%
+  count(match_method, primary_lifestyle_cn, name = "genus_number") %>%
+  arrange(match_method, desc(genus_number))
+
+write.csv(
+  match_summary,
+  out_match_summary_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("匹配方式统计：\n")
+print(table(genus_assignment$match_method, useNA = "ifany"))
+
+## -----------------------------
+## 9. 汇总到样本、大洲水平
+## -----------------------------
+cat("\n汇总样本水平功能类群相对多度 ...\n")
+
+genus_long2 <- genus_long %>%
+  left_join(
+    genus_assignment %>%
+      select(genus_key, primary_lifestyle_cn) %>%
+      distinct(),
+    by = c("Genus" = "genus_key")
+  ) %>%
+  mutate(
+    primary_lifestyle_cn = ifelse(
+      is.na(primary_lifestyle_cn) | primary_lifestyle_cn == "",
+      "未分类",
+      primary_lifestyle_cn
+    ),
+    primary_lifestyle_cn = ifelse(
+      primary_lifestyle_cn %in% c("未定义型", "未分类"),
+      "未分类",
+      primary_lifestyle_cn
+    )
+  )
+
+sample_fun <- genus_long2 %>%
+  group_by(sampleid, continent_CN, primary_lifestyle_cn) %>%
+  summarise(
+    rel_abundance = sum(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 保证每个样本所有功能类群齐全，避免某些类群缺失造成后续表不完整
+sample_fun_complete <- expand.grid(
+  sampleid = valid_samples,
+  primary_lifestyle_cn = function_order,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    meta_use %>% select(sampleid, continent_CN),
+    by = "sampleid"
+  ) %>%
+  left_join(
+    sample_fun,
+    by = c("sampleid", "continent_CN", "primary_lifestyle_cn")
+  ) %>%
+  mutate(
+    rel_abundance = ifelse(is.na(rel_abundance), 0, rel_abundance),
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  arrange(sampleid, primary_lifestyle_cn)
+
+write.csv(
+  sample_fun_complete,
+  out_sample_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("检查样本内功能类群相对多度加总，理论上接近 100：\n")
+sample_sum_check <- sample_fun_complete %>%
+  group_by(sampleid) %>%
+  summarise(total = sum(rel_abundance), .groups = "drop")
+
+print(summary(sample_sum_check$total))
+
+cat("计算大洲平均相对多度 ...\n")
+
+continent_mean <- sample_fun_complete %>%
+  group_by(continent_CN, primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    continent_CN = factor(continent_order, levels = continent_order),
+    primary_lifestyle_cn = factor(function_order, levels = function_order),
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(primary_lifestyle_cn, levels = function_order)
+  ) %>%
+  arrange(continent_CN, primary_lifestyle_cn)
+
+## 只保留实际出现的功能类群，避免图例过长
+present_groups <- continent_mean %>%
+  group_by(primary_lifestyle_cn) %>%
+  summarise(total_mean = sum(mean_relative_abundance), .groups = "drop") %>%
+  filter(total_mean > 0) %>%
+  pull(primary_lifestyle_cn) %>%
+  as.character()
+
+present_groups <- function_order[function_order %in% present_groups]
+
+continent_mean_plot <- continent_mean %>%
+  filter(as.character(primary_lifestyle_cn) %in% present_groups) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    primary_lifestyle_cn = factor(as.character(primary_lifestyle_cn), levels = present_groups)
+  ) %>%
+  arrange(continent_CN, primary_lifestyle_cn)
+
+write.csv(
+  continent_mean_plot,
+  out_continent_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("各大洲平均相对多度加总检查，应接近 100：\n")
+continent_sum_check <- continent_mean_plot %>%
+  group_by(continent_CN) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+print(continent_sum_check)
+
+## -----------------------------
+## 10. 作图
+## -----------------------------
+cat("\n绘图 ...\n")
+
+used_colors <- function_colors[present_groups]
+
+missing_color <- setdiff(present_groups, names(function_colors))
+if (length(missing_color) > 0) {
+  stop("以下功能类群缺少颜色：", paste(missing_color, collapse = ", "))
+}
+
+p <- ggplot(
+  continent_mean_plot,
+  aes(
+    x = continent_CN,
+    y = mean_relative_abundance,
+    fill = primary_lifestyle_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +
+  scale_fill_manual(
+    values = used_colors,
+    breaks = present_groups,
+    drop = TRUE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  theme_bw(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(size = 16, color = "black", family = base_family),
+    axis.text.y = element_text(size = 13, color = "black", family = base_family),
+    axis.title.y = element_text(size = 16, color = "black", family = base_family),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black", family = base_family),
+    legend.key.size = unit(0.45, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE
+    )
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+## -----------------------------
+## 11. 摘要 log
+## -----------------------------
+overall_mean <- sample_fun_complete %>%
+  group_by(primary_lifestyle_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_relative_abundance))
+
+continent_top <- continent_mean %>%
+  group_by(continent_CN) %>%
+  arrange(continent_CN, desc(mean_relative_abundance)) %>%
+  slice_head(n = 8) %>%
+  ungroup()
+
+## 按总丰度算匹配覆盖
+genus_total <- genus_tab2 %>%
+  mutate(total_abundance = rowSums(across(all_of(sample_cols)), na.rm = TRUE)) %>%
+  select(Genus, total_abundance)
+
+coverage_by_abundance <- genus_total %>%
+  left_join(
+    genus_assignment %>% select(genus_key, match_method, primary_lifestyle_cn),
+    by = c("Genus" = "genus_key")
+  ) %>%
+  mutate(classified = primary_lifestyle_cn != "未分类") %>%
+  summarise(
+    total_abundance = sum(total_abundance, na.rm = TRUE),
+    classified_abundance = sum(total_abundance[classified], na.rm = TRUE),
+    classified_percent = classified_abundance / total_abundance * 100
+  )
+
+sink(out_log)
+
+cat("Fig4-4 Bos continent Americas genus-level primary lifestyle composition\n")
+cat("======================================================================\n\n")
+
+cat("Input files:\n")
+cat("Bos Americas metadata:", metadata_file, "\n")
+cat("Genus abundance table:", genus_table_file, "\n")
+cat("FungalTraits Table S1:", traits_file, "\n")
+cat("Sheet used:", sheet_name, "\n\n")
+
+cat("Table S1 columns confirmed:\n")
+cat("GENUS:", genus_col, "\n")
+cat("COMMENT column:", ifelse(is.na(comment_col), "not found", comment_col), "\n")
+cat("primary_lifestyle:", primary_col, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis logic:\n")
+cat("1. Use Bos Americas filtered metadata from Fig4-1.\n")
+cat("2. Use no-elephant genus abundance table.\n")
+cat("3. Annotate genus-level taxa by FungalTraits Table S1 primary_lifestyle.\n")
+cat("4. Direct GENUS matching is preferred.\n")
+cat("5. COMMENT on genus with explicit 'synonym of X' is used only as conservative fallback.\n")
+cat("6. Unmatched, missing, ambiguous, undefined and unknown categories are shown as 未分类.\n")
+cat("7. Sample-level genus relative abundance is calculated first.\n")
+cat("8. Functional groups are summed within each sample.\n")
+cat("9. Mean relative abundance is then calculated by continent.\n\n")
+
+cat("Continent order:\n")
+print(continent_order)
+
+cat("\nSample counts:\n")
+print(table(meta_use$continent_CN))
+
+cat("\nGenus table merged genus number:", nrow(genus_tab2), "\n")
+cat("Valid Bos samples used:", length(valid_samples), "\n\n")
+
+cat("Genus matching method counts:\n")
+print(table(genus_assignment$match_method, useNA = "ifany"))
+
+cat("\nClassified abundance coverage:\n")
+print(coverage_by_abundance)
+
+cat("\nSample sum check summary:\n")
+print(summary(sample_sum_check$total))
+
+cat("\nContinent sum check:\n")
+print(continent_sum_check)
+
+cat("\nPresent functional groups in plot:\n")
+print(present_groups)
+
+cat("\nOverall functional group mean relative abundance:\n")
+print(overall_mean)
+
+cat("\nTop functional groups by continent:\n")
+print(continent_top)
+
+cat("\nOutput files:\n")
+cat("PNG:", out_png, "\n")
+cat("PDF:", out_pdf, "\n")
+cat("Continent mean CSV:", out_continent_csv, "\n")
+cat("Sample-level CSV:", out_sample_csv, "\n")
+cat("Genus assignment TSV:", out_assign_tsv, "\n")
+cat("Match summary CSV:", out_match_summary_csv, "\n")
+
+sink()
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("大洲平均相对多度表: ", out_continent_csv, "\n", sep = "")
+cat("样本水平相对多度表: ", out_sample_csv, "\n", sep = "")
+cat("属功能类群匹配表: ", out_assign_tsv, "\n", sep = "")
+cat("匹配摘要表: ", out_match_summary_csv, "\n", sep = "")
+cat("日志: ", out_log, "\n", sep = "")
+
+EOF
+
+Rscript scripts/16_Bos_continent_Americas_genus_primary_lifestyle_bar_no_elephant_CN_fontfix.R
+#下面这版是只重画、不重算脚本：读取你已经生成的图 4-4 大洲功能类群平均相对多度表，只统一功能类群命名和重新配色，不改变任何计算结果。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/16b_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix.R <<'EOF'
+#!/usr/bin/env Rscript
+
+## ============================================================
+## 16b_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix.R
+##
+## 图4-4 不同大洲牛属动物肠道真菌属水平功能类群组成图
+##
+## 只重画，不重算：
+##   1. 不重新匹配 FungalTraits Table S1
+##   2. 不重新计算样本内相对多度
+##   3. 不改变各大洲功能类群平均相对多度数值
+##
+## 本脚本只做：
+##   1. 读取已生成的大洲功能类群平均相对多度表
+##   2. 将功能类群名称统一为第三章最终图使用的中文命名体系
+##   3. 重新分配更容易区分的颜色
+##   4. 输出新图，不覆盖旧图
+## ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## -----------------------------
+## 0. R 包路径与依赖
+## -----------------------------
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tidyr",
+  "ggplot2",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## -----------------------------
+## 1. 路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+input_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_function_group_mean_relative_abundance_no_elephant_CN_fontfix.csv"
+)
+
+if (!file.exists(input_csv)) {
+  stop("找不到已生成的大洲功能类群平均相对多度表：", input_csv)
+}
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix.pdf"
+)
+
+out_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_genus_function_group_mean_relative_abundance_no_elephant_CN_name_colorfix.csv"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Fig4_4_Bos_continent_Americas_genus_function_group_composition_no_elephant_CN_name_colorfix_log.txt"
+)
+
+cat("Input CSV: ", input_csv, "\n", sep = "")
+
+## -----------------------------
+## 2. 中文字体
+## -----------------------------
+base_family <- "cnfont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+sysfonts::font_add(base_family, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("Font file: ", font_file, "\n", sep = "")
+
+## -----------------------------
+## 3. 读取已生成结果表
+## -----------------------------
+df <- read.csv(
+  input_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_cols <- c("continent_CN", "primary_lifestyle_cn", "mean_relative_abundance")
+missing_cols <- setdiff(needed_cols, colnames(df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "输入表缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(df), collapse = " | ")
+  )
+}
+
+## -----------------------------
+## 4. 名称统一：改为第三章最终图命名体系
+## -----------------------------
+label_map <- c(
+  ## 腐生类
+  "木材腐生型" = "木腐菌",
+  "木腐菌" = "木腐菌",
+
+  "凋落物腐生型" = "凋落物腐生菌",
+  "凋落物腐生菌" = "凋落物腐生菌",
+
+  "土壤腐生型" = "土壤腐生菌",
+  "土壤腐生菌" = "土壤腐生菌",
+
+  "未明确腐生型" = "未定义腐生菌",
+  "未定义腐生菌" = "未定义腐生菌",
+
+  "粪生腐生型" = "粪生腐生菌",
+  "粪生腐生菌" = "粪生腐生菌",
+
+  "花蜜/树液腐生型" = "花蜜/树液腐生菌",
+  "花蜜/树液腐生菌" = "花蜜/树液腐生菌",
+
+  "花粉腐生型" = "花粉腐生菌",
+  "花粉腐生菌" = "花粉腐生菌",
+
+  ## 病原 / 寄生类
+  "植物病原型" = "植物病原菌",
+  "植物病原菌" = "植物病原菌",
+
+  "动物寄生型" = "动物寄生菌",
+  "动物寄生菌" = "动物寄生菌",
+
+  "藻类寄生型" = "藻类寄生菌",
+  "藻类寄生菌" = "藻类寄生菌",
+
+  "原生生物寄生型" = "原生生物寄生菌",
+  "原生生物寄生菌" = "原生生物寄生菌",
+
+  "地衣寄生型" = "地衣寄生菌",
+  "地衣寄生菌" = "地衣寄生菌",
+
+  "真菌寄生型" = "真菌寄生菌",
+  "真菌寄生菌" = "真菌寄生菌",
+
+  "未定义病原菌" = "未定义病原菌",
+  "未明确病理型" = "未定义病原菌",
+
+  ## 共生类
+  "地衣型" = "地衣型真菌",
+  "地衣型真菌" = "地衣型真菌",
+
+  "外生菌根型" = "外生菌根真菌",
+  "外生菌根真菌" = "外生菌根真菌",
+
+  "丛枝菌根型" = "丛枝菌根真菌",
+  "丛枝菌根真菌" = "丛枝菌根真菌",
+
+  "苔藓共生型" = "苔藓共生菌",
+  "苔藓共生菌" = "苔藓共生菌",
+
+  "未明确共生型" = "未定义共生菌",
+  "未定义共生菌" = "未定义共生菌",
+
+  "动物内共生型" = "动物内共生菌",
+  "动物内共生菌" = "动物内共生菌",
+
+  "藻类外共生型" = "藻类外共生菌",
+  "藻类外共生菌" = "藻类外共生菌",
+
+  ## 内生 / 附生
+  "叶内生型" = "叶内生菌",
+  "叶内生菌" = "叶内生菌",
+
+  "根内生型" = "根内生菌",
+  "根内生菌" = "根内生菌",
+
+  "附生型" = "附生菌",
+  "附生菌" = "附生菌",
+
+  ## 其他
+  "煤烟菌" = "煤烟菌",
+  "煤污菌" = "煤烟菌",
+  "煤污菌型" = "煤烟菌",
+
+  "动物相关型" = "动物相关菌",
+  "动物相关菌" = "动物相关菌",
+
+  "节肢动物相关型" = "节肢动物相关菌",
+  "节肢动物相关菌" = "节肢动物相关菌",
+
+  "食细菌型" = "食细菌型",
+  "食细菌型" = "食细菌型",
+
+  "食藻/食原生生物型" = "食藻/食原生生物型",
+  "食藻/食原生生物型" = "食藻/食原生生物型",
+
+  ## 未分类
+  "未定义型" = "未分类",
+  "未分类" = "未分类"
+)
+
+df$function_group_cn <- ifelse(
+  df$primary_lifestyle_cn %in% names(label_map),
+  unname(label_map[df$primary_lifestyle_cn]),
+  df$primary_lifestyle_cn
+)
+
+df$function_group_cn[is.na(df$function_group_cn) | df$function_group_cn == ""] <- "未分类"
+
+## 合并映射后同名功能类群
+plot_df0 <- df %>%
+  group_by(continent_CN, function_group_cn) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## -----------------------------
+## 5. 顺序：与第三章最终图保持一致
+## -----------------------------
+continent_order <- c("亚洲", "欧洲", "非洲", "美洲")
+
+function_order <- c(
+  "未定义腐生菌",
+  "花蜜/树液腐生菌",
+  "植物病原菌",
+  "凋落物腐生菌",
+  "动物内共生菌",
+  "粪生腐生菌",
+  "土壤腐生菌",
+  "地衣型真菌",
+  "外生菌根真菌",
+  "木腐菌",
+  "动物寄生菌",
+  "煤烟菌",
+  "附生菌",
+  "叶内生菌",
+  "真菌寄生菌",
+  "地衣寄生菌",
+  "花粉腐生菌",
+  "根内生菌",
+  "原生生物寄生菌",
+  "从枝菌根真菌",
+  "丛枝菌根真菌",
+  "藻类寄生菌",
+  "苔藓共生菌",
+  "未定义共生菌",
+  "动物相关菌",
+  "节肢动物相关菌",
+  "藻类外共生菌",
+  "食细菌型",
+  "食藻/食原生生物型",
+  "未分类"
+)
+
+## 如果出现旧误写“从枝菌根真菌”，统一成“丛枝菌根真菌”
+plot_df0$function_group_cn[plot_df0$function_group_cn == "从枝菌根真菌"] <- "丛枝菌根真菌"
+
+function_order <- unique(function_order)
+function_order <- function_order[function_order != "从枝菌根真菌"]
+
+## 补齐所有大洲 × 功能类群
+present_all <- unique(plot_df0$function_group_cn)
+extra_groups <- setdiff(present_all, function_order)
+function_order_all <- c(function_order, sort(extra_groups))
+
+plot_df <- expand.grid(
+  continent_CN = continent_order,
+  function_group_cn = function_order_all,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    plot_df0,
+    by = c("continent_CN", "function_group_cn")
+  ) %>%
+  mutate(
+    mean_relative_abundance = ifelse(is.na(mean_relative_abundance), 0, mean_relative_abundance)
+  )
+
+## 只保留实际出现的功能类群
+present_groups <- plot_df %>%
+  group_by(function_group_cn) %>%
+  summarise(total_mean = sum(mean_relative_abundance), .groups = "drop") %>%
+  filter(total_mean > 0) %>%
+  pull(function_group_cn)
+
+present_groups <- function_order_all[function_order_all %in% present_groups]
+
+plot_df <- plot_df %>%
+  filter(function_group_cn %in% present_groups) %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order),
+    function_group_cn = factor(function_group_cn, levels = present_groups)
+  ) %>%
+  arrange(continent_CN, function_group_cn)
+
+## -----------------------------
+## 6. 新配色：避免相邻和常见类别颜色过近
+## -----------------------------
+function_colors <- c(
+  ## 腐生类：分散使用黄、橙、棕、蓝灰，不让相邻过近
+  "未定义腐生菌"       = "#E41A1C",
+  "花蜜/树液腐生菌"   = "#1B9E77",
+  "凋落物腐生菌"       = "#7570B3",
+  "粪生腐生菌"         = "#66A61E",
+  "土壤腐生菌"         = "#D95F02",
+  "木腐菌"             = "#E6AB02",
+  "花粉腐生菌"         = "#386CB0",
+
+  ## 病原 / 寄生类：红、紫、粉、褐、深蓝分开
+  "植物病原菌"         = "#377EB8",
+  "动物寄生菌"         = "#984EA3",
+  "藻类寄生菌"         = "#F781BF",
+  "原生生物寄生菌"     = "#A65628",
+  "地衣寄生菌"         = "#FF7F00",
+  "真菌寄生菌"         = "#B2182B",
+  "未定义病原菌"       = "#C51B8A",
+
+  ## 共生类：不再全部用绿色
+  "地衣型真菌"         = "#4DAF4A",
+  "外生菌根真菌"       = "#00A6D6",
+  "丛枝菌根真菌"       = "#8DA0CB",
+  "苔藓共生菌"         = "#A6D854",
+  "未定义共生菌"       = "#E78AC3",
+  "动物内共生菌"       = "#009E73",
+  "藻类外共生菌"       = "#17BECF",
+
+  ## 内生 / 附生
+  "叶内生菌"           = "#FDB462",
+  "根内生菌"           = "#80B1D3",
+  "附生菌"             = "#6A3D9A",
+
+  ## 其他
+  "煤烟菌"             = "#4D4D4D",
+  "动物相关菌"         = "#BC80BD",
+  "节肢动物相关菌"     = "#B3DE69",
+  "食细菌型"           = "#8C564B",
+  "食藻/食原生生物型" = "#1F78B4",
+
+  ## 未分类
+  "未分类"             = "#C9C9C9"
+)
+
+missing_color <- setdiff(present_groups, names(function_colors))
+
+if (length(missing_color) > 0) {
+  stop(
+    "以下功能类群缺少颜色，请补充：",
+    paste(missing_color, collapse = ", ")
+  )
+}
+
+used_colors <- function_colors[present_groups]
+
+## -----------------------------
+## 7. 保存修正后的数据表
+## -----------------------------
+write.csv(
+  plot_df,
+  out_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+sum_check <- plot_df %>%
+  group_by(continent_CN) %>%
+  summarise(total = sum(mean_relative_abundance), .groups = "drop")
+
+cat("各大洲加总检查：\n")
+print(sum_check)
+
+## -----------------------------
+## 8. 作图
+## -----------------------------
+p <- ggplot(
+  plot_df,
+  aes(
+    x = continent_CN,
+    y = mean_relative_abundance,
+    fill = function_group_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = NA
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(
+    ylim = c(0, 100),
+    clip = "off"
+  ) +
+  scale_fill_manual(
+    values = used_colors,
+    breaks = present_groups,
+    drop = TRUE
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）",
+    fill = NULL
+  ) +
+  theme_bw(base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(size = 16, color = "black", family = base_family),
+    axis.text.y = element_text(size = 13, color = "black", family = base_family),
+    axis.title.y = element_text(size = 16, color = "black", family = base_family),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black", family = base_family),
+    legend.key.size = unit(0.45, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  ) +
+  guides(
+    fill = guide_legend(
+      ncol = 2,
+      byrow = FALSE
+    )
+  )
+
+ggsave(
+  out_png,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  out_pdf,
+  p,
+  width = 24,
+  height = 14,
+  units = "cm",
+  bg = "white"
+)
+
+## -----------------------------
+## 9. log
+## -----------------------------
+sink(out_log)
+
+cat("Fig4-4 Bos continent Americas function group bar redraw: name + color fix\n")
+cat("=======================================================================\n\n")
+
+cat("This script does NOT recalculate FungalTraits annotation or relative abundance.\n")
+cat("It only reads the existing continent mean table, fixes labels and colors, then redraws the plot.\n\n")
+
+cat("Input CSV:\n", input_csv, "\n\n", sep = "")
+
+cat("Output PNG:\n", out_png, "\n", sep = "")
+cat("Output PDF:\n", out_pdf, "\n", sep = "")
+cat("Output CSV:\n", out_csv, "\n\n", sep = "")
+
+cat("Font file:\n", font_file, "\n\n", sep = "")
+
+cat("Continent order:\n")
+print(continent_order)
+
+cat("\nFunctional group order used:\n")
+print(present_groups)
+
+cat("\nColor mapping used:\n")
+print(used_colors)
+
+cat("\nSum check by continent:\n")
+print(sum_check)
+
+cat("\nFinal plot data:\n")
+print(plot_df)
+
+sink()
+
+cat("\nDone!\n")
+cat("只重画，不重算。\n")
+cat("PNG:\n", out_png, "\n", sep = "")
+cat("PDF:\n", out_pdf, "\n", sep = "")
+cat("CSV:\n", out_csv, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+
+EOF
+
+Rscript scripts/16b_redraw_Bos_continent_Americas_function_group_bar_CN_name_colorfix.R
