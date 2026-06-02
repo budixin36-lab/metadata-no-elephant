@@ -1,0 +1,997 @@
+#下面是为第四章 Bos 属不同大洲样本生成 Beta 多样性 NMDS 排序图 的完整 R 脚本。它按照第三章最终 NMDS 图板式（zoom_v3_plot_only）设置，同时针对 Bos 子集重新计算 Bray-Curtis 距离、NMDS、Adonis 和 betadisper，不使用旧全体样本结果。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+mkdir -p scripts
+
+cat > scripts/18_Bos_continent_Americas_beta_NMDS_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# 18_Bos_continent_Americas_beta_NMDS_no_elephant.R
+#
+# 第四章：
+# 不同大洲牛属动物肠道真菌群落 Beta 多样性
+# NMDS 排序图 (Bray-Curtis)
+#
+# 数据版本：
+#   globalfungi_style_test_no_elephant
+#
+# 分析对象：
+#   Bos 属样本
+#   North America + South America 合并为美洲
+#
+# 输入：
+#   1. Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#   2. SH_abundance_table_no_elephant.tsv
+#
+# 输出：
+#   Bray-Curtis 距离矩阵 RDS
+#   NMDS 结果 RDS
+#   NMDS scores CSV
+#   Adonis + betadisper CSV
+#   最终 NMDS 图 PNG/PDF
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(ggplot2)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+# -----------------------------
+# 0. 路径
+# -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+continent_order <- c("亚洲","欧洲","非洲","美洲")
+
+# 输出文件
+bray_rds <- file.path(out_dir,"Bos_continent_Americas_bray_curtis_distance_no_elephant.rds")
+nmds_rds <- file.path(out_dir,"Bos_continent_Americas_NMDS_bray_curtis_no_elephant.rds")
+nmds_scores_csv <- file.path(out_dir,"Bos_continent_Americas_NMDS_bray_curtis_scores_no_elephant.csv")
+adonis_csv <- file.path(out_dir,"Bos_continent_Americas_adonis_bray_curtis_no_elephant.csv")
+betadisper_anova_csv <- file.path(out_dir,"Bos_continent_Americas_betadisper_ANOVA_no_elephant.csv")
+betadisper_perm_csv <- file.path(out_dir,"Bos_continent_Americas_betadisper_permutest_no_elephant.csv")
+plot_png <- file.path(out_dir,"Fig4_5_Bos_continent_Americas_BrayCurtis_NMDS_no_elephant_CN_zoom.png")
+plot_pdf <- file.path(out_dir,"Fig4_5_Bos_continent_Americas_BrayCurtis_NMDS_no_elephant_CN_zoom.pdf")
+summary_txt <- file.path(out_dir,"Bos_continent_Americas_beta_analysis_summary_no_elephant.txt")
+
+# -----------------------------
+# 1. 中文字体
+# -----------------------------
+base_family <- "cnfont"
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf"
+)
+font_file <- font_candidates[file.exists(font_candidates)][1]
+sysfonts::font_add(base_family, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+# -----------------------------
+# 2. 读取 Bos metadata
+# -----------------------------
+meta <- read.csv(metadata_file, stringsAsFactors=FALSE, check.names=FALSE)
+meta2 <- meta %>%
+  select(sample_id, continent_CN) %>%
+  filter(continent_CN %in% continent_order)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels=continent_order)
+
+# -----------------------------
+# 3. 读取 SH abundance table
+# -----------------------------
+sh_tab <- read.delim(sh_table_file, skip=1, check.names=FALSE, stringsAsFactors=FALSE)
+feature_col <- colnames(sh_tab)[1]
+feature_ids <- as.character(sh_tab[[feature_col]])
+mat_df <- sh_tab[, setdiff(colnames(sh_tab), feature_col), drop=FALSE]
+for(cc in colnames(mat_df)){
+  mat_df[[cc]] <- suppressWarnings(as.numeric(as.character(mat_df[[cc]])))
+  mat_df[[cc]][is.na(mat_df[[cc]])] <- 0
+}
+mat <- as.matrix(mat_df)
+rownames(mat) <- feature_ids
+storage.mode(mat) <- "numeric"
+
+# 确保 SH × sample
+if(all(colnames(mat) %in% meta2$sample_id)){
+  mat <- mat[, meta2$sample_id]
+} else if(all(rownames(mat) %in% meta2$sample_id)){
+  mat <- t(mat)
+  mat <- mat[, meta2$sample_id]
+} else {
+  stop("SH abundance table与Bos metadata没有匹配样本。")
+}
+
+# -----------------------------
+# 4. Bray-Curtis 距离 & NMDS
+# -----------------------------
+comm <- t(mat)
+bray_dist <- vegdist(comm, method="bray")
+saveRDS(bray_dist, bray_rds)
+
+set.seed(42)
+nmds <- metaMDS(bray_dist, k=2, trymax=50)
+saveRDS(nmds, nmds_rds)
+
+nmds_scores <- as.data.frame(nmds$points)
+nmds_scores$sample_id <- rownames(nmds_scores)
+nmds_scores <- nmds_scores %>%
+  left_join(meta2, by="sample_id")
+write.csv(nmds_scores, nmds_scores_csv, row.names=FALSE, fileEncoding="UTF-8")
+
+# -----------------------------
+# 5. Adonis & betadisper
+# -----------------------------
+adon <- adonis2(bray_dist ~ continent_CN, data=nmds_scores)
+write.csv(as.data.frame(adon), adonis_csv, row.names=TRUE, fileEncoding="UTF-8")
+
+bd <- betadisper(bray_dist, nmds_scores$continent_CN)
+bd_anova <- anova(bd)
+bd_perm <- permutest(bd)
+write.csv(as.data.frame(bd_anova), betadisper_anova_csv, row.names=TRUE, fileEncoding="UTF-8")
+write.csv(as.data.frame(bd_perm), betadisper_perm_csv, row.names=TRUE, fileEncoding="UTF-8")
+
+# -----------------------------
+# 6. NMDS 绘图
+# -----------------------------
+cont_colors <- c("亚洲"="#E41A1C","欧洲"="#377EB8","非洲"="#4DAF4A","美洲"="#FF7F00")
+
+p <- ggplot(nmds_scores, aes(x=MDS1, y=MDS2, color=continent_CN)) +
+  geom_point(size=2.5, alpha=0.7) +
+  stat_ellipse(aes(group=continent_CN), level=0.95, type="t", linetype=1) +
+  scale_color_manual(values=cont_colors, breaks=continent_order) +
+  theme_classic(base_family=base_family) +
+  theme(
+    axis.text = element_text(size=14, family=base_family),
+    axis.title = element_text(size=16, family=base_family),
+    legend.text = element_text(size=11, family=base_family),
+    legend.title = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(
+    x="NMDS1",
+    y="NMDS2",
+    color="大洲"
+  )
+
+ggsave(plot_png, p, width=18, height=12, units="cm", dpi=600, bg="white")
+ggsave(plot_pdf, p, width=18, height=12, units="cm", bg="white")
+
+# -----------------------------
+# 7. Summary log
+# -----------------------------
+sink(summary_txt)
+cat("Bos continent Americas Beta diversity NMDS analysis (no-elephant)\n")
+cat("===========================================================\n")
+cat("Input metadata: ", metadata_file, "\n")
+cat("SH abundance table: ", sh_table_file, "\n")
+cat("Matched Bos samples: ", nrow(meta2), "\n")
+cat("Bray-Curtis distance RDS: ", bray_rds, "\n")
+cat("NMDS RDS: ", nmds_rds, "\n")
+cat("NMDS scores CSV: ", nmds_scores_csv, "\n")
+cat("Adonis CSV: ", adonis_csv, "\n")
+cat("Betadisper ANOVA CSV: ", betadisper_anova_csv, "\n")
+cat("Betadisper Permutest CSV: ", betadisper_perm_csv, "\n")
+cat("NMDS plot PNG: ", plot_png, "\n")
+cat("NMDS plot PDF: ", plot_pdf, "\n")
+sink()
+
+cat("\nDone! Check PNG/PDF and CSV outputs.\n")
+EOF
+
+Rscript scripts/18_Bos_continent_Americas_beta_NMDS_no_elephant.R
+#下面是 18 脚本修正版。这版重点修正两个问题：
+#样本匹配逻辑：不再要求 SH 表所有样本都属于 Bos，而是像 Alpha 脚本一样用 intersect() 提取 Bos Americas 共同样本。
+#Bray-Curtis 计算口径：先把每个样本转为相对多度，再计算 Bray-Curtis，保持和第三章 Beta 多样性一致。
+#输出文件统一加 _v2，不覆盖上一版失败脚本可能产生的文件。
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/18_Bos_continent_Americas_beta_NMDS_no_elephant_v2.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# 18_Bos_continent_Americas_beta_NMDS_no_elephant_v2.R
+#
+# 第四章：
+# 不同大洲牛属动物肠道真菌群落 Beta 多样性
+# Bray-Curtis NMDS 排序图
+#
+# 数据版本：
+#   globalfungi_style_test_no_elephant
+#
+# 分析对象：
+#   Bos 属样本
+#   North America + South America 已合并为 Americas / 美洲
+#
+# 输入：
+#   1. Bos_continent_Americas_filtered_metadata_no_elephant.csv
+#   2. SH_abundance_table_no_elephant.tsv
+#
+# 修正内容：
+#   1. 使用 intersect() 提取 Bos metadata 与 SH 表共同样本；
+#   2. 不要求 SH 表所有列都属于 Bos；
+#   3. 每个样本先转为相对多度，再计算 Bray-Curtis；
+#   4. 保持第三章 Beta 多样性统计口径；
+#   5. 输出文件名加 v2，不覆盖旧文件。
+#
+# 统计口径：
+#   SH abundance table
+#   sample-level relative abundance
+#   Bray-Curtis distance
+#   NMDS
+#   Adonis / PERMANOVA
+#   betadisper
+#
+# 作图：
+#   参考第三章最终 NMDS 图样式：
+#   95% ellipse
+#   Adonis 标注
+#   bottom caption 显示 stress
+#   PNG 600 dpi 白底
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(ggplot2)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+# =========================
+# 1. 路径
+# =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant/Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+bray_rds <- file.path(
+  out_dir,
+  "Bos_continent_Americas_bray_curtis_distance_no_elephant_v2.rds"
+)
+
+nmds_rds <- file.path(
+  out_dir,
+  "Bos_continent_Americas_NMDS_bray_curtis_no_elephant_v2.rds"
+)
+
+nmds_scores_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_NMDS_bray_curtis_scores_no_elephant_v2.csv"
+)
+
+adonis_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_adonis_bray_curtis_no_elephant_v2.csv"
+)
+
+betadisper_anova_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_betadisper_ANOVA_no_elephant_v2.csv"
+)
+
+betadisper_perm_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_betadisper_permutest_no_elephant_v2.csv"
+)
+
+display_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_NMDS_display_zoom_no_elephant_CN_v2.csv"
+)
+
+outlier_csv <- file.path(
+  out_dir,
+  "Bos_continent_Americas_NMDS_outliers_excluded_zoom_no_elephant_CN_v2.csv"
+)
+
+plot_png <- file.path(
+  out_dir,
+  "Fig4_5_Bos_continent_Americas_BrayCurtis_NMDS_no_elephant_CN_zoom_v2.png"
+)
+
+plot_pdf <- file.path(
+  out_dir,
+  "Fig4_5_Bos_continent_Americas_BrayCurtis_NMDS_no_elephant_CN_zoom_v2.pdf"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "Bos_continent_Americas_beta_analysis_summary_no_elephant_v2.txt"
+)
+
+if (!file.exists(metadata_file)) {
+  stop("找不到 Bos Americas metadata：", metadata_file)
+}
+
+if (!file.exists(sh_table_file)) {
+  stop("找不到 SH abundance table：", sh_table_file)
+}
+
+cat("metadata_file: ", metadata_file, "\n", sep = "")
+cat("sh_table_file: ", sh_table_file, "\n", sep = "")
+
+# =========================
+# 2. 中文字体
+# =========================
+base_family <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(base_family, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+# =========================
+# 3. 参数
+# =========================
+set.seed(123)
+
+continent_order <- c("亚洲", "欧洲", "非洲", "美洲")
+
+continent_colors <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "美洲" = "#F39B7F"
+)
+
+nmds_trymax <- 100
+iqr_k <- 7
+axis_padding <- 0.06
+point_size <- 1.25
+point_alpha <- 0.62
+
+# =========================
+# 4. 工具函数
+# =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "not applicable", "Not applicable",
+    "unknown", "Unknown", "UNKNOWN"
+  )] <- NA_character_
+  x
+}
+
+read_sh_table <- function(sh_table_file) {
+  sh_lines <- readLines(sh_table_file, warn = FALSE)
+  sh_lines <- sh_lines[nchar(trimws(sh_lines)) > 0]
+
+  if (length(sh_lines) == 0) {
+    stop("SH abundance table 为空。")
+  }
+
+  if (grepl("^# Constructed from biom file", sh_lines[1])) {
+    sh_lines <- sh_lines[-1]
+  }
+
+  sh_raw <- read.delim(
+    text = paste(sh_lines, collapse = "\n"),
+    header = TRUE,
+    sep = "\t",
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    quote = "",
+    comment.char = ""
+  )
+
+  if (ncol(sh_raw) < 2) {
+    stop("SH abundance table 列数异常。")
+  }
+
+  colnames(sh_raw)[1] <- "SH_ID"
+
+  taxonomy_cols <- grep(
+    "taxonomy|metadata",
+    colnames(sh_raw),
+    ignore.case = TRUE,
+    value = TRUE
+  )
+
+  if (length(taxonomy_cols) > 0) {
+    sh_raw <- sh_raw[, !colnames(sh_raw) %in% taxonomy_cols, drop = FALSE]
+  }
+
+  rownames(sh_raw) <- as.character(sh_raw$SH_ID)
+
+  mat <- as.matrix(sh_raw[, -1, drop = FALSE])
+  storage.mode(mat) <- "numeric"
+  mat[is.na(mat)] <- 0
+
+  mat
+}
+
+get_iqr_range <- function(x, k = 7) {
+  q1 <- unname(quantile(x, 0.25, na.rm = TRUE))
+  q3 <- unname(quantile(x, 0.75, na.rm = TRUE))
+  iqr <- q3 - q1
+
+  c(
+    lower = q1 - k * iqr,
+    upper = q3 + k * iqr
+  )
+}
+
+get_padded_range <- function(x, padding = 0.06) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+
+  if (is.na(d) || d == 0) {
+    d <- max(abs(r), 1e-6)
+  }
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+fmt_decimal <- function(x) {
+  x[abs(x) < 1e-12] <- 0
+  sprintf("%.5f", x)
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("NA")
+  }
+  if (p < 0.001) {
+    return("<0.001")
+  }
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "continent_CN")
+
+  if (length(idx) == 0) {
+    idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  }
+
+  if (length(idx) == 0) {
+    stop(
+      "无法从 adonis2 结果中识别模型项。term 为：",
+      paste(adonis_df$term, collapse = ", ")
+    )
+  }
+
+  idx[1]
+}
+
+# =========================
+# 5. 读取 Bos Americas metadata
+# =========================
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c("sample_id", "continent_CN")
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "Bos Americas metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = clean_value(sample_id),
+    continent_CN = clean_value(continent_CN)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(continent_CN),
+    continent_CN %in% continent_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$continent_CN <- factor(meta2$continent_CN, levels = continent_order)
+
+cat("Bos Americas metadata samples:", nrow(meta2), "\n")
+cat("Sample counts by continent:\n")
+print(table(meta2$continent_CN))
+
+# =========================
+# 6. 读取 SH abundance table 并匹配 Bos 样本
+# =========================
+sh_mat <- read_sh_table(sh_table_file)
+
+cat("\nRaw SH abundance matrix:", nrow(sh_mat), "features x", ncol(sh_mat), "samples/columns\n")
+
+# 目标方向：SH × sample
+overlap_cols <- length(intersect(colnames(sh_mat), meta2$sample_id))
+overlap_rows <- length(intersect(rownames(sh_mat), meta2$sample_id))
+
+cat("Overlap with metadata sample_id:\n")
+cat("  column names:", overlap_cols, "\n")
+cat("  row names:", overlap_rows, "\n")
+
+if (overlap_rows > overlap_cols) {
+  message("检测到 SH 表可能为 sample × SH，已自动转置为 SH × sample。")
+  sh_mat <- t(sh_mat)
+}
+
+common_samples <- intersect(colnames(sh_mat), meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("SH abundance table 和 Bos Americas metadata 没有匹配到共同样本。")
+}
+
+cat("Common Bos samples:", length(common_samples), "\n")
+
+# 按 metadata 固定顺序提取共同样本
+meta_use <- meta2 %>%
+  filter(sample_id %in% common_samples) %>%
+  arrange(factor(continent_CN, levels = continent_order))
+
+sample_order <- meta_use$sample_id
+
+sh_mat <- sh_mat[, sample_order, drop = FALSE]
+
+if (!all(colnames(sh_mat) == meta_use$sample_id)) {
+  stop("SH 表样本顺序与 metadata 顺序匹配失败。")
+}
+
+sample_totals <- colSums(sh_mat, na.rm = TRUE)
+
+if (any(sample_totals == 0)) {
+  zero_samples <- names(sample_totals)[sample_totals == 0]
+  warning("发现总丰度为 0 的样本，将剔除：", paste(zero_samples, collapse = ", "))
+
+  keep_samples <- names(sample_totals)[sample_totals > 0]
+  sh_mat <- sh_mat[, keep_samples, drop = FALSE]
+  meta_use <- meta_use %>% filter(sample_id %in% keep_samples)
+  meta_use <- meta_use[match(colnames(sh_mat), meta_use$sample_id), ]
+}
+
+cat("Final matched Bos samples:", ncol(sh_mat), "\n")
+cat("Final SH number:", nrow(sh_mat), "\n")
+cat("Final sample counts by continent:\n")
+print(table(meta_use$continent_CN))
+
+# =========================
+# 7. 样本内相对多度 + Bray-Curtis 距离
+# =========================
+comm <- t(sh_mat)  # sample × SH
+
+comm_rel <- sweep(
+  comm,
+  1,
+  rowSums(comm, na.rm = TRUE),
+  FUN = "/"
+)
+
+comm_rel[is.na(comm_rel)] <- 0
+
+cat("\n计算 Bray-Curtis 距离：基于样本内相对多度。\n")
+
+bray <- vegan::vegdist(comm_rel, method = "bray")
+
+saveRDS(bray, bray_rds)
+
+# =========================
+# 8. NMDS
+# =========================
+cat("\n开始计算 NMDS ...\n")
+cat("trymax = ", nmds_trymax, "\n", sep = "")
+
+nmds <- vegan::metaMDS(
+  bray,
+  k = 2,
+  trymax = nmds_trymax,
+  autotransform = FALSE,
+  trace = FALSE
+)
+
+saveRDS(nmds, nmds_rds)
+
+cat("NMDS 完成。\n")
+cat("NMDS stress = ", nmds$stress, "\n", sep = "")
+
+nmds_scores <- as.data.frame(vegan::scores(nmds, display = "sites"))
+colnames(nmds_scores) <- c("NMDS1", "NMDS2")
+nmds_scores$sample_id <- rownames(nmds_scores)
+
+nmds_scores <- nmds_scores %>%
+  left_join(meta_use, by = "sample_id") %>%
+  mutate(
+    continent_CN = factor(continent_CN, levels = continent_order)
+  )
+
+write.csv(
+  nmds_scores,
+  nmds_scores_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# =========================
+# 9. Adonis / PERMANOVA
+# =========================
+cat("\n开始计算 Adonis / PERMANOVA ...\n")
+
+adonis_res <- vegan::adonis2(
+  bray ~ continent_CN,
+  data = meta_use,
+  permutations = 999
+)
+
+adonis_df <- as.data.frame(adonis_res) %>%
+  rownames_to_column("term")
+
+write.csv(
+  adonis_df,
+  adonis_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+main_idx <- extract_adonis_main_row(adonis_df)
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p <- adonis_df$`Pr(>F)`[main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+cat(adonis_label, "\n")
+
+# =========================
+# 10. betadisper
+# =========================
+cat("\n开始计算 betadisper ...\n")
+
+bd <- vegan::betadisper(
+  bray,
+  group = meta_use$continent_CN
+)
+
+bd_anova <- as.data.frame(anova(bd)) %>%
+  rownames_to_column("term")
+
+bd_perm <- vegan::permutest(bd, permutations = 999)
+
+bd_perm_df <- as.data.frame(bd_perm$tab) %>%
+  rownames_to_column("term")
+
+write.csv(
+  bd_anova,
+  betadisper_anova_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  bd_perm_df,
+  betadisper_perm_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# =========================
+# 11. 作图显示范围：IQR 识别极端点，按显示点范围放大主区域
+# =========================
+x_iqr_range <- get_iqr_range(nmds_scores$NMDS1, iqr_k)
+y_iqr_range <- get_iqr_range(nmds_scores$NMDS2, iqr_k)
+
+plot_flag <- nmds_scores$NMDS1 >= x_iqr_range["lower"] &
+  nmds_scores$NMDS1 <= x_iqr_range["upper"] &
+  nmds_scores$NMDS2 >= y_iqr_range["lower"] &
+  nmds_scores$NMDS2 <= y_iqr_range["upper"]
+
+display_df <- nmds_scores[plot_flag, , drop = FALSE]
+outlier_df <- nmds_scores[!plot_flag, , drop = FALSE]
+
+write.csv(
+  display_df,
+  display_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  outlier_df,
+  outlier_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+x_range <- get_padded_range(display_df$NMDS1, padding = axis_padding)
+y_range <- get_padded_range(display_df$NMDS2, padding = axis_padding)
+
+cat("\nNMDS 显示设置：\n")
+cat("IQR k:", iqr_k, "\n")
+cat("Displayed samples:", nrow(display_df), "\n")
+cat("Outliers excluded from display only:", nrow(outlier_df), "\n")
+cat("x display range:", x_range["lower"], "to", x_range["upper"], "\n")
+cat("y display range:", y_range["lower"], "to", y_range["upper"], "\n")
+
+# =========================
+# 12. 作图
+# =========================
+stress_label <- paste0(
+  "Bray-Curtis NMDS stress = ",
+  sprintf("%.8f", nmds$stress)
+)
+
+x_anno <- x_range["lower"] + 0.05 * diff(x_range)
+y_anno <- y_range["upper"] - 0.08 * diff(y_range)
+
+p <- ggplot(
+  display_df,
+  aes(
+    x = NMDS1,
+    y = NMDS2,
+    color = continent_CN
+  )
+) +
+  stat_ellipse(
+    aes(fill = continent_CN),
+    geom = "polygon",
+    type = "t",
+    level = 0.95,
+    alpha = 0.10,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    aes(group = continent_CN, color = continent_CN),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.80,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    size = point_size,
+    alpha = point_alpha
+  ) +
+  annotate(
+    "text",
+    x = x_anno,
+    y = y_anno,
+    label = adonis_label,
+    hjust = 0,
+    vjust = 1,
+    size = 4.6,
+    family = base_family,
+    color = "black"
+  ) +
+  scale_color_manual(
+    values = continent_colors,
+    breaks = continent_order,
+    drop = FALSE,
+    name = NULL
+  ) +
+  scale_fill_manual(
+    values = continent_colors,
+    breaks = continent_order,
+    drop = FALSE,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = fmt_decimal,
+    expand = expansion(mult = c(0.04, 0.08))
+  ) +
+  scale_y_continuous(
+    labels = fmt_decimal,
+    expand = expansion(mult = c(0.05, 0.08))
+  ) +
+  labs(
+    x = "NMDS1",
+    y = "NMDS2",
+    color = NULL,
+    caption = stress_label
+  ) +
+  coord_cartesian(
+    xlim = x_range,
+    ylim = y_range,
+    clip = "off"
+  ) +
+  theme_bw(base_size = 14, base_family = base_family) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_blank(),
+    axis.title = element_text(size = 19, colour = "black", family = base_family),
+    axis.text = element_text(size = 13, colour = "black", family = base_family),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 16, colour = "black", family = base_family),
+    legend.key = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.key.height = unit(0.62, "cm"),
+    legend.key.width = unit(0.62, "cm"),
+    legend.spacing.y = unit(0.14, "cm"),
+    legend.position = "right",
+    plot.caption = element_text(
+      size = 13,
+      hjust = 0,
+      colour = "black",
+      family = base_family,
+      lineheight = 1.15
+    ),
+    plot.caption.position = "plot",
+    plot.margin = margin(t = 10, r = 28, b = 34, l = 12)
+  ) +
+  guides(
+    color = guide_legend(
+      ncol = 1,
+      byrow = TRUE,
+      override.aes = list(size = 4.2, alpha = 1)
+    )
+  )
+
+ggsave(
+  filename = plot_png,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = plot_pdf,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+# =========================
+# 13. Summary
+# =========================
+sink(summary_txt)
+
+cat("Bos continent Americas Bray-Curtis NMDS summary, no-elephant version v2\n")
+cat("=======================================================================\n\n")
+
+cat("Input metadata:\n", metadata_file, "\n\n", sep = "")
+cat("Input SH abundance table:\n", sh_table_file, "\n\n", sep = "")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n")
+cat("No old North America-only Bos continent metadata\n\n")
+
+cat("Corrected logic:\n")
+cat("1. Use intersect() to match Bos Americas metadata with SH abundance table.\n")
+cat("2. Do not require all SH table samples to be Bos samples.\n")
+cat("3. Convert each sample to relative abundance before Bray-Curtis.\n\n")
+
+cat("Matched Bos samples:", ncol(sh_mat), "\n")
+cat("SH number:", nrow(sh_mat), "\n")
+cat("Continent number:", length(unique(meta_use$continent_CN)), "\n\n")
+
+cat("Sample counts by continent:\n")
+print(table(meta_use$continent_CN))
+
+cat("\nNMDS trymax:", nmds_trymax, "\n")
+cat("NMDS stress:\n")
+cat(nmds$stress, "\n\n")
+
+cat("Adonis result:\n")
+print(adonis_df)
+
+cat("\nAdonis label:\n")
+cat(adonis_label, "\n\n")
+
+cat("Betadisper ANOVA:\n")
+print(bd_anova)
+
+cat("\nBetadisper permutation test:\n")
+print(bd_perm_df)
+
+cat("\nIQR display filtering:\n")
+cat("IQR k:", iqr_k, "\n")
+cat("IQR NMDS1 range:", x_iqr_range["lower"], "to", x_iqr_range["upper"], "\n")
+cat("IQR NMDS2 range:", y_iqr_range["lower"], "to", y_iqr_range["upper"], "\n")
+cat("Displayed samples:", nrow(display_df), "\n")
+cat("Outliers excluded from display only:", nrow(outlier_df), "\n")
+cat("Final x display range:", x_range["lower"], "to", x_range["upper"], "\n")
+cat("Final y display range:", y_range["lower"], "to", y_range["upper"], "\n\n")
+
+cat("Output files:\n")
+cat("Bray-Curtis RDS:", bray_rds, "\n")
+cat("NMDS RDS:", nmds_rds, "\n")
+cat("NMDS scores CSV:", nmds_scores_csv, "\n")
+cat("Adonis CSV:", adonis_csv, "\n")
+cat("Betadisper ANOVA CSV:", betadisper_anova_csv, "\n")
+cat("Betadisper Permutest CSV:", betadisper_perm_csv, "\n")
+cat("Display samples CSV:", display_csv, "\n")
+cat("Outliers display-only CSV:", outlier_csv, "\n")
+cat("PNG:", plot_png, "\n")
+cat("PDF:", plot_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("已修正样本匹配逻辑与 Bray-Curtis 计算口径。\n")
+cat("Matched Bos samples: ", ncol(sh_mat), "\n", sep = "")
+cat("NMDS stress: ", nmds$stress, "\n", sep = "")
+cat("Adonis label: ", adonis_label, "\n", sep = "")
+cat("PNG:\n", plot_png, "\n", sep = "")
+cat("Summary:\n", summary_txt, "\n", sep = "")
+
+EOF
+
+Rscript scripts/18_Bos_continent_Americas_beta_NMDS_no_elephant_v2.R
