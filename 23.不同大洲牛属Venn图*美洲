@@ -1,0 +1,821 @@
+#重新从最终 no-elephant metadata 筛选 Bos 属样本，不沿用旧的 Bos continent filtered metadata；并且把 North America 和 South America 合并为 Americas / 美洲，再做 SH 水平 Venn 图。你的论文第 4 章中已经把图 4-1 设为“不同大洲牛属动物肠道真菌在 SH 水平的 Venn 图”，所以这版输出文件名仍按图 4-1 管理。 参考代码里最终修图版使用了 showtext::showtext_opts(dpi = 600) 来解决 PNG 字体过小问题，这版也保留这个关键设置。
+#输入文件
+#metadata：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#SH abundance table：/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#是否重算
+#会重新从最终 metadata 筛选 Bos 属样本，并重新按合并后大洲统计 SH presence/absence；不会重新做 BLAST、taxonomy、SH 注释或丰度表生成。
+#统计口径 / 计算单位
+#Venn 图统计的是 SH 类型数。某个 SH 在某一大洲任意 Bos 样本中 abundance > 0，即认为该大洲检出该 SH；不是 SH reads，也不是相对多度。
+#输出目录
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant
+#主要改动
+#旧参考代码里曾剔除 South America；这版不剔除，而是把 North America + South America 合并为 美洲。旧代码中 presence/absence 矩阵的构建与精确交集统计逻辑会保留，但筛选逻辑改为本次任务所需的新逻辑。
+cd /mnt/d/ITS_SH_pipeline
+
+mkdir -p scripts
+
+cat > scripts/10a_Bos_continent_Americas_SH_venn_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+# ============================================================
+# 10a_Bos_continent_Americas_SH_venn_no_elephant.R
+#
+# 第四章 图4-1：
+# 不同大洲牛属动物肠道真菌共有/特有 SH 的 Venn 图
+#
+# 数据版本：
+#   globalfungi_style_test_no_elephant
+#
+# 分析对象：
+#   Bos 属样本
+#
+# 分组变量：
+#   metadata 中 continent 列
+#
+# 关键处理：
+#   North America + South America 合并为 Americas / 美洲
+#
+# 统计口径：
+#   SH presence/absence
+#   某个 SH 在某大洲任一样本中 abundance > 0，
+#   即认为该大洲检出该 SH。
+#
+# 注意：
+#   Venn 图统计的是 SH 类型数，不是 SH reads。
+#   本脚本不使用旧含象科版本，不使用旧 vsearch 97% SH 结果，
+#   也不沿用旧 Bos continent filtered metadata。
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+# =========================
+# 0. R 包路径与依赖
+# =========================
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("VennDiagram", "grid", "showtext", "sysfonts")
+
+for (pkg in need_pkgs) {
+  if (pkg == "grid") next
+
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(VennDiagram)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+# =========================
+# 1. 输入与输出路径
+# =========================
+project_dir <- "/mnt/d/ITS_SH_pipeline"
+
+metadata_file <- file.path(
+  project_dir,
+  "globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+sh_table_file <- file.path(
+  project_dir,
+  "globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  project_dir,
+  "globalfungi_style_test_no_elephant/results/chapter4_Bos_continent_Americas_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_bos_all_meta <- file.path(
+  out_dir,
+  "Bos_continent_Americas_all_Bos_metadata_no_elephant.csv"
+)
+
+out_filtered_meta <- file.path(
+  out_dir,
+  "Bos_continent_Americas_filtered_metadata_no_elephant.csv"
+)
+
+out_invalid_continent_meta <- file.path(
+  out_dir,
+  "Bos_continent_Americas_excluded_invalid_continent_metadata_no_elephant.csv"
+)
+
+out_sample_counts <- file.path(
+  out_dir,
+  "Bos_continent_Americas_sample_counts_no_elephant.csv"
+)
+
+out_species_counts <- file.path(
+  out_dir,
+  "Bos_continent_Americas_host_species_counts_no_elephant.csv"
+)
+
+out_SH_counts <- file.path(
+  out_dir,
+  "Bos_continent_Americas_SH_counts_no_elephant.csv"
+)
+
+out_SH_presence_list <- file.path(
+  out_dir,
+  "Bos_continent_Americas_SH_presence_list_no_elephant.csv"
+)
+
+out_pa_matrix <- file.path(
+  out_dir,
+  "Bos_continent_Americas_SH_presence_absence_no_elephant.csv"
+)
+
+out_intersections <- file.path(
+  out_dir,
+  "Bos_continent_Americas_Venn_intersections_no_elephant.csv"
+)
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_1_Bos_continent_Americas_shared_unique_SH_Venn_no_elephant_CN.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_1_Bos_continent_Americas_shared_unique_SH_Venn_no_elephant_CN.pdf"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Bos_continent_Americas_SH_venn_no_elephant_log.txt"
+)
+
+# =========================
+# 2. 工具函数
+# =========================
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded", "Not recorded", "NOT RECORDED",
+    "not_reported", "not reported", "Not reported", "NOT REPORTED",
+    "unknown", "Unknown", "UNKNOWN",
+    "none", "None", "NONE",
+    "null", "Null", "NULL"
+  )] <- NA
+
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+
+  if (is.na(hit)) {
+    stop(
+      "Cannot find column for ", label,
+      ". Tried: ", paste(candidates, collapse = ", "),
+      "\nExisting columns:\n", paste(cols, collapse = ", ")
+    )
+  }
+
+  hit
+}
+
+read_biom_tsv <- function(file) {
+  if (!file.exists(file)) {
+    stop("SH abundance table not found: ", file)
+  }
+
+  lines_head <- readLines(file, n = 20, warn = FALSE)
+
+  header_line <- grep(
+    "^#OTU ID|^#OTUID|^#Feature ID|^Feature ID",
+    lines_head
+  )[1]
+
+  if (is.na(header_line)) {
+    tab <- read.delim(
+      file,
+      check.names = FALSE,
+      stringsAsFactors = FALSE,
+      comment.char = "",
+      quote = ""
+    )
+  } else {
+    tab <- read.delim(
+      file,
+      skip = header_line - 1,
+      check.names = FALSE,
+      stringsAsFactors = FALSE,
+      comment.char = "",
+      quote = ""
+    )
+  }
+
+  colnames(tab)[1] <- "SH"
+
+  taxonomy_cols <- which(tolower(colnames(tab)) %in% c(
+    "taxonomy",
+    "consensus.lineage",
+    "consensus lineage"
+  ))
+
+  if (length(taxonomy_cols) > 0) {
+    tab <- tab[, -taxonomy_cols, drop = FALSE]
+  }
+
+  tab
+}
+
+calc_exact_intersections <- function(pa_df, group_cols) {
+  res <- list()
+  k <- 1
+
+  for (m in seq_along(group_cols)) {
+    cmbs <- combn(group_cols, m, simplify = FALSE)
+
+    for (cmb in cmbs) {
+      out_sets <- setdiff(group_cols, cmb)
+
+      in_all <- rowSums(pa_df[, cmb, drop = FALSE]) == length(cmb)
+
+      if (length(out_sets) > 0) {
+        out_none <- rowSums(pa_df[, out_sets, drop = FALSE]) == 0
+      } else {
+        out_none <- rep(TRUE, nrow(pa_df))
+      }
+
+      exact_SH <- pa_df$SH[in_all & out_none]
+
+      res[[k]] <- data.frame(
+        combination = paste(cmb, collapse = " & "),
+        n_continents = length(cmb),
+        continents_included = paste(cmb, collapse = "; "),
+        continents_excluded = paste(out_sets, collapse = "; "),
+        n_SH = length(exact_SH),
+        SH_list = paste(exact_SH, collapse = "; "),
+        stringsAsFactors = FALSE
+      )
+
+      k <- k + 1
+    }
+  }
+
+  out <- do.call(rbind, res)
+  out <- out[order(out$n_continents, -out$n_SH, out$combination), ]
+  rownames(out) <- NULL
+
+  out
+}
+
+write_csv_utf8 <- function(x, file) {
+  write.csv(
+    x,
+    file = file,
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+  )
+}
+
+# =========================
+# 3. 字体设置
+# =========================
+simsun_file <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(simsun_file)) {
+  warning("SimSun font not found: ", simsun_file)
+} else {
+  sysfonts::font_add(
+    family = "SimSun",
+    regular = simsun_file
+  )
+}
+
+showtext::showtext_auto(enable = TRUE)
+
+# 关键：修正 600 dpi PNG 中 showtext 字号缩放问题
+showtext::showtext_opts(dpi = 600)
+
+# =========================
+# 4. 读取 metadata
+# =========================
+if (!file.exists(metadata_file)) {
+  stop("Metadata file not found: ", metadata_file)
+}
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+bioproject_col <- pick_col(
+  c("BioProject", "bioproject", "BioProject_accession", "project", "Project"),
+  colnames(meta),
+  "BioProject"
+)
+
+country_col <- pick_col(
+  c("country", "Country", "sample_country", "geo_loc_name_country"),
+  colnames(meta),
+  "country"
+)
+
+continent_col <- pick_col(
+  c("continent", "Continent", "sample_continent", "geo_loc_name_continent"),
+  colnames(meta),
+  "continent"
+)
+
+order_col <- pick_col(
+  c("host_order", "Host_order", "hostOrder", "order"),
+  colnames(meta),
+  "host_order"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "hostFamily", "family"),
+  colnames(meta),
+  "host_family"
+)
+
+genus_col <- pick_col(
+  c("host_genus", "Host_genus", "hostGenus", "genus"),
+  colnames(meta),
+  "host_genus"
+)
+
+species_col <- pick_col(
+  c("host_species", "Host_species", "hostSpecies", "species"),
+  colnames(meta),
+  "host_species"
+)
+
+status_col <- pick_col(
+  c("status", "Status", "domestication", "Domestication"),
+  colnames(meta),
+  "status"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  BioProject = clean_value(meta[[bioproject_col]]),
+  country = clean_value(meta[[country_col]]),
+  continent_original = clean_value(meta[[continent_col]]),
+  host_order = clean_value(meta[[order_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  host_genus = clean_value(meta[[genus_col]]),
+  host_species = clean_value(meta[[species_col]]),
+  status = clean_value(meta[[status_col]]),
+  stringsAsFactors = FALSE
+)
+
+meta2 <- meta2[!is.na(meta2$sample_id), , drop = FALSE]
+meta2 <- meta2[!duplicated(meta2$sample_id), , drop = FALSE]
+
+# =========================
+# 5. 从最终 metadata 重新筛选 Bos 属样本
+# =========================
+meta_bos_all <- meta2[meta2$host_genus == "Bos", , drop = FALSE]
+
+if (nrow(meta_bos_all) == 0) {
+  stop("No Bos samples found by host_genus == 'Bos'. Please check metadata.")
+}
+
+# 先保存全部 Bos 样本，未按 continent 过滤
+write_csv_utf8(meta_bos_all, out_bos_all_meta)
+
+# =========================
+# 6. 清理并合并 continent
+# =========================
+meta_bos_all$continent_clean <- clean_value(meta_bos_all$continent_original)
+
+# 统一英文和可能出现的中文写法
+meta_bos_all$continent_clean[meta_bos_all$continent_clean %in% c("Asia", "亚洲")] <- "Asia"
+meta_bos_all$continent_clean[meta_bos_all$continent_clean %in% c("Europe", "欧洲")] <- "Europe"
+meta_bos_all$continent_clean[meta_bos_all$continent_clean %in% c("Africa", "非洲")] <- "Africa"
+meta_bos_all$continent_clean[meta_bos_all$continent_clean %in% c("Oceania", "大洋洲")] <- "Oceania"
+
+meta_bos_all$continent_clean[
+  meta_bos_all$continent_clean %in% c(
+    "North America", "North_America", "North-America",
+    "北美洲", "北美"
+  )
+] <- "North America"
+
+meta_bos_all$continent_clean[
+  meta_bos_all$continent_clean %in% c(
+    "South America", "South_America", "South-America",
+    "南美洲", "南美"
+  )
+] <- "South America"
+
+# North America + South America 合并为 Americas
+meta_bos_all$continent_merged <- meta_bos_all$continent_clean
+
+meta_bos_all$continent_merged[
+  meta_bos_all$continent_clean %in% c("North America", "South America")
+] <- "Americas"
+
+# 无效 continent 单独保存
+meta_invalid_continent <- meta_bos_all[
+  is.na(meta_bos_all$continent_merged),
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(meta_invalid_continent, out_invalid_continent_meta)
+
+# 只保留有效 continent 的 Bos 样本
+meta_bos <- meta_bos_all[
+  !is.na(meta_bos_all$continent_merged),
+  ,
+  drop = FALSE
+]
+
+# 中文大洲名
+continent_label_map <- c(
+  "Asia" = "亚洲",
+  "Europe" = "欧洲",
+  "Africa" = "非洲",
+  "Americas" = "美洲",
+  "Oceania" = "大洋洲"
+)
+
+meta_bos$continent_CN <- unname(continent_label_map[meta_bos$continent_merged])
+
+# 本次 Venn 图固定顺序
+# 如果后续数据中没有某个大洲，会自动跳过。
+continent_order_CN <- c("亚洲", "欧洲", "非洲", "美洲", "大洋洲")
+
+meta_bos$continent_CN <- factor(
+  meta_bos$continent_CN,
+  levels = continent_order_CN
+)
+
+# =========================
+# 7. 读取 SH abundance table
+# =========================
+tab <- read_biom_tsv(sh_table_file)
+
+feature_ids <- as.character(tab$SH)
+tab$SH <- NULL
+
+# 转为数值矩阵
+for (i in seq_len(ncol(tab))) {
+  tab[[i]] <- suppressWarnings(as.numeric(as.character(tab[[i]])))
+}
+
+tab[is.na(tab)] <- 0
+
+mat <- as.matrix(tab)
+rownames(mat) <- feature_ids
+
+# 判断丰度表方向，最终得到 sample × SH
+common_col_samples <- sum(colnames(mat) %in% meta_bos$sample_id)
+common_row_samples <- sum(rownames(mat) %in% meta_bos$sample_id)
+
+if (common_col_samples >= common_row_samples) {
+  otu <- t(mat)
+} else {
+  otu <- mat
+}
+
+common_samples <- intersect(rownames(otu), meta_bos$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("No matched samples between Bos metadata and SH abundance table.")
+}
+
+otu <- otu[common_samples, , drop = FALSE]
+meta_bos <- meta_bos[match(common_samples, meta_bos$sample_id), , drop = FALSE]
+rownames(meta_bos) <- meta_bos$sample_id
+
+# 去掉全 0 样本和全 0 SH
+otu <- otu[rowSums(otu) > 0, , drop = FALSE]
+meta_bos <- meta_bos[rownames(otu), , drop = FALSE]
+otu <- otu[, colSums(otu) > 0, drop = FALSE]
+
+# 再保存实际进入 Venn 分析的 Bos metadata
+write_csv_utf8(meta_bos, out_filtered_meta)
+
+# =========================
+# 8. 样本数与物种数统计
+# =========================
+sample_counts <- as.data.frame(
+  table(meta_bos$continent_CN),
+  stringsAsFactors = FALSE
+)
+
+colnames(sample_counts) <- c("continent", "n_samples")
+sample_counts$continent <- as.character(sample_counts$continent)
+sample_counts <- sample_counts[sample_counts$n_samples > 0, , drop = FALSE]
+sample_counts <- sample_counts[
+  match(continent_order_CN, sample_counts$continent, nomatch = 0),
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(sample_counts, out_sample_counts)
+
+species_counts <- as.data.frame(
+  table(
+    continent = meta_bos$continent_CN,
+    host_species = meta_bos$host_species
+  ),
+  stringsAsFactors = FALSE
+)
+
+species_counts <- species_counts[species_counts$Freq > 0, , drop = FALSE]
+colnames(species_counts)[3] <- "n_samples"
+
+species_counts <- species_counts[
+  order(species_counts$continent, species_counts$host_species),
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(species_counts, out_species_counts)
+
+# =========================
+# 9. 构建各大洲 SH set
+# =========================
+set_list <- list()
+SH_count_list <- list()
+
+for (ct in continent_order_CN) {
+  samples_ct <- rownames(meta_bos)[as.character(meta_bos$continent_CN) == ct]
+
+  if (length(samples_ct) == 0) next
+
+  otu_ct <- otu[samples_ct, , drop = FALSE]
+
+  sh_present <- colnames(otu_ct)[colSums(otu_ct > 0) > 0]
+
+  set_list[[ct]] <- sh_present
+
+  SH_count_list[[ct]] <- data.frame(
+    continent = ct,
+    n_samples = length(samples_ct),
+    total_SH_richness = length(sh_present),
+    total_SH_reads = sum(otu_ct),
+    mean_SH_richness_per_sample = round(mean(rowSums(otu_ct > 0)), 3),
+    mean_SH_reads_per_sample = round(mean(rowSums(otu_ct)), 3),
+    stringsAsFactors = FALSE
+  )
+}
+
+SH_counts <- do.call(rbind, SH_count_list)
+write_csv_utf8(SH_counts, out_SH_counts)
+
+if (length(set_list) < 2) {
+  stop("Less than 2 continents available after filtering. Venn plot is not meaningful.")
+}
+
+if (length(set_list) > 5) {
+  stop("More than 5 continent groups found. Venn plot is not recommended. Please use UpSet instead.")
+}
+
+# 输出每个大洲检出的 SH 列表
+SH_presence_list <- do.call(
+  rbind,
+  lapply(names(set_list), function(ct) {
+    data.frame(
+      continent = ct,
+      SH = set_list[[ct]],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+write_csv_utf8(SH_presence_list, out_SH_presence_list)
+
+# =========================
+# 10. 构建 SH × 大洲 presence/absence 矩阵
+# =========================
+all_SH <- sort(unique(unlist(set_list)))
+
+pa_df <- data.frame(
+  SH = all_SH,
+  stringsAsFactors = FALSE
+)
+
+for (ct in names(set_list)) {
+  pa_df[[ct]] <- as.integer(pa_df$SH %in% set_list[[ct]])
+}
+
+pa_df <- pa_df[
+  rowSums(pa_df[, names(set_list), drop = FALSE]) > 0,
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(pa_df, out_pa_matrix)
+
+# =========================
+# 11. 精确交集统计
+# =========================
+inter_df <- calc_exact_intersections(pa_df, names(set_list))
+write_csv_utf8(inter_df, out_intersections)
+
+# =========================
+# 12. 绘制 Venn 图
+# =========================
+fill_cols <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "美洲" = "#F39B7F",
+  "大洋洲" = "#8491B4"
+)
+
+make_venn_grob <- function() {
+  VennDiagram::venn.diagram(
+    x = set_list,
+    filename = NULL,
+    fill = fill_cols[names(set_list)],
+    alpha = 0.42,
+    col = "grey25",
+    lwd = 1.4,
+
+    # 区域数字
+    cex = 1.55,
+    fontface = "bold",
+    fontfamily = "SimSun",
+    fontcol = "black",
+
+    # 大洲标签
+    cat.cex = 1.55,
+    cat.fontface = "bold",
+    cat.fontfamily = "SimSun",
+    cat.col = "black",
+
+    # 论文排版中尽量减少空白
+    margin = 0.035
+  )
+}
+
+# PNG：论文使用版，白底，600 dpi
+png(
+  filename = out_png,
+  width = 15.5,
+  height = 13.0,
+  units = "cm",
+  res = 600,
+  bg = "white",
+  type = "cairo"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+# PDF：备用矢量版
+pdf(
+  file = out_pdf,
+  width = 6.10,
+  height = 5.12,
+  bg = "white",
+  family = "Helvetica"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+# =========================
+# 13. 输出 log
+# =========================
+sink(out_log)
+
+cat("Bos continent Americas SH Venn analysis, no-elephant dataset\n")
+cat("============================================================\n\n")
+
+cat("Input files:\n")
+cat("Metadata:", metadata_file, "\n")
+cat("SH abundance table:", sh_table_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Filtering and grouping logic:\n")
+cat("1. Start from final no-elephant metadata\n")
+cat("2. Select host_genus == 'Bos'\n")
+cat("3. Use metadata column: continent\n")
+cat("4. Merge North America and South America into Americas / 美洲\n")
+cat("5. Remove invalid continent values only\n")
+cat("6. SH presence/absence, not SH reads\n\n")
+
+cat("Metadata columns used:\n")
+cat("sample_id:", sample_col, "\n")
+cat("BioProject:", bioproject_col, "\n")
+cat("country:", country_col, "\n")
+cat("continent:", continent_col, "\n")
+cat("host_order:", order_col, "\n")
+cat("host_family:", family_col, "\n")
+cat("host_genus:", genus_col, "\n")
+cat("host_species:", species_col, "\n")
+cat("status:", status_col, "\n\n")
+
+cat("Sample summary:\n")
+cat("Total samples in metadata:", nrow(meta2), "\n")
+cat("Bos samples before continent filtering:", nrow(meta_bos_all), "\n")
+cat("Bos samples with invalid continent:", nrow(meta_invalid_continent), "\n")
+cat("Bos samples finally used:", nrow(meta_bos), "\n")
+cat("SH features in final Bos subset:", ncol(otu), "\n\n")
+
+cat("Original continent distribution in all Bos samples:\n")
+print(sort(table(meta_bos_all$continent_clean, useNA = "ifany"), decreasing = TRUE))
+cat("\n")
+
+cat("Merged continent distribution in all Bos samples:\n")
+print(sort(table(meta_bos_all$continent_merged, useNA = "ifany"), decreasing = TRUE))
+cat("\n")
+
+cat("Sample counts by plotted continent:\n")
+print(sample_counts)
+cat("\n")
+
+cat("Host species composition in final Bos subset:\n")
+print(sort(table(meta_bos$host_species), decreasing = TRUE))
+cat("\n")
+
+cat("Host species by continent:\n")
+print(species_counts)
+cat("\n")
+
+cat("SH counts by continent:\n")
+print(SH_counts)
+cat("\n")
+
+cat("Exact intersections:\n")
+print(inter_df[, c("combination", "n_continents", "n_SH")])
+cat("\n")
+
+cat("showtext options:\n")
+print(showtext::showtext_opts())
+cat("\n")
+
+cat("Output files:\n")
+cat("All Bos metadata:", out_bos_all_meta, "\n")
+cat("Filtered Bos metadata:", out_filtered_meta, "\n")
+cat("Invalid continent metadata:", out_invalid_continent_meta, "\n")
+cat("Sample counts:", out_sample_counts, "\n")
+cat("Host species counts:", out_species_counts, "\n")
+cat("SH counts:", out_SH_counts, "\n")
+cat("SH presence list:", out_SH_presence_list, "\n")
+cat("Presence/absence matrix:", out_pa_matrix, "\n")
+cat("Exact intersections:", out_intersections, "\n")
+cat("Venn PNG:", out_png, "\n")
+cat("Venn PDF:", out_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("Venn PNG:\n", out_png, "\n")
+cat("Venn PDF:\n", out_pdf, "\n")
+cat("Sample counts:\n", out_sample_counts, "\n")
+cat("SH counts:\n", out_SH_counts, "\n")
+cat("Exact intersections:\n", out_intersections, "\n")
+cat("Log:\n", out_log, "\n")
+
+EOF
+
+Rscript scripts/10a_Bos_continent_Americas_SH_venn_no_elephant.R
