@@ -1,0 +1,1397 @@
+#下面给你完整脚本。这次脚本用于生成：
+#不同驯养属性有蹄类动物食源大型真菌门水平组成图
+#图号暂定为：
+#Fig5_2
+#计算口径严格沿用你第四章图 4-2 的逻辑：先计算每个样本内门水平相对多度，再按分组求平均相对多度，单位为 %。区别是本次只分析上一步已经筛选好的“食源大型真菌相关 SH”，分组变量改为 status，分组名为“家养 → 野生 → 圈养野生”。参考代码最终版使用的是 scripts/14_Bos_continent_Americas_phylum_stacked_bar_no_elephant_CN.R，其板式为 theme_classic、宋体、白底、PNG 600 dpi、右侧无标题图例。
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/07_status_macrofungi_phylum_stacked_bar_v1.R
+#第二步：把下面完整脚本粘贴进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-2
+## 不同驯养属性有蹄类动物食源大型真菌门水平组成图
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 分析对象：
+##   上一步已经筛选好的食源大型真菌相关 SH
+##
+## 输入：
+##   1. final no-elephant metadata
+##   2. macrofungi_SH_abundance_table_for_status_venn.tsv
+##   3. macrofungi_SH_taxonomy_matched_by_strict_genus.csv
+##
+## 分组变量：
+##   metadata$status
+##
+## 分组标签：
+##   domesticated -> 家养
+##   wild         -> 野生
+##   captive      -> 圈养野生
+##
+## 统计口径：
+##   1. 读取食源大型真菌相关 SH abundance table
+##   2. 根据 SH taxonomy 中的 phylum 汇总到门水平
+##   3. 先计算每个样本内各门相对多度
+##   4. 再按驯养属性分组计算平均相对多度
+##
+## 单位：
+##   平均相对多度（%）
+##
+## 注意：
+##   本图只展示食源大型真菌相关 SH 内部的门水平组成；
+##   分母为每个样本中食源大型真菌相关 SH reads 总量，
+##   不是全体肠道真菌 reads 总量。
+##
+##   不重新筛选大型真菌属；
+##   不重新读取 BIOM；
+##   不重新做 SH taxonomy；
+##   不重新计算 alpha/beta 多样性；
+##   不使用旧含象科版本；
+##   不使用旧 vsearch 97% SH 结果。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Chapter 5 - Status macrofungi phylum stacked bar, v1\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "ggplot2",
+  "dplyr",
+  "tidyr",
+  "readr",
+  "showtext",
+  "sysfonts",
+  "grid"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 输入与输出路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+macrofungi_status_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+macrofungi_SH_abundance_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_abundance_table_for_status_venn.tsv"
+)
+
+macrofungi_SH_taxonomy_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_taxonomy_matched_by_strict_genus.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_phylum_composition_v1"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN.pdf"
+)
+
+summary_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+sample_count_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_sample_counts_no_elephant.csv"
+)
+
+sample_level_rel_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_sample_relative_abundance_no_elephant_CN.csv"
+)
+
+top_phylum_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_top5_by_status_no_elephant_CN.csv"
+)
+
+sum_check_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_sum_check_no_elephant_CN.csv"
+)
+
+phylum_reads_table_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_abundance_table_from_SH_no_elephant.csv"
+)
+
+zero_macrofungi_sample_csv <- file.path(
+  out_dir,
+  "status_macrofungi_phylum_samples_with_zero_macrofungi_reads_no_elephant.csv"
+)
+
+log_file <- file.path(
+  out_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c(
+    "metadata",
+    "macrofungi_SH_abundance",
+    "macrofungi_SH_taxonomy"
+  ),
+  file_path = c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  ),
+  exists = file.exists(c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  cat("\n以下输入文件不存在，请检查路径：\n")
+  print(input_files[!input_files$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 2. 中文字体：宋体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+message("使用中文字体：", font_path)
+
+## =========================
+## 3. 固定分组顺序与门顺序
+## =========================
+
+status_order_cn <- c("家养", "野生", "圈养野生")
+
+status_label_map <- c(
+  "domesticated" = "家养",
+  "wild" = "野生",
+  "captive" = "圈养野生"
+)
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+## =========================
+## 4. 中文名称映射：沿用第三章 / 图4-2
+## =========================
+
+phylum_map <- c(
+  "Ascomycota" = "子囊菌门",
+  "Basidiomycota" = "担子菌门",
+  "Neocallimastigomycota" = "新靓鞭菌门",
+  "Fungi_phy_Incertae_sedis" = "真菌门分类地位未定类群",
+  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
+  "Fungi_phy_Incertae_sedis_fungi" = "真菌门分类地位未定类群",
+  "Mucoromycota" = "毛霉门",
+  "Mortierellomycota" = "被孢霉门",
+  "Chytridiomycota" = "壶菌门",
+  "Rozellomycota" = "罗兹菌门",
+  "Olpidiomycota" = "油壶菌门",
+  "Glomeromycota" = "球囊霉门",
+  "Zoopagomycota" = "捕虫霉门",
+  "Aphelidiomycota" = "远日菌门",
+  "Blastocladiomycota" = "芽枝霉门",
+  "Basidiobolomycota" = "蛙粪霉门",
+  "Kickxellomycota" = "梳霉门",
+  "Monoblepharomycota" = "单毛菌门",
+  "Sanchytriomycota" = "Sanchytriomycota",
+  "Entorrhizomycota" = "根肿黑粉菌门",
+  "Calcarisporiellomycota" = "小齿梗孢门"
+)
+
+## =========================
+## 5. 颜色：沿用图4-2
+## =========================
+
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+## =========================
+## 6. 读取 metadata
+## =========================
+
+message("读取 no-elephant metadata ...")
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c("sampleid", "status")
+
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(sampleid),
+    status_original = as.character(status),
+    status_clean = tolower(as.character(status)),
+    status_CN = unname(status_label_map[tolower(as.character(status))])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(status_CN),
+    status_CN %in% status_order_cn
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$status_CN <- factor(meta2$status_CN, levels = status_order_cn)
+
+message("metadata 有效 status 样本数：", nrow(meta2))
+
+sample_counts <- meta2 %>%
+  count(status_CN, name = "n_samples") %>%
+  complete(
+    status_CN = factor(status_order_cn, levels = status_order_cn),
+    fill = list(n_samples = 0)
+  ) %>%
+  arrange(status_CN)
+
+write_csv(sample_counts, sample_count_csv)
+
+## =========================
+## 7. 读取大型真菌 SH taxonomy
+## =========================
+
+message("读取食源大型真菌 SH taxonomy ...")
+
+macro_tax <- read.csv(
+  macrofungi_SH_taxonomy_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_tax_cols <- c("SH", "phylum")
+
+missing_tax_cols <- setdiff(needed_tax_cols, colnames(macro_tax))
+
+if (length(missing_tax_cols) > 0) {
+  stop(
+    "大型真菌 SH taxonomy 文件缺少必要列：",
+    paste(missing_tax_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(macro_tax), collapse = " | ")
+  )
+}
+
+macro_tax2 <- macro_tax %>%
+  transmute(
+    SH = as.character(SH),
+    phylum = as.character(phylum),
+    phylum_cn = ifelse(
+      phylum %in% names(phylum_map),
+      phylum_map[phylum],
+      phylum
+    )
+  ) %>%
+  filter(
+    !is.na(SH),
+    SH != "",
+    !is.na(phylum_cn),
+    phylum_cn != ""
+  ) %>%
+  distinct(SH, .keep_all = TRUE)
+
+message("大型真菌相关 SH taxonomy 记录数：", nrow(macro_tax2))
+message("大型真菌相关 SH 涉及门数：", length(unique(macro_tax2$phylum_cn)))
+
+## =========================
+## 8. 读取大型真菌 SH abundance table
+## =========================
+
+message("读取食源大型真菌 SH abundance table ...")
+
+macro_abund <- read.delim(
+  macrofungi_SH_abundance_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+if (!"SH" %in% colnames(macro_abund)) {
+  stop(
+    "食源大型真菌 SH abundance table 缺少 SH 列。\n当前列名为：",
+    paste(colnames(macro_abund), collapse = " | ")
+  )
+}
+
+macro_abund$SH <- as.character(macro_abund$SH)
+
+## 只保留 taxonomy 中也存在的 SH
+macro_abund <- macro_abund %>%
+  filter(SH %in% macro_tax2$SH)
+
+message("丰度表中与 taxonomy 匹配的大型真菌 SH 数：", nrow(macro_abund))
+
+## =========================
+## 9. 转成长表并关联 phylum/status
+## =========================
+
+message("转换为长表并关联 metadata/status ...")
+
+macro_long <- macro_abund %>%
+  pivot_longer(
+    cols = -SH,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    abundance = suppressWarnings(as.numeric(abundance)),
+    abundance = ifelse(is.na(abundance), 0, abundance)
+  ) %>%
+  inner_join(macro_tax2, by = "SH") %>%
+  inner_join(meta2, by = "sample_id")
+
+matched_samples <- n_distinct(macro_long$sample_id)
+
+message("匹配到 metadata 的样本数：", matched_samples)
+
+if (matched_samples < 10) {
+  stop("匹配到的样本数过少，请检查 sample_id 是否一致。当前匹配样本数：", matched_samples)
+}
+
+## =========================
+## 10. 先按样本 × phylum 汇总 reads
+## =========================
+
+message("按样本 × 门汇总大型真菌 SH reads ...")
+
+sample_phylum_abund <- macro_long %>%
+  group_by(sample_id, status_CN, phylum_cn) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(sample_phylum_abund, phylum_reads_table_csv)
+
+## =========================
+## 11. 计算样本内相对多度
+## =========================
+
+message("计算样本内食源大型真菌门水平相对多度 ...")
+
+sample_total <- sample_phylum_abund %>%
+  group_by(sample_id, status_CN) %>%
+  summarise(
+    total_macrofungi_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+zero_samples <- sample_total %>%
+  filter(total_macrofungi_abundance <= 0)
+
+write_csv(zero_samples, zero_macrofungi_sample_csv)
+
+message("大型真菌 reads 为 0 的样本数：", nrow(zero_samples))
+
+phylum_rel <- sample_phylum_abund %>%
+  left_join(sample_total, by = c("sample_id", "status_CN")) %>%
+  filter(total_macrofungi_abundance > 0) %>%
+  mutate(
+    rel_abundance = abundance / total_macrofungi_abundance * 100
+  )
+
+sample_level_rel <- phylum_rel %>%
+  select(
+    sample_id,
+    status_CN,
+    phylum_cn,
+    abundance,
+    total_macrofungi_abundance,
+    rel_abundance
+  )
+
+write_csv(sample_level_rel, sample_level_rel_csv)
+
+## =========================
+## 12. 按 status 计算平均相对多度
+## =========================
+
+message("按 status 计算平均相对多度 ...")
+
+status_phylum_mean <- phylum_rel %>%
+  group_by(status_CN, phylum_cn) %>%
+  summarise(
+    mean_relative_abundance = mean(rel_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+all_present_phyla <- unique(status_phylum_mean$phylum_cn)
+
+present_phyla <- phylum_order_cn[phylum_order_cn %in% all_present_phyla]
+
+extra_phyla <- setdiff(all_present_phyla, present_phyla)
+present_phyla <- c(present_phyla, sort(extra_phyla))
+
+plot_df <- expand.grid(
+  status_CN = status_order_cn,
+  phylum_cn = present_phyla,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    status_phylum_mean,
+    by = c("status_CN", "phylum_cn")
+  ) %>%
+  mutate(
+    mean_relative_abundance = ifelse(
+      is.na(mean_relative_abundance),
+      0,
+      mean_relative_abundance
+    ),
+    status_CN = factor(status_CN, levels = status_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(status_CN, phylum_cn)
+
+write_csv(plot_df, summary_csv)
+
+## 检查每个分组是否约等于 100%
+sum_check <- plot_df %>%
+  group_by(status_CN) %>%
+  summarise(
+    sum_mean_relative_abundance = sum(mean_relative_abundance),
+    .groups = "drop"
+  )
+
+write_csv(sum_check, sum_check_csv)
+
+top_table <- plot_df %>%
+  arrange(status_CN, desc(mean_relative_abundance)) %>%
+  group_by(status_CN) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+write_csv(top_table, top_phylum_csv)
+
+## =========================
+## 13. 如出现未定义颜色的门，自动补充灰色
+## =========================
+
+missing_color_phyla <- setdiff(present_phyla, names(phylum_colors))
+
+if (length(missing_color_phyla) > 0) {
+  warning(
+    "以下门没有预设颜色，将自动使用灰色：",
+    paste(missing_color_phyla, collapse = ", ")
+  )
+
+  auto_cols <- rep("#BDBDBD", length(missing_color_phyla))
+  names(auto_cols) <- missing_color_phyla
+  phylum_colors <- c(phylum_colors, auto_cols)
+}
+
+phylum_colors_use <- phylum_colors[present_phyla]
+
+## =========================
+## 14. 作图
+## =========================
+
+message("绘制门水平组成图 ...")
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = status_CN,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.75, color = NA) +
+  scale_fill_manual(
+    values = phylum_colors_use,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.line = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    axis.ticks = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 11.2,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.42, "cm"),
+    legend.position = "right",
+    plot.margin = margin(t = 6, r = 6, b = 6, l = 6)
+  )
+
+## =========================
+## 15. 输出图片
+## =========================
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9,
+  height = 6,
+  bg = "white"
+)
+
+## =========================
+## 16. 输出 log
+## =========================
+
+sink(log_file)
+
+cat("Fig5-2 status macrofungi phylum stacked bar, no-elephant\n")
+cat("==============================================================\n\n")
+
+cat("Input files:\n")
+cat("Metadata:", metadata_file, "\n")
+cat("Macrofungi SH abundance table:", macrofungi_SH_abundance_file, "\n")
+cat("Macrofungi SH taxonomy:", macrofungi_SH_taxonomy_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis logic:\n")
+cat("Use already filtered macrofungi-related SH table from Fig5-1.\n")
+cat("Do not re-read BIOM.\n")
+cat("Do not re-match macrofungi genera.\n")
+cat("Aggregate macrofungi-related SH reads to phylum level.\n")
+cat("Calculate sample-level relative abundance first, then average by status.\n")
+cat("Relative abundance denominator: total macrofungi-related SH reads in each sample.\n\n")
+
+cat("Fixed status order:\n")
+print(status_order_cn)
+
+cat("\nStatus sample counts from metadata:\n")
+print(sample_counts)
+
+cat("\nMatched samples in macrofungi SH table:", matched_samples, "\n")
+cat("Samples with zero macrofungi reads:", nrow(zero_samples), "\n")
+cat("Samples used for relative abundance:", n_distinct(phylum_rel$sample_id), "\n\n")
+
+cat("Macrofungi SH taxonomy records:", nrow(macro_tax2), "\n")
+cat("Macrofungi SH abundance rows after taxonomy matching:", nrow(macro_abund), "\n\n")
+
+cat("Phylum order used in plot:\n")
+print(present_phyla)
+
+cat("\nSum check by status:\n")
+print(sum_check)
+
+cat("\nTop phyla by status:\n")
+print(top_table)
+
+cat("\nOutput files:\n")
+cat("PNG:", out_png, "\n")
+cat("PDF:", out_pdf, "\n")
+cat("Summary CSV:", summary_csv, "\n")
+cat("Sample counts CSV:", sample_count_csv, "\n")
+cat("Sample-level relative abundance CSV:", sample_level_rel_csv, "\n")
+cat("Phylum reads table CSV:", phylum_reads_table_csv, "\n")
+cat("Top phylum CSV:", top_phylum_csv, "\n")
+cat("Sum check CSV:", sum_check_csv, "\n")
+cat("Zero macrofungi sample CSV:", zero_macrofungi_sample_csv, "\n")
+
+sink()
+
+message("完成！")
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("汇总表: ", summary_csv)
+message("样本数表: ", sample_count_csv)
+message("样本水平相对多度表: ", sample_level_rel_csv)
+message("Top5门水平表: ", top_phylum_csv)
+message("Sum check表: ", sum_check_csv)
+message("日志: ", log_file)
+#运行脚本
+Rscript scripts/chapter5_macrofungi/07_status_macrofungi_phylum_stacked_bar_v1.R
+#本次修改说明
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/status_macrofungi_phylum_composition_v1/status_macrofungi_phylum_mean_relative_abundance_no_elephant_CN.csv
+#是否重算：
+#不重算。只读取已经算好的平均相对多度表重画图。
+#统计口径：
+#不变，仍然是：
+#样本内食源大型真菌门水平相对多度 → 按 status 求平均相对多度（%）
+#输出文件：
+#Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v2_narrow.png
+#Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v2_narrow.pdf
+#第一步：新建重画脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/08_redraw_status_macrofungi_phylum_stacked_bar_v2_narrow.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-2 重画脚本 v2
+##
+## 目的：
+##   不重算数据，只读取已有平均相对多度结果重画图。
+##
+## 修改：
+##   1. 图例字号放大；
+##   2. 柱子收窄；
+##   3. 整张图宽度缩小；
+##   4. 其他风格保持 Fig4-2 / Fig5-2 v1 一致。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_phylum_composition_v1"
+)
+
+summary_csv <- file.path(
+  in_dir,
+  "status_macrofungi_phylum_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+out_png <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v2_narrow.png"
+)
+
+out_pdf <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v2_narrow.pdf"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v2_narrow_log.txt"
+)
+
+if (!file.exists(summary_csv)) {
+  stop("找不到输入文件：", summary_csv)
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+## =========================
+## 3. 固定顺序与颜色
+## =========================
+
+status_order_cn <- c("家养", "野生", "圈养野生")
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+## =========================
+## 4. 读取已有平均相对多度结果
+## =========================
+
+plot_df <- read_csv(
+  summary_csv,
+  show_col_types = FALSE
+)
+
+needed_cols <- c("status_CN", "phylum_cn", "mean_relative_abundance")
+missing_cols <- setdiff(needed_cols, colnames(plot_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "输入表缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名：",
+    paste(colnames(plot_df), collapse = " | ")
+  )
+}
+
+present_phyla <- unique(as.character(plot_df$phylum_cn))
+present_phyla <- phylum_order_cn[phylum_order_cn %in% present_phyla]
+
+extra_phyla <- setdiff(unique(as.character(plot_df$phylum_cn)), present_phyla)
+present_phyla <- c(present_phyla, sort(extra_phyla))
+
+plot_df <- plot_df %>%
+  mutate(
+    status_CN = factor(status_CN, levels = status_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(status_CN, phylum_cn)
+
+missing_color_phyla <- setdiff(present_phyla, names(phylum_colors))
+
+if (length(missing_color_phyla) > 0) {
+  auto_cols <- rep("#BDBDBD", length(missing_color_phyla))
+  names(auto_cols) <- missing_color_phyla
+  phylum_colors <- c(phylum_colors, auto_cols)
+}
+
+phylum_colors_use <- phylum_colors[present_phyla]
+
+## =========================
+## 5. 重画图
+## =========================
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = status_CN,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.58, color = NA) +
+  scale_fill_manual(
+    values = phylum_colors_use,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.line = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    axis.ticks = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.50, "cm"),
+    legend.position = "right",
+    plot.margin = margin(t = 6, r = 6, b = 6, l = 6)
+  )
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 6.8,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 6.8,
+  height = 6,
+  bg = "white"
+)
+
+## =========================
+## 6. log
+## =========================
+
+sink(out_log)
+
+cat("Fig5-2 status macrofungi phylum stacked bar redraw v2\n")
+cat("=====================================================\n\n")
+
+cat("Input summary CSV:\n")
+cat(summary_csv, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only figure appearance was adjusted.\n\n")
+
+cat("Changes:\n")
+cat("geom_col width: 0.75 -> 0.58\n")
+cat("legend.text size: 11.2 -> 13\n")
+cat("legend.key.size: 0.42 cm -> 0.50 cm\n")
+cat("figure width: 9 inch -> 6.8 inch\n")
+cat("figure height: 6 inch unchanged\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n")
+cat("Output PDF:\n")
+cat(out_pdf, "\n")
+
+sink()
+
+message("完成！")
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("日志: ", out_log)
+#运行脚本
+Rscript scripts/chapter5_macrofungi/08_redraw_status_macrofungi_phylum_stacked_bar_v2_narrow.R
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/09_redraw_status_macrofungi_phylum_stacked_bar_v3_shorter_height.R
+#第二步：把下面完整脚本粘贴进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-2 重画脚本 v3
+##
+## 目的：
+##   不重算数据，只读取已有平均相对多度结果重画图。
+##
+## 修改：
+##   1. 沿用 v2 的图例字号放大；
+##   2. 沿用 v2 的柱子收窄；
+##   3. 沿用 v2 的图宽缩小；
+##   4. 仅把图高度调矮。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(readr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_phylum_composition_v1"
+)
+
+summary_csv <- file.path(
+  in_dir,
+  "status_macrofungi_phylum_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+out_png <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v3_shorter_height.png"
+)
+
+out_pdf <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v3_shorter_height.pdf"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_2_status_macrofungi_phylum_stacked_bar_no_elephant_CN_v3_shorter_height_log.txt"
+)
+
+if (!file.exists(summary_csv)) {
+  stop("找不到输入文件：", summary_csv)
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+## =========================
+## 3. 固定顺序与颜色
+## =========================
+
+status_order_cn <- c("家养", "野生", "圈养野生")
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+phylum_colors <- c(
+  "子囊菌门" = "#E64B35",
+  "担子菌门" = "#4DB3CF",
+  "新靓鞭菌门" = "#00A087",
+  "真菌门分类地位未定类群" = "#E7906F",
+  "毛霉门" = "#3C5488",
+  "被孢霉门" = "#91D1C2",
+  "壶菌门" = "#F00000",
+  "罗兹菌门" = "#7E6148",
+  "油壶菌门" = "#B09C85",
+  "球囊霉门" = "#8491B4",
+  "捕虫霉门" = "#00A6D6",
+  "远日菌门" = "#B24745",
+  "芽枝霉门" = "#6E40AA",
+  "蛙粪霉门" = "#FF8C00",
+  "梳霉门" = "#1F78B4",
+  "单毛菌门" = "#33A02C",
+  "Sanchytriomycota" = "#F08A8A",
+  "根肿黑粉菌门" = "#9CCC65",
+  "小齿梗孢门" = "#F0B35E"
+)
+
+## =========================
+## 4. 读取已有平均相对多度结果
+## =========================
+
+plot_df <- read_csv(
+  summary_csv,
+  show_col_types = FALSE
+)
+
+needed_cols <- c("status_CN", "phylum_cn", "mean_relative_abundance")
+missing_cols <- setdiff(needed_cols, colnames(plot_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "输入表缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名：",
+    paste(colnames(plot_df), collapse = " | ")
+  )
+}
+
+present_phyla <- unique(as.character(plot_df$phylum_cn))
+present_phyla <- phylum_order_cn[phylum_order_cn %in% present_phyla]
+
+extra_phyla <- setdiff(unique(as.character(plot_df$phylum_cn)), present_phyla)
+present_phyla <- c(present_phyla, sort(extra_phyla))
+
+plot_df <- plot_df %>%
+  mutate(
+    status_CN = factor(status_CN, levels = status_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(status_CN, phylum_cn)
+
+missing_color_phyla <- setdiff(present_phyla, names(phylum_colors))
+
+if (length(missing_color_phyla) > 0) {
+  auto_cols <- rep("#BDBDBD", length(missing_color_phyla))
+  names(auto_cols) <- missing_color_phyla
+  phylum_colors <- c(phylum_colors, auto_cols)
+}
+
+phylum_colors_use <- phylum_colors[present_phyla]
+
+## =========================
+## 5. 重画图
+## =========================
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = status_CN,
+    y = mean_relative_abundance,
+    fill = phylum_cn
+  )
+) +
+  geom_col(width = 0.58, color = NA) +
+  scale_fill_manual(
+    values = phylum_colors_use,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 14, base_family = "songti") +
+  theme(
+    axis.title.y = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 16,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    axis.line = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    axis.ticks = element_line(
+      linewidth = 0.6,
+      colour = "black"
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 13,
+      family = "songti",
+      colour = "black"
+    ),
+    legend.key.size = unit(0.50, "cm"),
+    legend.position = "right",
+    plot.margin = margin(t = 6, r = 6, b = 6, l = 6)
+  )
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 6.8,
+  height = 5.1,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 6.8,
+  height = 5.1,
+  bg = "white"
+)
+
+## =========================
+## 6. log
+## =========================
+
+sink(out_log)
+
+cat("Fig5-2 status macrofungi phylum stacked bar redraw v3\n")
+cat("=====================================================\n\n")
+
+cat("Input summary CSV:\n")
+cat(summary_csv, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only figure height was adjusted based on v2.\n\n")
+
+cat("Current settings retained from v2:\n")
+cat("geom_col width = 0.58\n")
+cat("legend.text size = 13\n")
+cat("legend.key.size = 0.50 cm\n")
+cat("figure width = 6.8 inch\n\n")
+
+cat("New change:\n")
+cat("figure height: 6.0 inch -> 5.1 inch\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n")
+cat("Output PDF:\n")
+cat(out_pdf, "\n")
+
+sink()
+
+message("完成！")
+message("PNG: ", out_png)
+message("PDF: ", out_pdf)
+message("日志: ", out_log)
+#运行脚本
+Rscript scripts/chapter5_macrofungi/09_redraw_status_macrofungi_phylum_stacked_bar_v3_shorter_height.R
