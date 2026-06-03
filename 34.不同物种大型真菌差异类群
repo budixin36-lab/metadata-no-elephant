@@ -1,0 +1,2584 @@
+#你这一步要跑的是LEfSe 统计本身，不是作图。所以我给你一个完整流程：先用 R 生成 LEfSe 输入文件，再切换到 lefse_py39 环境运行 LEfSe，得到 .res 结果。
+#第一步：新建 R 脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/13a_make_lefse_input_host_species_macrofungi_genus_no_elephant.R
+#把下面完整脚本粘进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5
+## Make LEfSe input:
+## host_species × food-derived macrofungi genus-level table
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. final no-elephant metadata
+##   2. macrofungi_SH_abundance_table_for_status_venn.tsv
+##   3. macrofungi_SH_taxonomy_matched_by_strict_genus.csv
+##
+## 输出：
+##   LEfSe_input_macrofungi_genus_host_species_no_elephant.txt
+##
+## 注意：
+##   本脚本只生成 LEfSe 输入文件；
+##   不运行 LEfSe；
+##   不画图；
+##   不重新筛选大型真菌 SH；
+##   不重新读取 BIOM；
+##   不使用旧含象科版本。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Make LEfSe input: host_species macrofungi genus no-elephant\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tidyr",
+  "readr",
+  "tibble"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(tibble)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+macrofungi_status_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+macrofungi_SH_abundance_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_abundance_table_for_status_venn.tsv"
+)
+
+macrofungi_SH_taxonomy_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_taxonomy_matched_by_strict_genus.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "host_species_macrofungi_LEfSe_genus_v1"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_input <- file.path(
+  out_dir,
+  "LEfSe_input_macrofungi_genus_host_species_no_elephant.txt"
+)
+
+summary_file <- file.path(
+  out_dir,
+  "LEfSe_input_host_species_macrofungi_generation_summary_no_elephant.txt"
+)
+
+mapping_file <- file.path(
+  out_dir,
+  "host_species_label_mapping_macrofungi_no_elephant.csv"
+)
+
+sample_count_file <- file.path(
+  out_dir,
+  "LEfSe_host_species_macrofungi_sample_count_no_elephant.csv"
+)
+
+feature_list_file <- file.path(
+  out_dir,
+  "LEfSe_host_species_macrofungi_genus_feature_list_no_elephant.csv"
+)
+
+zero_sample_file <- file.path(
+  out_dir,
+  "LEfSe_host_species_macrofungi_zero_samples_excluded_no_elephant.csv"
+)
+
+input_files <- data.frame(
+  file_label = c(
+    "metadata",
+    "macrofungi_SH_abundance",
+    "macrofungi_SH_taxonomy"
+  ),
+  file_path = c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  ),
+  exists = file.exists(c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  cat("\n以下输入文件不存在，请检查路径：\n")
+  print(input_files[!input_files$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 2. helper functions
+## =========================
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+make_safe_label <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("×", "x", x)
+  x <- gsub("[[:space:]]+", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
+
+clean_feature_name <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x)
+  x <- gsub("^genus__", "", x)
+  x <- gsub("\\|", "_", x)
+  x <- gsub("[[:space:]]+", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
+
+normalize_genus <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("^g__", "", x, ignore.case = TRUE)
+  x <- gsub("^genus__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*g__", "", x, ignore.case = TRUE)
+  x <- gsub("^.*;\\s*", "", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "unknown", "Unknown",
+    "unclassified", "Unclassified",
+    "unassigned", "Unassigned"
+  )] <- NA_character_
+  x
+}
+
+## =========================
+## 3. metadata
+## =========================
+
+cat("读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c(
+  "sampleid",
+  "host_family",
+  "host_species"
+)
+
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+meta2 <- meta %>%
+  mutate(
+    sample_id = clean_value(sampleid),
+    host_family = clean_value(host_family),
+    host_species = clean_value(host_species)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    !is.na(host_family),
+    !is.na(host_species),
+    host_family %in% family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+species_map <- meta2 %>%
+  distinct(host_species, host_family) %>%
+  mutate(
+    host_species_safe = make_safe_label(host_species)
+  ) %>%
+  arrange(factor(host_family, levels = family_order), host_species)
+
+dup_safe <- species_map$host_species_safe[duplicated(species_map$host_species_safe)]
+
+if (length(dup_safe) > 0) {
+  stop("host_species_safe 出现重复：", paste(unique(dup_safe), collapse = ", "))
+}
+
+meta2 <- meta2 %>%
+  left_join(
+    species_map %>% select(host_species, host_species_safe),
+    by = "host_species"
+  )
+
+write.csv(
+  species_map,
+  mapping_file,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("metadata 有效样本数：", nrow(meta2), "\n", sep = "")
+cat("host_species 数：", length(unique(meta2$host_species)), "\n", sep = "")
+
+## =========================
+## 4. macrofungi SH taxonomy
+## =========================
+
+cat("\n读取食源大型真菌 SH taxonomy ...\n")
+
+macro_tax <- read.csv(
+  macrofungi_SH_taxonomy_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_tax_cols <- c("SH", "genus")
+
+missing_tax_cols <- setdiff(needed_tax_cols, colnames(macro_tax))
+
+if (length(missing_tax_cols) > 0) {
+  stop(
+    "大型真菌 SH taxonomy 文件缺少必要列：",
+    paste(missing_tax_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(macro_tax), collapse = " | ")
+  )
+}
+
+if ("genus_clean" %in% colnames(macro_tax)) {
+  genus_col <- "genus_clean"
+} else {
+  genus_col <- "genus"
+}
+
+macro_tax2 <- macro_tax %>%
+  transmute(
+    SH = as.character(SH),
+    Genus = normalize_genus(.data[[genus_col]])
+  ) %>%
+  filter(
+    !is.na(SH),
+    SH != "",
+    !is.na(Genus),
+    Genus != ""
+  ) %>%
+  distinct(SH, .keep_all = TRUE)
+
+cat("大型真菌相关 SH taxonomy 记录数：", nrow(macro_tax2), "\n", sep = "")
+cat("大型真菌相关属数：", n_distinct(macro_tax2$Genus), "\n", sep = "")
+
+## =========================
+## 5. macrofungi SH abundance
+## =========================
+
+cat("\n读取食源大型真菌 SH abundance table ...\n")
+
+macro_abund <- read.delim(
+  macrofungi_SH_abundance_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+if (!"SH" %in% colnames(macro_abund)) {
+  stop(
+    "食源大型真菌 SH abundance table 缺少 SH 列。\n当前列名为：",
+    paste(colnames(macro_abund), collapse = " | ")
+  )
+}
+
+macro_abund$SH <- as.character(macro_abund$SH)
+
+macro_abund <- macro_abund %>%
+  filter(SH %in% macro_tax2$SH)
+
+macro_tax2 <- macro_tax2 %>%
+  filter(SH %in% macro_abund$SH)
+
+sample_cols_all <- setdiff(colnames(macro_abund), "SH")
+common_samples <- intersect(sample_cols_all, meta2$sample_id)
+common_samples <- sample_cols_all[sample_cols_all %in% common_samples]
+
+if (length(common_samples) == 0) {
+  stop("大型真菌 SH abundance table 和 metadata 没有匹配样本。")
+}
+
+meta2 <- meta2 %>%
+  filter(sample_id %in% common_samples)
+
+meta2 <- meta2[match(common_samples, meta2$sample_id), , drop = FALSE]
+
+macro_abund <- macro_abund[, c("SH", common_samples), drop = FALSE]
+
+cat("共同样本数：", length(common_samples), "\n", sep = "")
+cat("丰度表中大型真菌 SH 数：", nrow(macro_abund), "\n", sep = "")
+
+## =========================
+## 6. SH reads 汇总到 genus
+## =========================
+
+cat("\n按 genus 汇总 SH reads ...\n")
+
+macro_abund <- macro_abund[
+  match(macro_tax2$SH, macro_abund$SH),
+  ,
+  drop = FALSE
+]
+
+abund_mat <- as.matrix(macro_abund[, common_samples, drop = FALSE])
+storage.mode(abund_mat) <- "numeric"
+abund_mat[is.na(abund_mat)] <- 0
+rownames(abund_mat) <- macro_abund$SH
+
+genus_vec <- macro_tax2$Genus[
+  match(rownames(abund_mat), macro_tax2$SH)
+]
+
+if (any(is.na(genus_vec))) {
+  stop("部分 SH 未匹配到 Genus。")
+}
+
+genus_feature <- clean_feature_name(genus_vec)
+
+genus_mat <- rowsum(
+  abund_mat,
+  group = genus_feature,
+  reorder = FALSE
+)
+
+genus_mat <- genus_mat[rownames(genus_mat) != "", , drop = FALSE]
+genus_mat <- genus_mat[rowSums(genus_mat) > 0, , drop = FALSE]
+
+cat("汇总后大型真菌属数：", nrow(genus_mat), "\n", sep = "")
+
+## =========================
+## 7. 样本内相对丰度
+## =========================
+
+cat("\n计算样本内大型真菌属相对丰度百分比 ...\n")
+
+sample_sums <- colSums(genus_mat, na.rm = TRUE)
+
+zero_samples <- data.frame(
+  sample_id = names(sample_sums)[sample_sums <= 0],
+  total_macrofungi_reads = sample_sums[sample_sums <= 0],
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  zero_samples,
+  zero_sample_file,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("大型真菌 reads 为 0 的样本数：", nrow(zero_samples), "\n", sep = "")
+
+valid_samples <- names(sample_sums)[sample_sums > 0]
+
+if (length(valid_samples) == 0) {
+  stop("所有样本的大型真菌 reads 均为 0，无法生成 LEfSe 输入。")
+}
+
+genus_mat_valid <- genus_mat[, valid_samples, drop = FALSE]
+
+genus_rel <- sweep(
+  genus_mat_valid,
+  2,
+  sample_sums[valid_samples],
+  "/"
+) * 100
+
+genus_rel[is.na(genus_rel)] <- 0
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% valid_samples)
+
+meta_use <- meta_use[match(valid_samples, meta_use$sample_id), , drop = FALSE]
+
+species_count <- meta_use %>%
+  count(host_family, host_species, host_species_safe, name = "n_samples") %>%
+  arrange(factor(host_family, levels = family_order), host_species)
+
+write.csv(
+  species_count,
+  sample_count_file,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("进入 LEfSe 的样本数：", nrow(meta_use), "\n", sep = "")
+cat("进入 LEfSe 的宿主物种数：", n_distinct(meta_use$host_species), "\n", sep = "")
+
+rownames(genus_rel) <- paste0("k__Fungi|g__", rownames(genus_rel))
+
+## =========================
+## 8. write LEfSe input
+## =========================
+
+cat("\n写出 LEfSe 输入文件 ...\n")
+
+class_row <- c("class", as.character(meta_use$host_species_safe))
+subclass_row <- c("subclass", rep("no_subclass", nrow(meta_use)))
+subject_row <- c("subject", as.character(meta_use$sample_id))
+
+feature_table <- as.data.frame(genus_rel, check.names = FALSE) %>%
+  rownames_to_column("ID")
+
+feature_table <- feature_table[, c("ID", meta_use$sample_id), drop = FALSE]
+feature_table[] <- lapply(feature_table, as.character)
+
+out <- rbind(
+  class_row,
+  subclass_row,
+  subject_row,
+  as.matrix(feature_table)
+)
+
+write.table(
+  out,
+  out_input,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.csv(
+  data.frame(
+    lefse_feature = rownames(genus_rel),
+    original_or_clean_genus = gsub("^k__Fungi\\|g__", "", rownames(genus_rel))
+  ),
+  feature_list_file,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 9. summary
+## =========================
+
+sink(summary_file)
+
+cat("LEfSe input generation summary: host_species macrofungi genus no-elephant\n")
+cat("======================================================================\n\n")
+
+cat("Input metadata:\n", metadata_file, "\n", sep = "")
+cat("Input macrofungi SH abundance table:\n", macrofungi_SH_abundance_file, "\n", sep = "")
+cat("Input macrofungi SH taxonomy:\n", macrofungi_SH_taxonomy_file, "\n\n", sep = "")
+
+cat("Output LEfSe input:\n", out_input, "\n\n", sep = "")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis logic:\n")
+cat("1. Use already filtered food-derived macrofungi-related SH table.\n")
+cat("2. Aggregate macrofungi SH reads to genus level.\n")
+cat("3. Convert each sample to macrofungi genus relative abundance percentage.\n")
+cat("4. Use host_species as LEfSe class.\n")
+cat("5. Exclude samples with zero total macrofungi reads because within-macrofungi relative abundance is undefined.\n")
+cat("6. No TopN filtering and no prevalence filtering.\n\n")
+
+cat("Matched samples before zero filtering:", length(common_samples), "\n")
+cat("Zero macrofungi samples excluded:", nrow(zero_samples), "\n")
+cat("Samples used for LEfSe:", nrow(meta_use), "\n")
+cat("Host species used for LEfSe:", n_distinct(meta_use$host_species), "\n")
+cat("Macrofungi genus features for LEfSe:", nrow(genus_rel), "\n\n")
+
+cat("Host species sample counts after zero filtering:\n")
+print(species_count)
+
+cat("\nZero macrofungi samples file:\n")
+cat(zero_sample_file, "\n")
+
+cat("\nFeature list file:\n")
+cat(feature_list_file, "\n")
+
+cat("\nMapping file:\n")
+cat(mapping_file, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Samples used for LEfSe:", nrow(meta_use), "\n")
+cat("Host species used for LEfSe:", n_distinct(meta_use$host_species), "\n")
+cat("Macrofungi genus features:", nrow(genus_rel), "\n")
+cat("Output LEfSe input:\n", out_input, "\n", sep = "")
+cat("Mapping:\n", mapping_file, "\n", sep = "")
+cat("Sample counts:\n", sample_count_file, "\n", sep = "")
+cat("Zero samples:\n", zero_sample_file, "\n", sep = "")
+cat("Summary:\n", summary_file, "\n", sep = "")
+#运行脚本
+Rscript scripts/chapter5_macrofungi/13a_make_lefse_input_host_species_macrofungi_genus_no_elephant.R
+#第二步：运行 LEfSe
+#R 脚本成功后，运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/host_species_macrofungi_LEfSe_genus_v1
+
+conda activate lefse_py39
+
+lefse_format_input.py \
+  LEfSe_input_macrofungi_genus_host_species_no_elephant.txt \
+  host_species_macrofungi_genus_no_elephant.in \
+  -c 1 -s 2 -u 3 -o 1000000
+
+lefse_run.py \
+  host_species_macrofungi_genus_no_elephant.in \
+  host_species_macrofungi_genus_no_elephant.res \
+  -l 4.0
+#下面给你完整作图脚本。本脚本不重新运行 LEfSe，只读取：
+#host_species_macrofungi_genus_no_elephant.res
+#并绘制 LDA score 图。
+#第一步：进入结果目录，新建 Python 作图脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/host_species_macrofungi_LEfSe_genus_v1
+
+nano plot_host_species_macrofungi_lefse_CN_ordered.py
+#第二步：粘贴完整 Python 脚本
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Chapter 5 - Fig5-5
+不同宿主物种食源大型真菌属水平差异类群 LEfSe LDA score 图
+
+Input:
+  host_species_macrofungi_genus_no_elephant.res
+
+Output:
+  Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered.png
+  Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered.pdf
+  Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_plot_data.csv
+  Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_untranslated_genera.csv
+
+注意：
+  本脚本不重新运行 LEfSe；
+  只读取已有 .res 结果并作图；
+  只绘制 LDA score > 4.0 的差异属；
+  宿主物种顺序严格按论文物种分类层级图：
+  牛科 → 猪科 → 鹿科 → 马科 → 犀科。
+"""
+
+from pathlib import Path
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# =============================
+# 1. 路径
+# =============================
+
+res_file = Path("host_species_macrofungi_genus_no_elephant.res")
+
+out_png = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered.png")
+out_pdf = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered.pdf")
+out_csv = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_plot_data.csv")
+out_untranslated = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_untranslated_genera.csv")
+
+if not res_file.exists():
+    raise SystemExit(
+        f"找不到输入文件：{res_file}\n"
+        "请先确认 lefse_run.py 已经成功生成 host_species_macrofungi_genus_no_elephant.res"
+    )
+
+# =============================
+# 2. 字体
+# =============================
+
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# =============================
+# 3. 宿主物种固定顺序与中文名
+# =============================
+
+species_order_safe = [
+    # Bovidae / 牛科
+    "Bos_taurus",
+    "Bos_grunniens",
+    "Bos_grunniens_x_Bos_taurus",
+    "Bos_bonasus",
+    "Bos_indicus",
+    "Bos_indicus_x_Bos_taurus",
+    "Bos_mutus",
+    "Ovis_aries",
+    "Capra_hircus",
+    "Pantholops_hodgsonii",
+    "Bubalus_bubalis",
+    "Procapra_picticaudata",
+
+    # Suidae / 猪科
+    "Sus_domesticus",
+    "Sus_scrofa",
+
+    # Cervidae / 鹿科
+    "Rangifer_tarandus",
+    "Cervus_nippon",
+    "Cervus_canadensis",
+    "Muntiacus_reevesi",
+    "Muntiacus_crinifrons",
+    "Dama_dama",
+
+    # Equidae / 马科
+    "Equus_caballus",
+    "Equus_kiang",
+
+    # Rhinocerotidae / 犀科
+    "Diceros_bicornis",
+]
+
+species_cn = {
+    "Bos_taurus": "家牛",
+    "Bos_grunniens": "家牦牛",
+    "Bos_grunniens_x_Bos_taurus": "家牦牛×家牛",
+    "Bos_bonasus": "欧洲野牛",
+    "Bos_indicus": "瘤牛",
+    "Bos_indicus_x_Bos_taurus": "瘤牛×家牛",
+    "Bos_mutus": "野牦牛",
+    "Ovis_aries": "绵羊",
+    "Capra_hircus": "家山羊",
+    "Pantholops_hodgsonii": "藏羚",
+    "Bubalus_bubalis": "水牛",
+    "Procapra_picticaudata": "藏原羚",
+    "Sus_domesticus": "家猪",
+    "Sus_scrofa": "野猪",
+    "Rangifer_tarandus": "驯鹿",
+    "Cervus_nippon": "梅花鹿",
+    "Cervus_canadensis": "加拿大马鹿",
+    "Muntiacus_reevesi": "小麂",
+    "Muntiacus_crinifrons": "黑麂",
+    "Dama_dama": "黇鹿",
+    "Equus_caballus": "家马",
+    "Equus_kiang": "藏野驴",
+    "Diceros_bicornis": "黑犀",
+}
+
+# =============================
+# 4. 宿主物种颜色
+# 不使用彩虹渐变
+# =============================
+
+species_colors = {
+    "Bos_taurus": "#E41A1C",
+    "Bos_grunniens": "#377EB8",
+    "Bos_grunniens_x_Bos_taurus": "#4DAF4A",
+    "Bos_bonasus": "#984EA3",
+    "Bos_indicus": "#FF7F00",
+    "Bos_indicus_x_Bos_taurus": "#A65628",
+    "Bos_mutus": "#F781BF",
+    "Ovis_aries": "#1B9E77",
+    "Capra_hircus": "#D95F02",
+    "Pantholops_hodgsonii": "#7570B3",
+    "Bubalus_bubalis": "#66A61E",
+    "Procapra_picticaudata": "#E7298A",
+
+    "Sus_domesticus": "#000000",
+    "Sus_scrofa": "#999999",
+
+    "Rangifer_tarandus": "#00A087",
+    "Cervus_nippon": "#3C5488",
+    "Cervus_canadensis": "#F39B7F",
+    "Muntiacus_reevesi": "#8491B4",
+    "Muntiacus_crinifrons": "#91D1C2",
+    "Dama_dama": "#DC0000",
+
+    "Equus_caballus": "#7E6148",
+    "Equus_kiang": "#00BFC4",
+
+    "Diceros_bicornis": "#B09C85",
+}
+
+# =============================
+# 5. 食源大型真菌属中文译名
+# 未覆盖的属保留拉丁名，并输出检查表
+# =============================
+
+genus_map = {
+    "Abortiporus": "薄孔菌属",
+    "Agaricus": "蘑菇属",
+    "Akanthomyces": "棘束孢属",
+    "Aseroe": "海星菌属",
+    "Ascobolus": "粪盘菌属",
+    "Beauveria": "白僵菌属",
+    "Bjerkandera": "干朽菌属",
+    "Boletus": "牛肝菌属",
+    "Cheilymenia": "缘刺盘菌属",
+    "Coniochaeta": "锥毛壳属",
+    "Coprinellus": "小鬼伞属",
+    "Coprinopsis": "拟鬼伞属",
+    "Cortinarius": "丝膜菌属",
+    "Elaphomyces": "鹿花菌属",
+    "Entoloma": "粉褶菌属",
+    "Ganoderma": "灵芝属",
+    "Gastrosporium": "腹孢菌属",
+    "Holocotylon": "Holocotylon",
+    "Lyomyces": "薄孔菌属",
+    "Lycoperdon": "马勃属",
+    "Lysurus": "笼头菌属",
+    "Metarhizium": "绿僵菌属",
+    "Monascus": "红曲霉属",
+    "Octospora": "八孢盘菌属",
+    "Paecilomyces": "拟青霉属",
+    "Panaeolina": "小斑褶菇属",
+    "Panaeolus": "斑褶菇属",
+    "Peniophora": "伏革菌属",
+    "Perenniporia": "多年卧孔菌属",
+    "Psathyrella": "脆柄菇属",
+    "Purpureocillium": "紫色拟青霉属",
+    "Ramularia": "柱隔孢属",
+    "Rhizopogon": "须腹菌属",
+    "Russula": "红菇属",
+    "Schizophyllum": "裂褶菌属",
+    "Simplicillium": "蜡蚧菌属",
+    "Sphaerobolus": "弹球菌属",
+    "Suillus": "乳牛肝菌属",
+    "Trametes": "栓菌属",
+    "Trichoderma": "木霉属",
+    "Trichophaeopsis": "毛盘菌属",
+    "Tulosesus": "小脆柄菇属",
+    "Ustilaginoidea": "稻曲菌属",
+    "Ustilago": "黑粉菌属",
+    "Xylaria": "炭角菌属",
+}
+
+def translate_feature(feature: str) -> str:
+    f = feature.strip()
+
+    for prefix in [
+        "k__Fungi|g__",
+        "k__Fungi.g__",
+        "k__Fungi|",
+        "g__",
+    ]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+
+    return genus_map.get(f, f)
+
+def extract_genus(feature: str) -> str:
+    f = feature.strip()
+    for prefix in [
+        "k__Fungi|g__",
+        "k__Fungi.g__",
+        "k__Fungi|",
+        "g__",
+    ]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+    return f
+
+def normalize_group(group: str) -> str:
+    g = group.strip()
+    g = g.replace("×", "x")
+    g = g.replace(" ", "_")
+    return g
+
+# =============================
+# 6. 读取 LEfSe .res
+# =============================
+
+rows = []
+unknown_groups = set()
+untranslated_genera = set()
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        if len(parts) < 4:
+            continue
+
+        feature_raw = parts[0].strip()
+        group_raw = parts[2].strip()
+        group_safe = normalize_group(group_raw)
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        if lda < 4.0:
+            continue
+
+        if not group_safe:
+            continue
+
+        if group_safe not in species_order_safe:
+            unknown_groups.add(group_safe)
+            continue
+
+        genus_raw = extract_genus(feature_raw)
+        feature_cn = translate_feature(feature_raw)
+
+        if feature_cn == genus_raw:
+            untranslated_genera.add(genus_raw)
+
+        rows.append({
+            "feature_raw": genus_raw,
+            "feature": feature_cn,
+            "group_safe": group_safe,
+            "group_cn": species_cn[group_safe],
+            "lda": lda,
+        })
+
+if unknown_groups:
+    print("警告：.res 中出现不在 23 个目标宿主物种列表中的富集组，已跳过：")
+    for g in sorted(unknown_groups):
+        print("  -", g)
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带目标宿主物种富集组的结果，请检查 .res 文件。")
+
+# 按固定物种顺序排列；每个物种内部按 LDA 从高到低排列
+rows_sorted = []
+
+for sp in species_order_safe:
+    sub = [r for r in rows if r["group_safe"] == sp]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# =============================
+# 7. 输出作图数据和未翻译属名
+# =============================
+
+with out_csv.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature",
+            "group_safe",
+            "group_cn",
+            "LDA_score",
+        ]
+    )
+    writer.writeheader()
+
+    for r in rows_sorted:
+        writer.writerow({
+            "feature_raw": r["feature_raw"],
+            "feature": r["feature"],
+            "group_safe": r["group_safe"],
+            "group_cn": r["group_cn"],
+            "LDA_score": r["lda"],
+        })
+
+with out_untranslated.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["untranslated_genus"])
+    for g in sorted(untranslated_genera):
+        writer.writerow([g])
+
+# =============================
+# 8. 绘图
+# =============================
+
+features = [r["feature"] for r in rows_sorted]
+groups_safe = [r["group_safe"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [species_colors[g] for g in groups_safe]
+
+n = len(rows_sorted)
+
+fig_width = 14.5
+fig_height = max(8.5, n * 0.30 + 2.8)
+
+fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=0.9,
+    height=0.76,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=13)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=13)
+
+xmax = max(ldas)
+x_upper = max(5.4, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=13)
+ax.tick_params(axis="y", length=0)
+
+ax.grid(axis="x", color="black", linewidth=0.9)
+ax.grid(axis="y", visible=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+present_species = [sp for sp in species_order_safe if sp in set(groups_safe)]
+
+legend_handles = [
+    Patch(
+        facecolor=species_colors[sp],
+        edgecolor="black",
+        label=species_cn[sp]
+    )
+    for sp in present_species
+]
+
+legend = ax.legend(
+    handles=legend_handles,
+    loc="upper center",
+    bbox_to_anchor=(0.5, 1.15),
+    ncol=6,
+    frameon=False,
+    prop=font_prop,
+    fontsize=13,
+    handlelength=1.6,
+    columnspacing=1.25,
+    handletextpad=0.5,
+)
+
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(13)
+
+plt.subplots_adjust(
+    left=0.28,
+    right=0.98,
+    top=0.84,
+    bottom=0.08
+)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print(f"Untranslated genera: {out_untranslated}")
+print("Legend species:", "、".join([species_cn[sp] for sp in present_species]))
+
+if untranslated_genera:
+    print("仍有未翻译属名：")
+    for g in sorted(untranslated_genera):
+        print("  -", g)
+#运行作图脚本
+#你现在已经在 lefse_py39 环境里，可以直接运行：
+python3 plot_host_species_macrofungi_lefse_CN_ordered.py
+#第一步：新建重画脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/host_species_macrofungi_LEfSe_genus_v1
+
+nano plot_host_species_macrofungi_lefse_CN_ordered_v2_namefix_layoutfix.py
+#第二步：粘贴完整脚本
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Chapter 5 - Fig5-5 v2
+不同宿主物种食源大型真菌属水平差异类群 LEfSe LDA score 图
+
+本脚本不重新运行 LEfSe，只读取已有：
+  host_species_macrofungi_genus_no_elephant.res
+
+本次修改：
+  1. 补充 Holocotylon -> 空腔菇属；
+  2. 输出完整“拉丁名-中文名”对照表供核对；
+  3. 调整图例和字号布局，尽量贴近第三章 ordered_fixed_v2 图；
+  4. 不覆盖上一版图。
+"""
+
+from pathlib import Path
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# =============================
+# 1. 路径
+# =============================
+
+res_file = Path("host_species_macrofungi_genus_no_elephant.res")
+
+out_png = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_v2_namefix_layoutfix.png")
+out_pdf = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_v2_namefix_layoutfix.pdf")
+out_csv = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_v2_namefix_layoutfix_plot_data.csv")
+out_translation_check = Path("Fig5_5_host_species_macrofungi_LEfSe_genus_translation_check_v2.csv")
+
+if not res_file.exists():
+    raise SystemExit(
+        f"找不到输入文件：{res_file}\n"
+        "请确认 host_species_macrofungi_genus_no_elephant.res 已存在。"
+    )
+
+# =============================
+# 2. 字体
+# =============================
+
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# =============================
+# 3. 宿主物种固定顺序与中文名
+# =============================
+
+species_order_safe = [
+    "Bos_taurus",
+    "Bos_grunniens",
+    "Bos_grunniens_x_Bos_taurus",
+    "Bos_bonasus",
+    "Bos_indicus",
+    "Bos_indicus_x_Bos_taurus",
+    "Bos_mutus",
+    "Ovis_aries",
+    "Capra_hircus",
+    "Pantholops_hodgsonii",
+    "Bubalus_bubalis",
+    "Procapra_picticaudata",
+
+    "Sus_domesticus",
+    "Sus_scrofa",
+
+    "Rangifer_tarandus",
+    "Cervus_nippon",
+    "Cervus_canadensis",
+    "Muntiacus_reevesi",
+    "Muntiacus_crinifrons",
+    "Dama_dama",
+
+    "Equus_caballus",
+    "Equus_kiang",
+
+    "Diceros_bicornis",
+]
+
+species_cn = {
+    "Bos_taurus": "家牛",
+    "Bos_grunniens": "家牦牛",
+    "Bos_grunniens_x_Bos_taurus": "家牦牛×家牛",
+    "Bos_bonasus": "欧洲野牛",
+    "Bos_indicus": "瘤牛",
+    "Bos_indicus_x_Bos_taurus": "瘤牛×家牛",
+    "Bos_mutus": "野牦牛",
+    "Ovis_aries": "绵羊",
+    "Capra_hircus": "家山羊",
+    "Pantholops_hodgsonii": "藏羚",
+    "Bubalus_bubalis": "水牛",
+    "Procapra_picticaudata": "藏原羚",
+    "Sus_domesticus": "家猪",
+    "Sus_scrofa": "野猪",
+    "Rangifer_tarandus": "驯鹿",
+    "Cervus_nippon": "梅花鹿",
+    "Cervus_canadensis": "加拿大马鹿",
+    "Muntiacus_reevesi": "小麂",
+    "Muntiacus_crinifrons": "黑麂",
+    "Dama_dama": "黇鹿",
+    "Equus_caballus": "家马",
+    "Equus_kiang": "藏野驴",
+    "Diceros_bicornis": "黑犀",
+}
+
+# =============================
+# 4. 颜色：沿用第三章物种 LEfSe 离散色
+# =============================
+
+species_colors = {
+    "Bos_taurus": "#E41A1C",
+    "Bos_grunniens": "#377EB8",
+    "Bos_grunniens_x_Bos_taurus": "#4DAF4A",
+    "Bos_bonasus": "#984EA3",
+    "Bos_indicus": "#FF7F00",
+    "Bos_indicus_x_Bos_taurus": "#A65628",
+    "Bos_mutus": "#F781BF",
+    "Ovis_aries": "#1B9E77",
+    "Capra_hircus": "#D95F02",
+    "Pantholops_hodgsonii": "#7570B3",
+    "Bubalus_bubalis": "#66A61E",
+    "Procapra_picticaudata": "#E7298A",
+
+    "Sus_domesticus": "#000000",
+    "Sus_scrofa": "#999999",
+
+    "Rangifer_tarandus": "#00A087",
+    "Cervus_nippon": "#3C5488",
+    "Cervus_canadensis": "#F39B7F",
+    "Muntiacus_reevesi": "#8491B4",
+    "Muntiacus_crinifrons": "#91D1C2",
+    "Dama_dama": "#DC0000",
+
+    "Equus_caballus": "#7E6148",
+    "Equus_kiang": "#00BFC4",
+
+    "Diceros_bicornis": "#B09C85",
+}
+
+# =============================
+# 5. 属名中文译名
+# translation_status:
+#   provided_by_user_or_previous_checked: 你明确给出或前文已经确认过
+#   common_cn_name_to_check: 我补充的常见中文名，需你核对
+#   untranslated: 未翻译，保留拉丁名
+# =============================
+
+genus_map = {
+    # 你本轮明确补充
+    "Holocotylon": ("空腔菇属", "provided_by_user_or_previous_checked"),
+
+    # 你前面已经明确给过 / 我们已用于前面图并确认过的译名
+    "Trichoderma": ("木霉属", "provided_by_user_or_previous_checked"),
+    "Monascus": ("红曲霉属", "provided_by_user_or_previous_checked"),
+    "Ustilago": ("黑粉菌属", "provided_by_user_or_previous_checked"),
+    "Beauveria": ("白僵菌属", "provided_by_user_or_previous_checked"),
+    "Coniochaeta": ("锥毛壳属", "provided_by_user_or_previous_checked"),
+    "Ramularia": ("柱隔孢属", "provided_by_user_or_previous_checked"),
+    "Claviceps": ("麦角菌属", "provided_by_user_or_previous_checked"),
+    "Simplicillium": ("蜡蚧菌属", "provided_by_user_or_previous_checked"),
+    "Sphaerobolus": ("弹球菌属", "provided_by_user_or_previous_checked"),
+    "Paecilomyces": ("拟青霉属", "provided_by_user_or_previous_checked"),
+    "Parasola": ("近地伞属", "provided_by_user_or_previous_checked"),
+
+    # 前面大型真菌属图已使用或常见译名，仍输出表供你核对
+    "Abortiporus": ("薄孔菌属", "common_cn_name_to_check"),
+    "Agaricus": ("蘑菇属", "common_cn_name_to_check"),
+    "Akanthomyces": ("棘束孢属", "common_cn_name_to_check"),
+    "Aseroe": ("海星菌属", "common_cn_name_to_check"),
+    "Ascobolus": ("粪盘菌属", "provided_by_user_or_previous_checked"),
+    "Bjerkandera": ("干朽菌属", "common_cn_name_to_check"),
+    "Boletus": ("牛肝菌属", "common_cn_name_to_check"),
+    "Cheilymenia": ("缘刺盘菌属", "common_cn_name_to_check"),
+    "Coprinellus": ("小鬼伞属", "common_cn_name_to_check"),
+    "Coprinopsis": ("拟鬼伞属", "common_cn_name_to_check"),
+    "Cortinarius": ("丝膜菌属", "provided_by_user_or_previous_checked"),
+    "Elaphomyces": ("鹿花菌属", "common_cn_name_to_check"),
+    "Entoloma": ("粉褶菌属", "common_cn_name_to_check"),
+    "Ganoderma": ("灵芝属", "common_cn_name_to_check"),
+    "Gastrosporium": ("腹孢菌属", "common_cn_name_to_check"),
+    "Lyomyces": ("薄孔菌属", "common_cn_name_to_check"),
+    "Lycoperdon": ("马勃属", "common_cn_name_to_check"),
+    "Lysurus": ("笼头菌属", "common_cn_name_to_check"),
+    "Metarhizium": ("绿僵菌属", "common_cn_name_to_check"),
+    "Octospora": ("八孢盘菌属", "common_cn_name_to_check"),
+    "Panaeolina": ("小斑褶菇属", "common_cn_name_to_check"),
+    "Panaeolus": ("斑褶菇属", "common_cn_name_to_check"),
+    "Peniophora": ("伏革菌属", "common_cn_name_to_check"),
+    "Perenniporia": ("多年卧孔菌属", "common_cn_name_to_check"),
+    "Psathyrella": ("脆柄菇属", "common_cn_name_to_check"),
+    "Purpureocillium": ("紫色拟青霉属", "common_cn_name_to_check"),
+    "Rhizopogon": ("须腹菌属", "common_cn_name_to_check"),
+    "Russula": ("红菇属", "common_cn_name_to_check"),
+    "Schizophyllum": ("裂褶菌属", "common_cn_name_to_check"),
+    "Suillus": ("乳牛肝菌属", "provided_by_user_or_previous_checked"),
+    "Trametes": ("栓菌属", "common_cn_name_to_check"),
+    "Trichophaeopsis": ("毛盘菌属", "common_cn_name_to_check"),
+    "Tulosesus": ("小脆柄菇属", "common_cn_name_to_check"),
+    "Ustilaginoidea": ("稻曲菌属", "common_cn_name_to_check"),
+    "Xylaria": ("炭角菌属", "common_cn_name_to_check"),
+}
+
+def strip_feature_prefix(feature: str) -> str:
+    f = feature.strip()
+    for prefix in [
+        "k__Fungi|g__",
+        "k__Fungi.g__",
+        "k__Fungi|",
+        "g__",
+    ]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+    return f
+
+def translate_feature(feature: str):
+    genus = strip_feature_prefix(feature)
+    if genus in genus_map:
+        return genus, genus_map[genus][0], genus_map[genus][1]
+    return genus, genus, "untranslated"
+
+def normalize_group(group: str) -> str:
+    g = group.strip()
+    g = g.replace("×", "x")
+    g = g.replace(" ", "_")
+    return g
+
+# =============================
+# 6. 读取 LEfSe .res
+# =============================
+
+rows = []
+unknown_groups = set()
+translation_records = {}
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        if len(parts) < 4:
+            continue
+
+        feature_raw = parts[0].strip()
+        group_raw = parts[2].strip()
+        group_safe = normalize_group(group_raw)
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        if lda < 4.0:
+            continue
+
+        if not group_safe:
+            continue
+
+        if group_safe not in species_order_safe:
+            unknown_groups.add(group_safe)
+            continue
+
+        genus_raw, feature_cn, translation_status = translate_feature(feature_raw)
+
+        translation_records[genus_raw] = {
+            "feature_raw": genus_raw,
+            "feature_cn": feature_cn,
+            "translation_status": translation_status,
+        }
+
+        rows.append({
+            "feature_raw": genus_raw,
+            "feature": feature_cn,
+            "translation_status": translation_status,
+            "group_safe": group_safe,
+            "group_cn": species_cn[group_safe],
+            "lda": lda,
+        })
+
+if unknown_groups:
+    print("警告：.res 中出现不在 23 个目标宿主物种列表中的富集组，已跳过：")
+    for g in sorted(unknown_groups):
+        print("  -", g)
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带目标宿主物种富集组的结果，请检查 .res 文件。")
+
+rows_sorted = []
+for sp in species_order_safe:
+    sub = [r for r in rows if r["group_safe"] == sp]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# =============================
+# 7. 输出作图数据和译名核对表
+# =============================
+
+with out_csv.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature",
+            "translation_status",
+            "group_safe",
+            "group_cn",
+            "LDA_score",
+        ]
+    )
+    writer.writeheader()
+
+    for r in rows_sorted:
+        writer.writerow({
+            "feature_raw": r["feature_raw"],
+            "feature": r["feature"],
+            "translation_status": r["translation_status"],
+            "group_safe": r["group_safe"],
+            "group_cn": r["group_cn"],
+            "LDA_score": r["lda"],
+        })
+
+with out_translation_check.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature_cn",
+            "translation_status",
+        ]
+    )
+    writer.writeheader()
+
+    for genus in sorted(translation_records.keys()):
+        writer.writerow(translation_records[genus])
+
+# =============================
+# 8. 绘图
+# =============================
+
+features = [r["feature"] for r in rows_sorted]
+groups_safe = [r["group_safe"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [species_colors[g] for g in groups_safe]
+
+n = len(rows_sorted)
+
+fig_width = 14.0
+fig_height = max(8.0, n * 0.285 + 2.2)
+
+fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=0.9,
+    height=0.74,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=12)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=12)
+
+xmax = max(ldas)
+x_upper = max(5.4, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=12)
+ax.tick_params(axis="y", length=0)
+
+ax.grid(axis="x", color="black", linewidth=0.85)
+ax.grid(axis="y", visible=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+present_species = [sp for sp in species_order_safe if sp in set(groups_safe)]
+
+legend_handles = [
+    Patch(
+        facecolor=species_colors[sp],
+        edgecolor="black",
+        label=species_cn[sp]
+    )
+    for sp in present_species
+]
+
+legend = ax.legend(
+    handles=legend_handles,
+    loc="upper center",
+    bbox_to_anchor=(0.5, 1.095),
+    ncol=6,
+    frameon=False,
+    prop=font_prop,
+    fontsize=12,
+    handlelength=1.5,
+    columnspacing=1.15,
+    handletextpad=0.45,
+)
+
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(12)
+
+plt.subplots_adjust(
+    left=0.27,
+    right=0.98,
+    top=0.89,
+    bottom=0.075
+)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print(f"Translation check: {out_translation_check}")
+print("Legend species:", "、".join([species_cn[sp] for sp in present_species]))
+
+untranslated = [
+    x["feature_raw"]
+    for x in translation_records.values()
+    if x["translation_status"] == "untranslated"
+]
+
+if untranslated:
+    print("仍有未翻译属名：")
+    for g in sorted(untranslated):
+        print("  -", g)
+#运行脚本
+python3 plot_host_species_macrofungi_lefse_CN_ordered_v2_namefix_layoutfix.py
+#第一步：进入结果目录，新建 v3 脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/host_species_macrofungi_LEfSe_genus_v1
+
+nano plot_host_species_macrofungi_lefse_CN_ordered_fixed_v3.py
+#第二步：粘贴完整脚本
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Chapter 5 - Fig5-5 v3
+不同宿主物种食源大型真菌属水平差异类群 LEfSe LDA score 图
+
+本脚本不重新运行 LEfSe，只读取已有：
+  host_species_macrofungi_genus_no_elephant.res
+
+本次修改：
+  1. 按第三章 Fig3_11 ordered_fixed_v2 的视觉参数重画；
+  2. 每一行高度、柱宽、字号、网格线尽量与参考图一致；
+  3. 图例锚定在主体绘图区上方，使图例区域宽度接近 x=0~5 主体绘图区宽度；
+  4. 更新用户确认的属名中文译名；
+  5. 输出完整“拉丁名-中文名”核对表。
+"""
+
+from pathlib import Path
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# =============================
+# 1. 路径
+# =============================
+
+res_file = Path("host_species_macrofungi_genus_no_elephant.res")
+
+out_png = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v3.png")
+out_pdf = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v3.pdf")
+out_csv = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v3_plot_data.csv")
+out_translation_check = Path("Fig5_5_host_species_macrofungi_LEfSe_genus_translation_check_v3.csv")
+
+if not res_file.exists():
+    raise SystemExit(
+        f"找不到输入文件：{res_file}\n"
+        "请确认 host_species_macrofungi_genus_no_elephant.res 已存在。"
+    )
+
+# =============================
+# 2. 字体
+# =============================
+
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# =============================
+# 3. 宿主物种固定顺序与中文名
+# =============================
+
+species_order_safe = [
+    # Bovidae / 牛科
+    "Bos_taurus",
+    "Bos_grunniens",
+    "Bos_grunniens_x_Bos_taurus",
+    "Bos_bonasus",
+    "Bos_indicus",
+    "Bos_indicus_x_Bos_taurus",
+    "Bos_mutus",
+    "Ovis_aries",
+    "Capra_hircus",
+    "Pantholops_hodgsonii",
+    "Bubalus_bubalis",
+    "Procapra_picticaudata",
+
+    # Suidae / 猪科
+    "Sus_domesticus",
+    "Sus_scrofa",
+
+    # Cervidae / 鹿科
+    "Rangifer_tarandus",
+    "Cervus_nippon",
+    "Cervus_canadensis",
+    "Muntiacus_reevesi",
+    "Muntiacus_crinifrons",
+    "Dama_dama",
+
+    # Equidae / 马科
+    "Equus_caballus",
+    "Equus_kiang",
+
+    # Rhinocerotidae / 犀科
+    "Diceros_bicornis",
+]
+
+species_cn = {
+    "Bos_taurus": "家牛",
+    "Bos_grunniens": "家牦牛",
+    "Bos_grunniens_x_Bos_taurus": "家牦牛×家牛",
+    "Bos_bonasus": "欧洲野牛",
+    "Bos_indicus": "瘤牛",
+    "Bos_indicus_x_Bos_taurus": "瘤牛×家牛",
+    "Bos_mutus": "野牦牛",
+    "Ovis_aries": "绵羊",
+    "Capra_hircus": "家山羊",
+    "Pantholops_hodgsonii": "藏羚",
+    "Bubalus_bubalis": "水牛",
+    "Procapra_picticaudata": "藏原羚",
+    "Sus_domesticus": "家猪",
+    "Sus_scrofa": "野猪",
+    "Rangifer_tarandus": "驯鹿",
+    "Cervus_nippon": "梅花鹿",
+    "Cervus_canadensis": "加拿大马鹿",
+    "Muntiacus_reevesi": "小麂",
+    "Muntiacus_crinifrons": "黑麂",
+    "Dama_dama": "黇鹿",
+    "Equus_caballus": "家马",
+    "Equus_kiang": "藏野驴",
+    "Diceros_bicornis": "黑犀",
+}
+
+# =============================
+# 4. 宿主物种颜色
+# =============================
+
+species_colors = {
+    "Bos_taurus": "#E41A1C",
+    "Bos_grunniens": "#377EB8",
+    "Bos_grunniens_x_Bos_taurus": "#4DAF4A",
+    "Bos_bonasus": "#984EA3",
+    "Bos_indicus": "#FF7F00",
+    "Bos_indicus_x_Bos_taurus": "#A65628",
+    "Bos_mutus": "#F781BF",
+    "Ovis_aries": "#1B9E77",
+    "Capra_hircus": "#D95F02",
+    "Pantholops_hodgsonii": "#7570B3",
+    "Bubalus_bubalis": "#66A61E",
+    "Procapra_picticaudata": "#E7298A",
+
+    "Sus_domesticus": "#000000",
+    "Sus_scrofa": "#999999",
+
+    "Rangifer_tarandus": "#00A087",
+    "Cervus_nippon": "#3C5488",
+    "Cervus_canadensis": "#F39B7F",
+    "Muntiacus_reevesi": "#8491B4",
+    "Muntiacus_crinifrons": "#91D1C2",
+    "Dama_dama": "#DC0000",
+
+    "Equus_caballus": "#7E6148",
+    "Equus_kiang": "#00BFC4",
+
+    "Diceros_bicornis": "#B09C85",
+}
+
+# =============================
+# 5. 属名中文译名
+# translation_status:
+#   user_confirmed：你明确给出的译名
+#   previous_checked：前文已确认或已经用于定稿图的译名
+#   to_check：暂存常用译名，需要你继续核对
+#   untranslated：未翻译，保留拉丁名
+# =============================
+
+genus_map = {
+    # 本轮用户明确修正
+    "Abortiporus": ("残孔菌属", "user_confirmed"),
+    "Akanthomyces": ("刺束梗孢属", "user_confirmed"),
+    "Aseroe": ("星头鬼笔属", "user_confirmed"),
+    "Bjerkandera": ("烟管菌属", "user_confirmed"),
+    "Elaphomyces": ("大团囊菌属", "user_confirmed"),
+    "Entoloma": ("粉褶蕈属", "user_confirmed"),
+    "Lyomyces": ("疏伏革菌属", "user_confirmed"),
+    "Lysurus": ("散尾鬼笔属", "user_confirmed"),
+    "Panaeolina": ("疣孢斑褶菇属", "user_confirmed"),
+    "Peniophora": ("隔孢伏革菌属", "user_confirmed"),
+    "Psathyrella": ("小脆柄菇属", "user_confirmed"),
+    "Purpureocillium": ("紫孢霉属", "user_confirmed"),
+    "Trichophaeopsis": ("拟长毛盘菌属", "user_confirmed"),
+    "Tulosesus": ("细毛鬼伞属", "user_confirmed"),
+    "Ustilaginoidea": ("绿核菌属", "user_confirmed"),
+
+    # 前一轮用户明确补充
+    "Holocotylon": ("空腔菇属", "user_confirmed"),
+    "Trichoderma": ("木霉属", "user_confirmed"),
+    "Monascus": ("红曲霉属", "user_confirmed"),
+    "Ustilago": ("黑粉菌属", "user_confirmed"),
+    "Beauveria": ("白僵菌属", "user_confirmed"),
+    "Coniochaeta": ("锥毛壳属", "user_confirmed"),
+    "Ramularia": ("柱隔孢属", "user_confirmed"),
+    "Claviceps": ("麦角菌属", "user_confirmed"),
+    "Simplicillium": ("蜡蚧菌属", "user_confirmed"),
+    "Sphaerobolus": ("弹球菌属", "user_confirmed"),
+    "Paecilomyces": ("拟青霉属", "user_confirmed"),
+    "Parasola": ("近地伞属", "user_confirmed"),
+
+    # 前文已经使用过 / 常用译名，继续输出供核对
+    "Agaricus": ("蘑菇属", "to_check"),
+    "Ascobolus": ("粪盘菌属", "previous_checked"),
+    "Boletus": ("牛肝菌属", "to_check"),
+    "Cheilymenia": ("缘刺盘菌属", "to_check"),
+    "Coprinellus": ("小鬼伞属", "to_check"),
+    "Coprinopsis": ("拟鬼伞属", "to_check"),
+    "Cortinarius": ("丝膜菌属", "previous_checked"),
+    "Ganoderma": ("灵芝属", "to_check"),
+    "Gastrosporium": ("腹孢菌属", "to_check"),
+    "Lycoperdon": ("马勃属", "to_check"),
+    "Metarhizium": ("绿僵菌属", "to_check"),
+    "Octospora": ("八孢盘菌属", "to_check"),
+    "Panaeolus": ("斑褶菇属", "to_check"),
+    "Perenniporia": ("多年卧孔菌属", "to_check"),
+    "Rhizopogon": ("须腹菌属", "to_check"),
+    "Russula": ("红菇属", "to_check"),
+    "Schizophyllum": ("裂褶菌属", "to_check"),
+    "Suillus": ("乳牛肝菌属", "previous_checked"),
+    "Trametes": ("栓菌属", "to_check"),
+    "Xylaria": ("炭角菌属", "to_check"),
+}
+
+def strip_feature_prefix(feature: str) -> str:
+    f = feature.strip()
+    for prefix in [
+        "k__Fungi|g__",
+        "k__Fungi.g__",
+        "k__Fungi|",
+        "g__",
+    ]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+    return f
+
+def translate_feature(feature: str):
+    genus = strip_feature_prefix(feature)
+    if genus in genus_map:
+        return genus, genus_map[genus][0], genus_map[genus][1]
+    return genus, genus, "untranslated"
+
+def normalize_group(group: str) -> str:
+    g = group.strip()
+    g = g.replace("×", "x")
+    g = g.replace(" ", "_")
+    return g
+
+# =============================
+# 6. 读取 LEfSe .res
+# =============================
+
+rows = []
+unknown_groups = set()
+translation_records = {}
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        # LEfSe .res 常见列：
+        # feature, raw value, enriched group, LDA score, p value
+        if len(parts) < 4:
+            continue
+
+        feature_raw = parts[0].strip()
+        group_raw = parts[2].strip()
+        group_safe = normalize_group(group_raw)
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        if lda < 4.0:
+            continue
+
+        if not group_safe:
+            continue
+
+        if group_safe not in species_order_safe:
+            unknown_groups.add(group_safe)
+            continue
+
+        genus_raw, feature_cn, translation_status = translate_feature(feature_raw)
+
+        translation_records[genus_raw] = {
+            "feature_raw": genus_raw,
+            "feature_cn": feature_cn,
+            "translation_status": translation_status,
+        }
+
+        rows.append({
+            "feature_raw": genus_raw,
+            "feature": feature_cn,
+            "translation_status": translation_status,
+            "group_safe": group_safe,
+            "group_cn": species_cn[group_safe],
+            "lda": lda,
+        })
+
+if unknown_groups:
+    print("警告：.res 中出现不在 23 个目标宿主物种列表中的富集组，已跳过：")
+    for g in sorted(unknown_groups):
+        print("  -", g)
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带目标宿主物种富集组的结果，请检查 .res 文件。")
+
+# 按固定物种顺序排列；组内按 LDA 从高到低
+rows_sorted = []
+for sp in species_order_safe:
+    sub = [r for r in rows if r["group_safe"] == sp]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# =============================
+# 7. 输出作图数据和译名核对表
+# =============================
+
+with out_csv.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature",
+            "translation_status",
+            "group_safe",
+            "group_cn",
+            "LDA_score",
+        ]
+    )
+    writer.writeheader()
+
+    for r in rows_sorted:
+        writer.writerow({
+            "feature_raw": r["feature_raw"],
+            "feature": r["feature"],
+            "translation_status": r["translation_status"],
+            "group_safe": r["group_safe"],
+            "group_cn": r["group_cn"],
+            "LDA_score": r["lda"],
+        })
+
+with out_translation_check.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature_cn",
+            "translation_status",
+        ]
+    )
+    writer.writeheader()
+
+    for genus in sorted(translation_records.keys()):
+        writer.writerow(translation_records[genus])
+
+# =============================
+# 8. 绘图
+# =============================
+
+features = [r["feature"] for r in rows_sorted]
+groups_safe = [r["group_safe"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [species_colors[g] for g in groups_safe]
+
+n = len(rows_sorted)
+
+# 严格恢复第三章参考图的行高逻辑：
+# feature 数不同可以导致整体高度不同，但每一行高度保持一致。
+fig_width = 14.5
+fig_height = max(8.5, n * 0.30 + 2.8)
+
+fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=0.9,
+    height=0.76,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=13)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=13)
+
+xmax = max(ldas)
+x_upper = max(5.2, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=13)
+ax.tick_params(axis="y", length=0)
+
+ax.grid(axis="x", color="black", linewidth=0.9)
+ax.grid(axis="y", visible=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+present_species = [sp for sp in species_order_safe if sp in set(groups_safe)]
+
+legend_handles = [
+    Patch(
+        facecolor=species_colors[sp],
+        edgecolor="black",
+        label=species_cn[sp]
+    )
+    for sp in present_species
+]
+
+# 关键修改：
+# 图例锚定到 ax 坐标系，宽度限定为主体绘图区宽度；
+# 不再按整张图宽度铺开。
+legend = ax.legend(
+    handles=legend_handles,
+    loc="lower left",
+    bbox_to_anchor=(0.0, 1.02, 1.0, 0.16),
+    bbox_transform=ax.transAxes,
+    ncol=6,
+    mode="expand",
+    frameon=False,
+    prop=font_prop,
+    fontsize=13,
+    handlelength=1.6,
+    columnspacing=1.25,
+    handletextpad=0.5,
+    borderaxespad=0.0,
+)
+
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(13)
+
+# 恢复参考图主体区域比例
+plt.subplots_adjust(
+    left=0.28,
+    right=0.98,
+    top=0.84,
+    bottom=0.08
+)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print(f"Translation check: {out_translation_check}")
+print("Legend species:", "、".join([species_cn[sp] for sp in present_species]))
+
+untranslated = [
+    x["feature_raw"]
+    for x in translation_records.values()
+    if x["translation_status"] == "untranslated"
+]
+
+if untranslated:
+    print("仍有未翻译属名：")
+    for g in sorted(untranslated):
+        print("  -", g)
+#运行脚本
+python3 plot_host_species_macrofungi_lefse_CN_ordered_fixed_v3.py
+#下面给你 v4 完整重画脚本。这版只重画图，不重跑 LEfSe，不改 .res 结果。
+#这次核心改动是：缩窄下方主体绘图区宽度，并把上方物种图例锚定到这个主体绘图区上方，让图例区宽度和下方柱状图区宽度接近；同时保留每一行高度接近第三章参考图。
+#第一步：进入结果目录并新建脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/host_species_macrofungi_LEfSe_genus_v1
+
+nano plot_host_species_macrofungi_lefse_CN_ordered_fixed_v4_narrow_axes.py
+#第二步：粘贴完整脚本
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Chapter 5 - Fig5-5 v4
+不同宿主物种食源大型真菌属水平差异类群 LEfSe LDA score 图
+
+本脚本不重新运行 LEfSe，只读取已有：
+  host_species_macrofungi_genus_no_elephant.res
+
+本次修改：
+  1. 不改 LDA 结果；
+  2. 不改物种顺序；
+  3. 不改颜色体系；
+  4. 只调整图形版式；
+  5. 缩窄下方主体绘图区宽度；
+  6. 将上方物种图例锚定到主体绘图区上方，使图例宽度与主体绘图区接近；
+  7. 保留每一行高度接近第三章参考图；
+  8. 使用用户已确认的属名中文译名；
+  9. 输出拉丁名—中文名核对表。
+"""
+
+from pathlib import Path
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.patches import Patch
+
+# =============================
+# 1. 路径
+# =============================
+
+res_file = Path("host_species_macrofungi_genus_no_elephant.res")
+
+out_png = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v4_narrow_axes.png")
+out_pdf = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v4_narrow_axes.pdf")
+out_csv = Path("Fig5_5_host_species_macrofungi_LEfSe_LDA_score_no_elephant_CN_ordered_fixed_v4_narrow_axes_plot_data.csv")
+out_translation_check = Path("Fig5_5_host_species_macrofungi_LEfSe_genus_translation_check_v4.csv")
+
+if not res_file.exists():
+    raise SystemExit(
+        f"找不到输入文件：{res_file}\n"
+        "请确认 host_species_macrofungi_genus_no_elephant.res 已存在。"
+    )
+
+# =============================
+# 2. 字体
+# =============================
+
+font_candidates = [
+    "/mnt/c/Windows/Fonts/simsun.ttc",
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+]
+
+font_path = None
+for fp in font_candidates:
+    if Path(fp).exists():
+        font_path = fp
+        break
+
+if font_path is None:
+    print("警告：没有找到中文字体，中文可能显示异常。")
+    font_prop = None
+else:
+    font_manager.fontManager.addfont(font_path)
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams["font.family"] = font_prop.get_name()
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
+# =============================
+# 3. 宿主物种固定顺序与中文名
+# =============================
+
+species_order_safe = [
+    # Bovidae / 牛科
+    "Bos_taurus",
+    "Bos_grunniens",
+    "Bos_grunniens_x_Bos_taurus",
+    "Bos_bonasus",
+    "Bos_indicus",
+    "Bos_indicus_x_Bos_taurus",
+    "Bos_mutus",
+    "Ovis_aries",
+    "Capra_hircus",
+    "Pantholops_hodgsonii",
+    "Bubalus_bubalis",
+    "Procapra_picticaudata",
+
+    # Suidae / 猪科
+    "Sus_domesticus",
+    "Sus_scrofa",
+
+    # Cervidae / 鹿科
+    "Rangifer_tarandus",
+    "Cervus_nippon",
+    "Cervus_canadensis",
+    "Muntiacus_reevesi",
+    "Muntiacus_crinifrons",
+    "Dama_dama",
+
+    # Equidae / 马科
+    "Equus_caballus",
+    "Equus_kiang",
+
+    # Rhinocerotidae / 犀科
+    "Diceros_bicornis",
+]
+
+species_cn = {
+    "Bos_taurus": "家牛",
+    "Bos_grunniens": "家牦牛",
+    "Bos_grunniens_x_Bos_taurus": "家牦牛×家牛",
+    "Bos_bonasus": "欧洲野牛",
+    "Bos_indicus": "瘤牛",
+    "Bos_indicus_x_Bos_taurus": "瘤牛×家牛",
+    "Bos_mutus": "野牦牛",
+    "Ovis_aries": "绵羊",
+    "Capra_hircus": "家山羊",
+    "Pantholops_hodgsonii": "藏羚",
+    "Bubalus_bubalis": "水牛",
+    "Procapra_picticaudata": "藏原羚",
+    "Sus_domesticus": "家猪",
+    "Sus_scrofa": "野猪",
+    "Rangifer_tarandus": "驯鹿",
+    "Cervus_nippon": "梅花鹿",
+    "Cervus_canadensis": "加拿大马鹿",
+    "Muntiacus_reevesi": "小麂",
+    "Muntiacus_crinifrons": "黑麂",
+    "Dama_dama": "黇鹿",
+    "Equus_caballus": "家马",
+    "Equus_kiang": "藏野驴",
+    "Diceros_bicornis": "黑犀",
+}
+
+# =============================
+# 4. 宿主物种颜色
+# =============================
+
+species_colors = {
+    "Bos_taurus": "#E41A1C",
+    "Bos_grunniens": "#377EB8",
+    "Bos_grunniens_x_Bos_taurus": "#4DAF4A",
+    "Bos_bonasus": "#984EA3",
+    "Bos_indicus": "#FF7F00",
+    "Bos_indicus_x_Bos_taurus": "#A65628",
+    "Bos_mutus": "#F781BF",
+    "Ovis_aries": "#1B9E77",
+    "Capra_hircus": "#D95F02",
+    "Pantholops_hodgsonii": "#7570B3",
+    "Bubalus_bubalis": "#66A61E",
+    "Procapra_picticaudata": "#E7298A",
+
+    "Sus_domesticus": "#000000",
+    "Sus_scrofa": "#999999",
+
+    "Rangifer_tarandus": "#00A087",
+    "Cervus_nippon": "#3C5488",
+    "Cervus_canadensis": "#F39B7F",
+    "Muntiacus_reevesi": "#8491B4",
+    "Muntiacus_crinifrons": "#91D1C2",
+    "Dama_dama": "#DC0000",
+
+    "Equus_caballus": "#7E6148",
+    "Equus_kiang": "#00BFC4",
+
+    "Diceros_bicornis": "#B09C85",
+}
+
+# =============================
+# 5. 属名中文译名
+# =============================
+
+genus_map = {
+    # 用户确认译名
+    "Abortiporus": ("残孔菌属", "user_confirmed"),
+    "Akanthomyces": ("刺束梗孢属", "user_confirmed"),
+    "Aseroe": ("星头鬼笔属", "user_confirmed"),
+    "Bjerkandera": ("烟管菌属", "user_confirmed"),
+    "Elaphomyces": ("大团囊菌属", "user_confirmed"),
+    "Entoloma": ("粉褶蕈属", "user_confirmed"),
+    "Lyomyces": ("疏伏革菌属", "user_confirmed"),
+    "Lysurus": ("散尾鬼笔属", "user_confirmed"),
+    "Panaeolina": ("疣孢斑褶菇属", "user_confirmed"),
+    "Peniophora": ("隔孢伏革菌属", "user_confirmed"),
+    "Psathyrella": ("小脆柄菇属", "user_confirmed"),
+    "Purpureocillium": ("紫孢霉属", "user_confirmed"),
+    "Trichophaeopsis": ("拟长毛盘菌属", "user_confirmed"),
+    "Tulosesus": ("细毛鬼伞属", "user_confirmed"),
+    "Ustilaginoidea": ("绿核菌属", "user_confirmed"),
+
+    "Holocotylon": ("空腔菇属", "user_confirmed"),
+    "Trichoderma": ("木霉属", "user_confirmed"),
+    "Monascus": ("红曲霉属", "user_confirmed"),
+    "Ustilago": ("黑粉菌属", "user_confirmed"),
+    "Beauveria": ("白僵菌属", "user_confirmed"),
+    "Coniochaeta": ("锥毛壳属", "user_confirmed"),
+    "Ramularia": ("柱隔孢属", "user_confirmed"),
+    "Claviceps": ("麦角菌属", "user_confirmed"),
+    "Simplicillium": ("蜡蚧菌属", "user_confirmed"),
+    "Sphaerobolus": ("弹球菌属", "user_confirmed"),
+    "Paecilomyces": ("拟青霉属", "user_confirmed"),
+    "Parasola": ("近地伞属", "user_confirmed"),
+
+    # 仍保留供核对
+    "Agaricus": ("蘑菇属", "to_check"),
+    "Ascobolus": ("粪盘菌属", "previous_checked"),
+    "Boletus": ("牛肝菌属", "to_check"),
+    "Cheilymenia": ("缘刺盘菌属", "to_check"),
+    "Coprinellus": ("小鬼伞属", "to_check"),
+    "Coprinopsis": ("拟鬼伞属", "to_check"),
+    "Cortinarius": ("丝膜菌属", "previous_checked"),
+    "Ganoderma": ("灵芝属", "to_check"),
+    "Gastrosporium": ("腹孢菌属", "to_check"),
+    "Lycoperdon": ("马勃属", "to_check"),
+    "Metarhizium": ("绿僵菌属", "to_check"),
+    "Octospora": ("八孢盘菌属", "to_check"),
+    "Panaeolus": ("斑褶菇属", "to_check"),
+    "Perenniporia": ("多年卧孔菌属", "to_check"),
+    "Rhizopogon": ("须腹菌属", "to_check"),
+    "Russula": ("红菇属", "to_check"),
+    "Schizophyllum": ("裂褶菌属", "to_check"),
+    "Suillus": ("乳牛肝菌属", "previous_checked"),
+    "Trametes": ("栓菌属", "to_check"),
+    "Xylaria": ("炭角菌属", "to_check"),
+}
+
+def strip_feature_prefix(feature: str) -> str:
+    f = feature.strip()
+    for prefix in [
+        "k__Fungi|g__",
+        "k__Fungi.g__",
+        "k__Fungi|",
+        "g__",
+    ]:
+        if f.startswith(prefix):
+            f = f[len(prefix):]
+    return f
+
+def translate_feature(feature: str):
+    genus = strip_feature_prefix(feature)
+    if genus in genus_map:
+        return genus, genus_map[genus][0], genus_map[genus][1]
+    return genus, genus, "untranslated"
+
+def normalize_group(group: str) -> str:
+    g = group.strip()
+    g = g.replace("×", "x")
+    g = g.replace(" ", "_")
+    return g
+
+# =============================
+# 6. 读取 LEfSe .res
+# =============================
+
+rows = []
+unknown_groups = set()
+translation_records = {}
+
+with res_file.open("r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+
+        parts = line.split("\t")
+
+        # LEfSe .res 常见列：
+        # feature, raw value, enriched group, LDA score, p value
+        if len(parts) < 4:
+            continue
+
+        feature_raw = parts[0].strip()
+        group_raw = parts[2].strip()
+        group_safe = normalize_group(group_raw)
+
+        try:
+            lda = float(parts[3])
+        except Exception:
+            continue
+
+        if lda < 4.0:
+            continue
+
+        if not group_safe:
+            continue
+
+        if group_safe not in species_order_safe:
+            unknown_groups.add(group_safe)
+            continue
+
+        genus_raw, feature_cn, translation_status = translate_feature(feature_raw)
+
+        translation_records[genus_raw] = {
+            "feature_raw": genus_raw,
+            "feature_cn": feature_cn,
+            "translation_status": translation_status,
+        }
+
+        rows.append({
+            "feature_raw": genus_raw,
+            "feature": feature_cn,
+            "translation_status": translation_status,
+            "group_safe": group_safe,
+            "group_cn": species_cn[group_safe],
+            "lda": lda,
+        })
+
+if unknown_groups:
+    print("警告：.res 中出现不在 23 个目标宿主物种列表中的富集组，已跳过：")
+    for g in sorted(unknown_groups):
+        print("  -", g)
+
+if len(rows) == 0:
+    raise SystemExit("没有解析到 LDA > 4 且带目标宿主物种富集组的结果，请检查 .res 文件。")
+
+# 按固定物种顺序排列；组内按 LDA 从高到低
+rows_sorted = []
+for sp in species_order_safe:
+    sub = [r for r in rows if r["group_safe"] == sp]
+    sub = sorted(sub, key=lambda x: x["lda"], reverse=True)
+    rows_sorted.extend(sub)
+
+# =============================
+# 7. 输出作图数据和译名核对表
+# =============================
+
+with out_csv.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature",
+            "translation_status",
+            "group_safe",
+            "group_cn",
+            "LDA_score",
+        ]
+    )
+    writer.writeheader()
+
+    for r in rows_sorted:
+        writer.writerow({
+            "feature_raw": r["feature_raw"],
+            "feature": r["feature"],
+            "translation_status": r["translation_status"],
+            "group_safe": r["group_safe"],
+            "group_cn": r["group_cn"],
+            "LDA_score": r["lda"],
+        })
+
+with out_translation_check.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "feature_raw",
+            "feature_cn",
+            "translation_status",
+        ]
+    )
+    writer.writeheader()
+
+    for genus in sorted(translation_records.keys()):
+        writer.writerow(translation_records[genus])
+
+# =============================
+# 8. 绘图
+# =============================
+
+features = [r["feature"] for r in rows_sorted]
+groups_safe = [r["group_safe"] for r in rows_sorted]
+ldas = [r["lda"] for r in rows_sorted]
+colors = [species_colors[g] for g in groups_safe]
+
+n = len(rows_sorted)
+
+# 保持每一行高度接近参考图
+fig_width = 14.5
+fig_height = max(8.5, n * 0.30 + 2.8)
+
+fig = plt.figure(figsize=(fig_width, fig_height))
+
+# 关键：显式控制主体绘图区宽度
+# left：给左侧属名留空间
+# width：缩窄 x=0~5 主体绘图区，避免柱状图区过宽
+# legend 会绑定到这个 ax 上方，因此图例宽度≈主体绘图区宽度
+ax = fig.add_axes([0.31, 0.08, 0.56, 0.76])
+
+y = list(range(n))
+
+ax.barh(
+    y,
+    ldas,
+    color=colors,
+    edgecolor="black",
+    linewidth=0.9,
+    height=0.76,
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontproperties=font_prop, fontsize=13)
+ax.invert_yaxis()
+
+ax.set_xlabel("LDA SCORE (log 10)", fontproperties=font_prop, fontsize=13)
+
+xmax = max(ldas)
+x_upper = max(5.2, xmax + 0.25)
+
+ax.set_xlim(0, x_upper)
+ax.set_xticks(range(0, int(x_upper) + 1, 1))
+ax.tick_params(axis="x", labelsize=13)
+ax.tick_params(axis="y", length=0)
+
+ax.grid(axis="x", color="black", linewidth=0.9)
+ax.grid(axis="y", visible=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["left"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+
+present_species = [sp for sp in species_order_safe if sp in set(groups_safe)]
+
+legend_handles = [
+    Patch(
+        facecolor=species_colors[sp],
+        edgecolor="black",
+        label=species_cn[sp]
+    )
+    for sp in present_species
+]
+
+legend = ax.legend(
+    handles=legend_handles,
+    loc="lower left",
+    bbox_to_anchor=(0.0, 1.035, 1.0, 0.18),
+    bbox_transform=ax.transAxes,
+    ncol=6,
+    mode="expand",
+    frameon=False,
+    prop=font_prop,
+    fontsize=13,
+    handlelength=1.6,
+    columnspacing=1.15,
+    handletextpad=0.45,
+    borderaxespad=0.0,
+)
+
+for text in legend.get_texts():
+    text.set_fontproperties(font_prop)
+    text.set_fontsize(13)
+
+fig.savefig(out_png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+
+print("Done!")
+print(f"Input: {res_file}")
+print(f"Features plotted: {n}")
+print(f"PNG: {out_png}")
+print(f"PDF: {out_pdf}")
+print(f"Plot data: {out_csv}")
+print(f"Translation check: {out_translation_check}")
+print("Legend species:", "、".join([species_cn[sp] for sp in present_species]))
+
+untranslated = [
+    x["feature_raw"]
+    for x in translation_records.values()
+    if x["translation_status"] == "untranslated"
+]
+
+if untranslated:
+    print("仍有未翻译属名：")
+    for g in sorted(untranslated):
+        print("  -", g)
+#运行脚本
+python3 plot_host_species_macrofungi_lefse_CN_ordered_fixed_v4_narrow_axes.py
