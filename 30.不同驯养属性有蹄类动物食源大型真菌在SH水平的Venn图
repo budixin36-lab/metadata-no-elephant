@@ -1,0 +1,1958 @@
+#metadata 中的 status 映射为：
+#domesticated → 家养
+#wild         → 野生
+#captive      → 圈养野生
+#本脚本会读取带 taxonomy 的 BIOM 文件，按大型真菌属级名录筛选 SH，再做不同驯养属性下大型真菌相关 SH 的 Venn 图。
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/03_status_macrofungi_SH_venn_v1.R
+#打开 nano 后，把下面完整脚本全部粘贴进去。
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-1
+## 不同驯养属性有蹄类动物食源大型真菌在 SH 水平的 Venn 图
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. final no-elephant metadata
+##   2. merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom
+##   3. 严格大型真菌属级参考名录 v2
+##
+## 分组变量：
+##   metadata$status
+##
+## 分组标签：
+##   domesticated -> 家养
+##   wild         -> 野生
+##   captive      -> 圈养野生
+##
+## 统计口径：
+##   SH presence/absence
+##   某个大型真菌相关 SH 在某个 status 任一样本中 abundance > 0，
+##   即认为该 status 检出该 SH。
+##
+## 大型真菌 SH 判定：
+##   SH 的 taxonomy genus 属于严格大型真菌属级参考名录 v2。
+##
+## 注意：
+##   Venn 图统计的是 SH 类型数，不是 SH reads，不是相对多度。
+##   本脚本不重新做 BLAST、taxonomy、SH 注释、alpha/beta 多样性。
+##   不使用旧含象科版本，不使用旧 vsearch 97% SH 结果。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Chapter 5 - Status macrofungi SH Venn, no-elephant dataset\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "jsonlite",
+  "VennDiagram",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(jsonlite)
+  library(VennDiagram)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 输入与输出路径
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  project_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+biom_file <- file.path(
+  project_dir,
+  "taxonomy",
+  "merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom"
+)
+
+macrofungi_ref_file <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "macrofungi_reference_genus_list_v2_strict",
+  "macrofungi_genera_union_strict_final_v2.csv"
+)
+
+out_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_ref_used <- file.path(
+  out_dir,
+  "macrofungi_reference_genera_used_v2.csv"
+)
+
+out_biom_taxonomy <- file.path(
+  out_dir,
+  "SH_taxonomy_from_biom_no_elephant.csv"
+)
+
+out_macro_SH_taxonomy <- file.path(
+  out_dir,
+  "macrofungi_SH_taxonomy_matched_by_strict_genus.csv"
+)
+
+out_macro_SH_abundance <- file.path(
+  out_dir,
+  "macrofungi_SH_abundance_table_for_status_venn.tsv"
+)
+
+out_status_sample_counts <- file.path(
+  out_dir,
+  "status_sample_counts_no_elephant.csv"
+)
+
+out_status_SH_counts <- file.path(
+  out_dir,
+  "macrofungi_SH_status_counts.csv"
+)
+
+out_SH_presence_list <- file.path(
+  out_dir,
+  "macrofungi_SH_status_presence_list.csv"
+)
+
+out_pa_matrix <- file.path(
+  out_dir,
+  "macrofungi_SH_status_presence_absence.csv"
+)
+
+out_intersections <- file.path(
+  out_dir,
+  "macrofungi_SH_status_Venn_intersections.csv"
+)
+
+out_png <- file.path(
+  out_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN.pdf"
+)
+
+out_log <- file.path(
+  out_dir,
+  "status_macrofungi_SH_venn_v1_log.txt"
+)
+
+cat("\n========== Input files ==========\n")
+input_files <- data.frame(
+  file_label = c("metadata", "taxonomy_biom", "macrofungi_reference_v2"),
+  file_path = c(metadata_file, biom_file, macrofungi_ref_file),
+  exists = file.exists(c(metadata_file, biom_file, macrofungi_ref_file)),
+  stringsAsFactors = FALSE
+)
+print(input_files)
+
+if (any(!input_files$exists)) {
+  cat("\n以下输入文件不存在，请检查路径：\n")
+  print(input_files[!input_files$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 2. 工具函数
+## =========================
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded", "Not recorded", "NOT RECORDED",
+    "not_reported", "not reported", "Not reported", "NOT REPORTED",
+    "unknown", "Unknown", "UNKNOWN",
+    "none", "None", "NONE",
+    "null", "Null", "NULL"
+  )] <- NA
+
+  x
+}
+
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+
+  if (is.na(hit)) {
+    stop(
+      "Cannot find column for ", label,
+      ". Tried: ", paste(candidates, collapse = ", "),
+      "\nExisting columns:\n", paste(cols, collapse = ", ")
+    )
+  }
+
+  hit
+}
+
+clean_genus <- function(x) {
+  x <- trimws(as.character(x))
+  x <- gsub("^g__", "", x)
+  x <- gsub("^genus__", "", x)
+  x[x %in% c("", "NA", "N/A", "Unknown", "unknown", "Unclassified", "unclassified")] <- NA
+  x
+}
+
+get_meta_value <- function(meta, key) {
+  if (is.null(meta)) return(NA_character_)
+
+  if (!is.null(meta[[key]])) {
+    return(as.character(meta[[key]]))
+  }
+
+  return(NA_character_)
+}
+
+write_csv_utf8 <- function(x, file) {
+  write.csv(
+    x,
+    file = file,
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+  )
+  cat("Saved: ", file, "\n", sep = "")
+}
+
+write_tsv_utf8 <- function(x, file) {
+  write.table(
+    x,
+    file = file,
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE,
+    fileEncoding = "UTF-8"
+  )
+  cat("Saved: ", file, "\n", sep = "")
+}
+
+calc_exact_intersections <- function(pa_df, group_cols) {
+  res <- list()
+  k <- 1
+
+  for (m in seq_along(group_cols)) {
+    cmbs <- combn(group_cols, m, simplify = FALSE)
+
+    for (cmb in cmbs) {
+      out_sets <- setdiff(group_cols, cmb)
+
+      in_all <- rowSums(pa_df[, cmb, drop = FALSE]) == length(cmb)
+
+      if (length(out_sets) > 0) {
+        out_none <- rowSums(pa_df[, out_sets, drop = FALSE]) == 0
+      } else {
+        out_none <- rep(TRUE, nrow(pa_df))
+      }
+
+      exact_SH <- pa_df$SH[in_all & out_none]
+
+      res[[k]] <- data.frame(
+        combination = paste(cmb, collapse = " & "),
+        n_status = length(cmb),
+        status_included = paste(cmb, collapse = "; "),
+        status_excluded = paste(out_sets, collapse = "; "),
+        n_SH = length(exact_SH),
+        SH_list = paste(exact_SH, collapse = "; "),
+        stringsAsFactors = FALSE
+      )
+
+      k <- k + 1
+    }
+  }
+
+  out <- do.call(rbind, res)
+  out <- out[order(out$n_status, -out$n_SH, out$combination), ]
+  rownames(out) <- NULL
+
+  out
+}
+
+make_sparse_macro_matrix <- function(biom, macro_row_index0, n_rows_total, n_samples_total) {
+  ## 输出矩阵：大型真菌 SH × 样本
+  ## macro_row_index0 为 BIOM 中 0-based row index
+
+  macro_row_index0 <- sort(unique(macro_row_index0))
+  macro_row_index1 <- macro_row_index0 + 1
+
+  macro_mat <- matrix(
+    0,
+    nrow = length(macro_row_index1),
+    ncol = n_samples_total
+  )
+
+  rownames(macro_mat) <- macro_row_index1
+  colnames(macro_mat) <- seq_len(n_samples_total)
+
+  if (!is.null(biom$matrix_type) && biom$matrix_type == "sparse") {
+    cat("BIOM matrix type: sparse\n")
+
+    dat <- biom$data
+
+    if (length(dat) == 0) {
+      return(macro_mat)
+    }
+
+    dat_mat <- do.call(rbind, dat)
+    dat_mat <- as.data.frame(dat_mat, stringsAsFactors = FALSE)
+
+    colnames(dat_mat) <- c("row", "col", "value")
+
+    dat_mat$row <- as.integer(dat_mat$row)
+    dat_mat$col <- as.integer(dat_mat$col)
+    dat_mat$value <- as.numeric(dat_mat$value)
+
+    dat_macro <- dat_mat[dat_mat$row %in% macro_row_index0, , drop = FALSE]
+
+    if (nrow(dat_macro) == 0) {
+      return(macro_mat)
+    }
+
+    row_map <- match(dat_macro$row + 1, macro_row_index1)
+    col_map <- dat_macro$col + 1
+
+    macro_mat[cbind(row_map, col_map)] <- dat_macro$value
+
+    return(macro_mat)
+  }
+
+  if (!is.null(biom$matrix_type) && biom$matrix_type == "dense") {
+    cat("BIOM matrix type: dense\n")
+
+    full_mat <- do.call(rbind, biom$data)
+    full_mat <- apply(full_mat, 2, as.numeric)
+
+    macro_mat <- full_mat[macro_row_index1, , drop = FALSE]
+
+    return(macro_mat)
+  }
+
+  stop("Unsupported or missing BIOM matrix_type.")
+}
+
+## =========================
+## 3. 字体设置
+## =========================
+
+simsun_file <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(simsun_file)) {
+  warning("SimSun font not found: ", simsun_file)
+} else {
+  sysfonts::font_add(
+    family = "SimSun",
+    regular = simsun_file
+  )
+}
+
+showtext::showtext_auto(enable = TRUE)
+
+## 关键：修正 600 dpi PNG 中 showtext 字号缩放问题
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 4. 读取 metadata
+## =========================
+
+cat("\n========== Read metadata ==========\n")
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+status_col <- pick_col(
+  c("status", "Status", "domestication", "Domestication"),
+  colnames(meta),
+  "status"
+)
+
+host_order_col <- pick_col(
+  c("host_order", "Host_order", "hostOrder", "order"),
+  colnames(meta),
+  "host_order"
+)
+
+host_family_col <- pick_col(
+  c("host_family", "Host_family", "hostFamily", "family"),
+  colnames(meta),
+  "host_family"
+)
+
+host_genus_col <- pick_col(
+  c("host_genus", "Host_genus", "hostGenus", "genus"),
+  colnames(meta),
+  "host_genus"
+)
+
+host_species_col <- pick_col(
+  c("host_species", "Host_species", "hostSpecies", "species"),
+  colnames(meta),
+  "host_species"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  status_original = clean_value(meta[[status_col]]),
+  host_order = clean_value(meta[[host_order_col]]),
+  host_family = clean_value(meta[[host_family_col]]),
+  host_genus = clean_value(meta[[host_genus_col]]),
+  host_species = clean_value(meta[[host_species_col]]),
+  stringsAsFactors = FALSE
+)
+
+meta2 <- meta2[!is.na(meta2$sample_id), , drop = FALSE]
+meta2 <- meta2[!duplicated(meta2$sample_id), , drop = FALSE]
+
+meta2$status_clean <- tolower(meta2$status_original)
+
+status_label_map <- c(
+  "domesticated" = "家养",
+  "wild" = "野生",
+  "captive" = "圈养野生"
+)
+
+meta2$status_CN <- unname(status_label_map[meta2$status_clean])
+
+status_order_CN <- c("家养", "野生", "圈养野生")
+
+meta2 <- meta2[!is.na(meta2$status_CN), , drop = FALSE]
+
+meta2$status_CN <- factor(
+  meta2$status_CN,
+  levels = status_order_CN
+)
+
+cat("Metadata samples after valid status filtering: ", nrow(meta2), "\n", sep = "")
+cat("Status sample counts:\n")
+print(table(meta2$status_CN))
+
+write_csv_utf8(
+  as.data.frame(table(status = meta2$status_CN)),
+  out_status_sample_counts
+)
+
+## =========================
+## 5. 读取严格大型真菌属级参考名录
+## =========================
+
+cat("\n========== Read strict macrofungi genus reference v2 ==========\n")
+
+macro_ref <- read.csv(
+  macrofungi_ref_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+macro_genus_col <- pick_col(
+  c("Genus", "genus"),
+  colnames(macro_ref),
+  "macrofungi reference Genus"
+)
+
+macro_ref$Genus <- clean_genus(macro_ref[[macro_genus_col]])
+macro_ref <- macro_ref[!is.na(macro_ref$Genus), , drop = FALSE]
+macro_ref <- macro_ref[!duplicated(macro_ref$Genus), , drop = FALSE]
+macro_ref <- macro_ref[order(macro_ref$Genus), , drop = FALSE]
+
+write_csv_utf8(macro_ref, out_ref_used)
+
+cat("Strict macrofungi reference genera used: ", nrow(macro_ref), "\n", sep = "")
+
+## =========================
+## 6. 读取 BIOM，并提取 SH taxonomy
+## =========================
+
+cat("\n========== Read taxonomy BIOM ==========\n")
+
+biom <- jsonlite::fromJSON(
+  biom_file,
+  simplifyVector = FALSE
+)
+
+if (is.null(biom$rows) || is.null(biom$columns) || is.null(biom$data)) {
+  stop("BIOM file does not contain rows, columns, or data.")
+}
+
+n_rows_total <- length(biom$rows)
+n_samples_total <- length(biom$columns)
+
+cat("BIOM rows / SH features: ", n_rows_total, "\n", sep = "")
+cat("BIOM samples: ", n_samples_total, "\n", sep = "")
+
+sample_ids_biom <- vapply(
+  biom$columns,
+  function(x) as.character(x$id),
+  character(1)
+)
+
+SH_ids <- vapply(
+  biom$rows,
+  function(x) as.character(x$id),
+  character(1)
+)
+
+taxonomy_df <- data.frame(
+  row_index0 = seq_len(n_rows_total) - 1,
+  SH = SH_ids,
+  kingdom = vapply(biom$rows, function(x) get_meta_value(x$metadata, "kingdom"), character(1)),
+  phylum = vapply(biom$rows, function(x) get_meta_value(x$metadata, "phylum"), character(1)),
+  class = vapply(biom$rows, function(x) get_meta_value(x$metadata, "class"), character(1)),
+  order = vapply(biom$rows, function(x) get_meta_value(x$metadata, "order"), character(1)),
+  family = vapply(biom$rows, function(x) get_meta_value(x$metadata, "family"), character(1)),
+  genus = vapply(biom$rows, function(x) get_meta_value(x$metadata, "genus"), character(1)),
+  species = vapply(biom$rows, function(x) get_meta_value(x$metadata, "species"), character(1)),
+  stringsAsFactors = FALSE
+)
+
+taxonomy_df$genus_clean <- clean_genus(taxonomy_df$genus)
+
+write_csv_utf8(taxonomy_df, out_biom_taxonomy)
+
+cat("Taxonomy records extracted from BIOM: ", nrow(taxonomy_df), "\n", sep = "")
+cat("Unique non-NA genus in BIOM taxonomy: ", length(unique(taxonomy_df$genus_clean[!is.na(taxonomy_df$genus_clean)])), "\n", sep = "")
+
+## =========================
+## 7. 根据严格大型真菌属名录筛选大型真菌 SH
+## =========================
+
+cat("\n========== Match macrofungi genera to SH taxonomy ==========\n")
+
+macro_SH_taxonomy <- taxonomy_df[
+  !is.na(taxonomy_df$genus_clean) &
+    taxonomy_df$genus_clean %in% macro_ref$Genus,
+  ,
+  drop = FALSE
+]
+
+macro_SH_taxonomy <- macro_SH_taxonomy[
+  order(macro_SH_taxonomy$genus_clean, macro_SH_taxonomy$SH),
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(macro_SH_taxonomy, out_macro_SH_taxonomy)
+
+cat("Macrofungi-related SH matched by strict genus reference: ", nrow(macro_SH_taxonomy), "\n", sep = "")
+cat("Macrofungi genera detected at SH taxonomy level: ", length(unique(macro_SH_taxonomy$genus_clean)), "\n", sep = "")
+
+if (nrow(macro_SH_taxonomy) == 0) {
+  stop("No macrofungi-related SH found by genus matching. Please check genus names.")
+}
+
+## =========================
+## 8. 从 BIOM 丰度矩阵中提取大型真菌 SH × 样本矩阵
+## =========================
+
+cat("\n========== Extract macrofungi SH abundance matrix ==========\n")
+
+macro_row_index0 <- macro_SH_taxonomy$row_index0
+
+macro_mat <- make_sparse_macro_matrix(
+  biom = biom,
+  macro_row_index0 = macro_row_index0,
+  n_rows_total = n_rows_total,
+  n_samples_total = n_samples_total
+)
+
+rownames(macro_mat) <- macro_SH_taxonomy$SH[
+  match(as.integer(rownames(macro_mat)) - 1, macro_SH_taxonomy$row_index0)
+]
+
+colnames(macro_mat) <- sample_ids_biom
+
+## 只保留 metadata 中有效 status 样本
+common_samples <- intersect(colnames(macro_mat), meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("No matched samples between BIOM and metadata.")
+}
+
+macro_mat <- macro_mat[, common_samples, drop = FALSE]
+meta_use <- meta2[match(common_samples, meta2$sample_id), , drop = FALSE]
+rownames(meta_use) <- meta_use$sample_id
+
+## 去掉全 0 SH；理论上大型真菌 SH 可能在有效 status 样本中全 0
+macro_mat <- macro_mat[rowSums(macro_mat) > 0, , drop = FALSE]
+
+macro_SH_taxonomy_use <- macro_SH_taxonomy[
+  match(rownames(macro_mat), macro_SH_taxonomy$SH),
+  ,
+  drop = FALSE
+]
+
+write_tsv_utf8(
+  data.frame(SH = rownames(macro_mat), macro_mat, check.names = FALSE),
+  out_macro_SH_abundance
+)
+
+cat("Macrofungi SH retained after valid status sample filtering: ", nrow(macro_mat), "\n", sep = "")
+cat("Samples retained for Venn analysis: ", ncol(macro_mat), "\n", sep = "")
+
+## =========================
+## 9. 构建各 status 的大型真菌 SH set
+## =========================
+
+cat("\n========== Build SH sets by status ==========\n")
+
+set_list <- list()
+SH_count_list <- list()
+
+for (st in status_order_CN) {
+  samples_st <- rownames(meta_use)[as.character(meta_use$status_CN) == st]
+
+  if (length(samples_st) == 0) next
+
+  mat_st <- macro_mat[, samples_st, drop = FALSE]
+
+  sh_present <- rownames(mat_st)[rowSums(mat_st > 0) > 0]
+
+  set_list[[st]] <- sh_present
+
+  SH_count_list[[st]] <- data.frame(
+    status = st,
+    n_samples = length(samples_st),
+    total_macrofungi_SH_richness = length(sh_present),
+    total_macrofungi_SH_reads = sum(mat_st),
+    mean_macrofungi_SH_richness_per_sample = round(mean(colSums(mat_st > 0)), 3),
+    mean_macrofungi_SH_reads_per_sample = round(mean(colSums(mat_st)), 3),
+    stringsAsFactors = FALSE
+  )
+}
+
+SH_counts <- do.call(rbind, SH_count_list)
+write_csv_utf8(SH_counts, out_status_SH_counts)
+
+if (length(set_list) < 2) {
+  stop("Less than 2 status groups available after filtering. Venn plot is not meaningful.")
+}
+
+if (length(set_list) > 5) {
+  stop("More than 5 status groups found. Venn plot is not recommended. Please use UpSet instead.")
+}
+
+print(SH_counts)
+
+## 输出每个 status 检出的 SH 列表
+SH_presence_list <- do.call(
+  rbind,
+  lapply(names(set_list), function(st) {
+    data.frame(
+      status = st,
+      SH = set_list[[st]],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+write_csv_utf8(SH_presence_list, out_SH_presence_list)
+
+## =========================
+## 10. 构建 SH × status presence/absence 矩阵
+## =========================
+
+all_SH <- sort(unique(unlist(set_list)))
+
+pa_df <- data.frame(
+  SH = all_SH,
+  stringsAsFactors = FALSE
+)
+
+for (st in names(set_list)) {
+  pa_df[[st]] <- as.integer(pa_df$SH %in% set_list[[st]])
+}
+
+pa_df <- pa_df[
+  rowSums(pa_df[, names(set_list), drop = FALSE]) > 0,
+  ,
+  drop = FALSE
+]
+
+write_csv_utf8(pa_df, out_pa_matrix)
+
+## =========================
+## 11. 精确交集统计
+## =========================
+
+inter_df <- calc_exact_intersections(pa_df, names(set_list))
+write_csv_utf8(inter_df, out_intersections)
+
+cat("\nExact Venn intersections:\n")
+print(inter_df[, c("combination", "n_status", "n_SH")])
+
+## =========================
+## 12. 绘制 Venn 图
+## =========================
+
+cat("\n========== Draw Venn plot ==========\n")
+
+fill_cols <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+make_venn_grob <- function() {
+  VennDiagram::venn.diagram(
+    x = set_list,
+    filename = NULL,
+    fill = fill_cols[names(set_list)],
+    alpha = 0.42,
+    col = "grey25",
+    lwd = 1.4,
+
+    ## 区域数字
+    cex = 1.55,
+    fontface = "bold",
+    fontfamily = "SimSun",
+    fontcol = "black",
+
+    ## 分组标签
+    cat.cex = 1.55,
+    cat.fontface = "bold",
+    cat.fontfamily = "SimSun",
+    cat.col = "black",
+
+    ## 减少边缘空白
+    margin = 0.045
+  )
+}
+
+png(
+  filename = out_png,
+  width = 15.0,
+  height = 12.0,
+  units = "cm",
+  res = 600,
+  bg = "white",
+  type = "cairo"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+pdf(
+  file = out_pdf,
+  width = 5.91,
+  height = 4.72,
+  bg = "white",
+  family = "Helvetica"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+## =========================
+## 13. 输出 log
+## =========================
+
+sink(out_log)
+
+cat("Status macrofungi SH Venn analysis, no-elephant dataset\n")
+cat("============================================================\n\n")
+
+cat("Input files:\n")
+cat("Metadata:", metadata_file, "\n")
+cat("Taxonomy BIOM:", biom_file, "\n")
+cat("Strict macrofungi genus reference v2:", macrofungi_ref_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Filtering and grouping logic:\n")
+cat("1. Read final no-elephant metadata\n")
+cat("2. Use metadata column: status\n")
+cat("3. Map status: domesticated -> 家养, wild -> 野生, captive -> 圈养野生\n")
+cat("4. Extract SH taxonomy and abundance from taxonomy BIOM\n")
+cat("5. Select SH whose genus is in strict macrofungi genus reference v2\n")
+cat("6. SH presence/absence, not SH reads or relative abundance\n\n")
+
+cat("Metadata columns used:\n")
+cat("sample_id:", sample_col, "\n")
+cat("status:", status_col, "\n")
+cat("host_order:", host_order_col, "\n")
+cat("host_family:", host_family_col, "\n")
+cat("host_genus:", host_genus_col, "\n")
+cat("host_species:", host_species_col, "\n\n")
+
+cat("Sample summary:\n")
+cat("Total samples in metadata after valid status filtering:", nrow(meta2), "\n")
+cat("Samples matched between BIOM and metadata:", ncol(macro_mat), "\n\n")
+
+cat("Status sample counts:\n")
+print(table(meta_use$status_CN))
+cat("\n")
+
+cat("BIOM summary:\n")
+cat("BIOM SH features:", n_rows_total, "\n")
+cat("BIOM samples:", n_samples_total, "\n")
+cat("BIOM matrix type:", biom$matrix_type, "\n\n")
+
+cat("Macrofungi reference summary:\n")
+cat("Strict macrofungi reference genera:", nrow(macro_ref), "\n")
+cat("Macrofungi-related SH matched by genus:", nrow(macro_SH_taxonomy), "\n")
+cat("Macrofungi SH retained after valid status sample filtering:", nrow(macro_mat), "\n")
+cat("Macrofungi genera detected among matched SH:", length(unique(macro_SH_taxonomy_use$genus_clean)), "\n\n")
+
+cat("Macrofungi SH counts by status:\n")
+print(SH_counts)
+cat("\n")
+
+cat("Exact intersections:\n")
+print(inter_df[, c("combination", "n_status", "n_SH")])
+cat("\n")
+
+cat("showtext options:\n")
+print(showtext::showtext_opts())
+cat("\n")
+
+cat("Output files:\n")
+cat("Macrofungi reference used:", out_ref_used, "\n")
+cat("SH taxonomy from BIOM:", out_biom_taxonomy, "\n")
+cat("Macrofungi SH taxonomy:", out_macro_SH_taxonomy, "\n")
+cat("Macrofungi SH abundance table:", out_macro_SH_abundance, "\n")
+cat("Status sample counts:", out_status_sample_counts, "\n")
+cat("Status SH counts:", out_status_SH_counts, "\n")
+cat("SH presence list:", out_SH_presence_list, "\n")
+cat("Presence/absence matrix:", out_pa_matrix, "\n")
+cat("Exact intersections:", out_intersections, "\n")
+cat("Venn PNG:", out_png, "\n")
+cat("Venn PDF:", out_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n")
+cat("Venn PNG:\n", out_png, "\n")
+cat("Venn PDF:\n", out_pdf, "\n")
+cat("Status SH counts:\n", out_status_SH_counts, "\n")
+cat("Exact intersections:\n", out_intersections, "\n")
+cat("Log:\n", out_log, "\n")
+#运行脚本：
+Rscript scripts/chapter5_macrofungi/03_status_macrofungi_SH_venn_v1.R
+#一、先重画 Venn 图，只调整标签位置
+#本次重画说明
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/status_macrofungi_SH_venn_v1/macrofungi_SH_status_presence_absence.csv
+#是否重算：
+#不重算 BIOM、不重算大型真菌 SH、不重算交集，只读取已有 presence/absence 结果重画图。
+#统计口径：
+#仍然是 SH presence/absence。某个大型真菌相关 SH 在某个驯养属性分组任一样本中 reads > 0，即认为该组检出该 SH。
+#输出文件：
+#新输出，不覆盖旧图：
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v2_label_adjusted.png
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v2_label_adjusted.pdf
+#改动内容：
+#只调整 Venn 图标签位置，尤其把“圈养野生”向下移；同时略增加底部留白。
+#不改动内容：
+#不改数据、不改交集数、不改大型真菌属匹配逻辑、不改统计口径。
+#二、完整重画脚本
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/04_redraw_status_macrofungi_SH_venn_label_adjusted.R
+#把下面脚本完整粘进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-1 Venn 图重画脚本
+##
+## 目的：
+##   只重画不同驯养属性有蹄类动物食源大型真菌 SH 水平 Venn 图，
+##   调整“圈养野生”标签位置，避免与圆圈重叠。
+##
+## 注意：
+##   本脚本不重新读取 BIOM；
+##   不重新筛选大型真菌 SH；
+##   不重新计算交集；
+##   只读取已有 macrofungi_SH_status_presence_absence.csv 重画图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Redraw Fig5-1 status macrofungi SH Venn, label adjusted\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "VennDiagram",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(VennDiagram)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 输入与输出路径
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+pa_file <- file.path(
+  in_dir,
+  "macrofungi_SH_status_presence_absence.csv"
+)
+
+out_png <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v2_label_adjusted.png"
+)
+
+out_pdf <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v2_label_adjusted.pdf"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v2_label_adjusted_log.txt"
+)
+
+if (!file.exists(pa_file)) {
+  stop("Presence/absence input file not found: ", pa_file)
+}
+
+cat("\nInput presence/absence file:\n")
+cat(pa_file, "\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n\n")
+
+## =========================
+## 2. 字体设置
+## =========================
+
+simsun_file <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(simsun_file)) {
+  warning("SimSun font not found: ", simsun_file)
+} else {
+  sysfonts::font_add(
+    family = "SimSun",
+    regular = simsun_file
+  )
+}
+
+showtext::showtext_auto(enable = TRUE)
+
+## 关键：修正 600 dpi PNG 中 showtext 字号缩放问题
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 读取已有 SH × status presence/absence 矩阵
+## =========================
+
+pa_df <- read.csv(
+  pa_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (!"SH" %in% colnames(pa_df)) {
+  stop("Input presence/absence file must contain column: SH")
+}
+
+status_order_CN <- c("家养", "野生", "圈养野生")
+
+missing_cols <- setdiff(status_order_CN, colnames(pa_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "以下分组列在 presence/absence 文件中不存在：",
+    paste(missing_cols, collapse = ", ")
+  )
+}
+
+pa_df <- pa_df[, c("SH", status_order_CN), drop = FALSE]
+
+for (st in status_order_CN) {
+  pa_df[[st]] <- as.integer(pa_df[[st]])
+  pa_df[[st]][is.na(pa_df[[st]])] <- 0
+}
+
+set_list <- list()
+
+for (st in status_order_CN) {
+  set_list[[st]] <- pa_df$SH[pa_df[[st]] == 1]
+}
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+
+## =========================
+## 4. 绘制 Venn 图
+## =========================
+
+fill_cols <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+make_venn_grob <- function() {
+  VennDiagram::venn.diagram(
+    x = set_list,
+    filename = NULL,
+    fill = fill_cols[names(set_list)],
+    alpha = 0.42,
+    col = "grey25",
+    lwd = 1.4,
+
+    ## 区域数字
+    cex = 1.55,
+    fontface = "bold",
+    fontfamily = "SimSun",
+    fontcol = "black",
+
+    ## 分组标签
+    cat.cex = 1.55,
+    cat.fontface = "bold",
+    cat.fontfamily = "SimSun",
+    cat.col = "black",
+
+    ## 关键调整：
+    ## 前两个标签仍在左右上方；
+    ## 第三个“圈养野生”放到底部并增加距离，避免和圆圈重叠。
+    cat.pos = c(-25, 25, 180),
+    cat.dist = c(0.045, 0.045, 0.145),
+
+    ## 增加底部留白，避免标签靠近图片边界
+    margin = 0.075
+  )
+}
+
+png(
+  filename = out_png,
+  width = 15.0,
+  height = 12.6,
+  units = "cm",
+  res = 600,
+  bg = "white",
+  type = "cairo"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+pdf(
+  file = out_pdf,
+  width = 5.91,
+  height = 4.96,
+  bg = "white",
+  family = "Helvetica"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+## =========================
+## 5. 输出 log
+## =========================
+
+sink(out_log)
+
+cat("Redraw Fig5-1 status macrofungi SH Venn, label adjusted\n")
+cat("============================================================\n\n")
+
+cat("Input presence/absence file:\n")
+cat(pa_file, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only label position and plot margin were adjusted.\n\n")
+
+cat("Status order:\n")
+print(status_order_CN)
+cat("\n")
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+cat("\n")
+
+cat("VennDiagram label settings:\n")
+cat("cat.pos = c(-25, 25, 180)\n")
+cat("cat.dist = c(0.045, 0.045, 0.145)\n")
+cat("margin = 0.075\n\n")
+
+cat("showtext options:\n")
+print(showtext::showtext_opts())
+cat("\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n")
+cat("Output PDF:\n")
+cat(out_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Adjusted Venn PNG:\n", out_png, "\n")
+cat("Adjusted Venn PDF:\n", out_pdf, "\n")
+cat("Log:\n", out_log, "\n")
+#运行脚本
+Rscript scripts/chapter5_macrofungi/04_redraw_status_macrofungi_SH_venn_label_adjusted.R
+#本次修改说明
+#1. 输入文件
+#读取你已经生成好的 presence/absence 文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/status_macrofungi_SH_venn_v1/macrofungi_SH_status_presence_absence.csv
+#2. 是否重算
+#不重算。
+#不重新读取 BIOM，
+#不重新筛选大型真菌 SH，
+#不重新计算交集，
+#只重画图。
+#3. 统计口径 / 计算单位
+#不变，仍然是：
+#SH presence/absence
+#4. 输出文件名
+#这次输出新文件，不覆盖前两版：
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix.png
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix.pdf
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix_log.txt
+#5. 改动内容
+#只改一处：
+#底部“圈养野生”标签稍微下移一点；
+#让它和圆圈之间留一点空白；
+#尽量保持和“家养”“野生”与圆圈的距离风格一致。
+#6. 不改动内容
+#不改：
+#图的整体大小；
+#圆圈大小和布局；
+#字号；
+#配色；
+#交集数值；
+#“家养”“野生”位置；
+#统计逻辑。
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/05_redraw_status_macrofungi_SH_venn_v3_bottom_label_fix.R
+#第二步：把下面完整脚本粘贴进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-1 Venn 图重画脚本 v3
+##
+## 目的：
+##   在第一版图的基础上，仅微调底部“圈养野生”标签位置，
+##   使其与圆圈不重叠，并尽量保持与“家养”“野生”标签
+##   相近的留白风格。
+##
+## 注意：
+##   本脚本不重新计算任何数据；
+##   只读取已有 macrofungi_SH_status_presence_absence.csv 重画图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Redraw Fig5-1 status macrofungi SH Venn, v3 bottom label fix\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "VennDiagram",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(VennDiagram)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 输入与输出路径
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+pa_file <- file.path(
+  in_dir,
+  "macrofungi_SH_status_presence_absence.csv"
+)
+
+out_png <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix.png"
+)
+
+out_pdf <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix.pdf"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v3_bottom_label_fix_log.txt"
+)
+
+if (!file.exists(pa_file)) {
+  stop("Presence/absence input file not found: ", pa_file)
+}
+
+cat("\nInput presence/absence file:\n")
+cat(pa_file, "\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n\n")
+
+## =========================
+## 2. 字体设置
+## =========================
+
+simsun_file <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(simsun_file)) {
+  warning("SimSun font not found: ", simsun_file)
+} else {
+  sysfonts::font_add(
+    family = "SimSun",
+    regular = simsun_file
+  )
+}
+
+showtext::showtext_auto(enable = TRUE)
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 读取已有 SH × status presence/absence 矩阵
+## =========================
+
+pa_df <- read.csv(
+  pa_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (!"SH" %in% colnames(pa_df)) {
+  stop("Input presence/absence file must contain column: SH")
+}
+
+status_order_CN <- c("家养", "野生", "圈养野生")
+
+missing_cols <- setdiff(status_order_CN, colnames(pa_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "以下分组列在 presence/absence 文件中不存在：",
+    paste(missing_cols, collapse = ", ")
+  )
+}
+
+pa_df <- pa_df[, c("SH", status_order_CN), drop = FALSE]
+
+for (st in status_order_CN) {
+  pa_df[[st]] <- as.integer(pa_df[[st]])
+  pa_df[[st]][is.na(pa_df[[st]])] <- 0
+}
+
+set_list <- list()
+
+for (st in status_order_CN) {
+  set_list[[st]] <- pa_df$SH[pa_df[[st]] == 1]
+}
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+
+## =========================
+## 4. 绘制 Venn 图
+## =========================
+
+fill_cols <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+make_venn_grob <- function() {
+  VennDiagram::venn.diagram(
+    x = set_list,
+    filename = NULL,
+    fill = fill_cols[names(set_list)],
+    alpha = 0.42,
+    col = "grey25",
+    lwd = 1.4,
+
+    ## 区域数字
+    cex = 1.55,
+    fontface = "bold",
+    fontfamily = "SimSun",
+    fontcol = "black",
+
+    ## 分组标签
+    cat.cex = 1.55,
+    cat.fontface = "bold",
+    cat.fontfamily = "SimSun",
+    cat.col = "black",
+
+    ## 只做最小改动：
+    ## 前两个标签基本保持顶部左右原风格；
+    ## 第三个标签仅轻微下移一点，避免压到圆圈。
+    cat.pos = c(-20, 20, 180),
+    cat.dist = c(0.03, 0.03, 0.055),
+
+    ## 保持第一版边距风格，不再额外放大画布
+    margin = 0.045
+  )
+}
+
+png(
+  filename = out_png,
+  width = 15.0,
+  height = 12.0,
+  units = "cm",
+  res = 600,
+  bg = "white",
+  type = "cairo"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+pdf(
+  file = out_pdf,
+  width = 5.91,
+  height = 4.72,
+  bg = "white",
+  family = "Helvetica"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(make_venn_grob())
+showtext::showtext_end()
+
+dev.off()
+
+## =========================
+## 5. 输出 log
+## =========================
+
+sink(out_log)
+
+cat("Redraw Fig5-1 status macrofungi SH Venn, v3 bottom label fix\n")
+cat("============================================================\n\n")
+
+cat("Input presence/absence file:\n")
+cat(pa_file, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only bottom label position was adjusted slightly.\n\n")
+
+cat("Status order:\n")
+print(status_order_CN)
+cat("\n")
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+cat("\n")
+
+cat("VennDiagram label settings:\n")
+cat("cat.pos = c(-20, 20, 180)\n")
+cat("cat.dist = c(0.03, 0.03, 0.055)\n")
+cat("margin = 0.045\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n")
+cat("Output PDF:\n")
+cat(out_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Adjusted Venn PNG:\n", out_png, "\n")
+cat("Adjusted Venn PDF:\n", out_pdf, "\n")
+cat("Log:\n", out_log, "\n")
+#运行脚本
+Rscript scripts/chapter5_macrofungi/05_redraw_status_macrofungi_SH_venn_v3_bottom_label_fix.R
+#一、本次修改说明
+#1. 输入文件
+#读取你已经生成好的 presence/absence 文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/status_macrofungi_SH_venn_v1/macrofungi_SH_status_presence_absence.csv
+#2. 是否重算
+#不重算。
+#不重新读取 BIOM；
+#不重新筛选大型真菌 SH；
+#不重新计算交集；
+#只重画图。
+#3. 统计口径 / 计算单位
+#仍然是：
+#SH presence/absence
+#4. 输出文件名
+#这次输出新文件，不覆盖前面版本：
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label.png
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label.pdf
+#Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label_log.txt
+#5. 改动内容
+#只改一处：
+#仅将“圈养野生”这个标签向下移动一点；
+#“家养”“野生”不动；
+#圆圈布局不动；
+#画布尺寸不动；
+#数字不动。
+#6. 不改动内容
+#不改：
+#交集数；
+#颜色；
+#字号；
+#图尺寸；
+#圆圈位置；
+#第一版整体风格。
+#二、第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/06_redraw_status_macrofungi_SH_venn_v4_move_only_bottom_label.R
+#三、第二步：把下面完整脚本粘贴进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-1 Venn 图重画脚本 v4
+##
+## 目的：
+##   保持第一版图的整体布局不变，
+##   只将“圈养野生”这个底部标签单独向下移动一点，
+##   避免与圆圈重叠。
+##
+## 注意：
+##   本脚本不重新计算任何数据；
+##   只读取已有 macrofungi_SH_status_presence_absence.csv 重画图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Redraw Fig5-1 status macrofungi SH Venn, v4 move only bottom label\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "VennDiagram",
+  "grid",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(VennDiagram)
+  library(grid)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 输入与输出路径
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+pa_file <- file.path(
+  in_dir,
+  "macrofungi_SH_status_presence_absence.csv"
+)
+
+out_png <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label.png"
+)
+
+out_pdf <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label.pdf"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_1_status_macrofungi_SH_Venn_no_elephant_CN_v4_move_only_bottom_label_log.txt"
+)
+
+if (!file.exists(pa_file)) {
+  stop("Presence/absence input file not found: ", pa_file)
+}
+
+cat("\nInput presence/absence file:\n")
+cat(pa_file, "\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n\n")
+
+## =========================
+## 2. 字体设置
+## =========================
+
+simsun_file <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(simsun_file)) {
+  warning("SimSun font not found: ", simsun_file)
+} else {
+  sysfonts::font_add(
+    family = "SimSun",
+    regular = simsun_file
+  )
+}
+
+showtext::showtext_auto(enable = TRUE)
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 读取已有 SH × status presence/absence 矩阵
+## =========================
+
+pa_df <- read.csv(
+  pa_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (!"SH" %in% colnames(pa_df)) {
+  stop("Input presence/absence file must contain column: SH")
+}
+
+status_order_CN <- c("家养", "野生", "圈养野生")
+
+missing_cols <- setdiff(status_order_CN, colnames(pa_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "以下分组列在 presence/absence 文件中不存在： ",
+    paste(missing_cols, collapse = ", ")
+  )
+}
+
+pa_df <- pa_df[, c("SH", status_order_CN), drop = FALSE]
+
+for (st in status_order_CN) {
+  pa_df[[st]] <- as.integer(pa_df[[st]])
+  pa_df[[st]][is.na(pa_df[[st]])] <- 0
+}
+
+set_list <- list()
+
+for (st in status_order_CN) {
+  set_list[[st]] <- pa_df$SH[pa_df[[st]] == 1]
+}
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+
+## =========================
+## 4. 按第一版参数生成 Venn grob
+## =========================
+
+fill_cols <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+make_venn_grob_v1_style <- function() {
+  ## 这里严格沿用第一版参数
+  VennDiagram::venn.diagram(
+    x = set_list,
+    filename = NULL,
+    fill = fill_cols[names(set_list)],
+    alpha = 0.42,
+    col = "grey25",
+    lwd = 1.4,
+
+    ## 区域数字
+    cex = 1.55,
+    fontface = "bold",
+    fontfamily = "SimSun",
+    fontcol = "black",
+
+    ## 分组标签
+    cat.cex = 1.55,
+    cat.fontface = "bold",
+    cat.fontfamily = "SimSun",
+    cat.col = "black",
+
+    ## 第一版保留的边距
+    margin = 0.045
+  )
+}
+
+venn_grob <- make_venn_grob_v1_style()
+
+## =========================
+## 5. 仅移动“圈养野生”这个标签
+## =========================
+
+all_labels <- c()
+match_idx <- integer(0)
+
+for (i in seq_along(venn_grob)) {
+  g <- venn_grob[[i]]
+
+  if (!is.null(g$label)) {
+    lab <- as.character(g$label)
+    all_labels <- c(all_labels, lab)
+
+    if (identical(lab, "圈养野生")) {
+      match_idx <- c(match_idx, i)
+    }
+  }
+}
+
+cat("\nAll text labels found in venn grob:\n")
+print(all_labels)
+
+if (length(match_idx) == 0) {
+  stop("未找到标签“圈养野生”，脚本停止。请检查 grob 结构。")
+}
+
+if (length(match_idx) > 1) {
+  stop("找到多个“圈养野生”标签，脚本停止，以避免误改多个对象。")
+}
+
+bottom_idx <- match_idx[1]
+
+cat("\nBottom label grob index:\n")
+print(bottom_idx)
+
+cat("\nOriginal bottom label y:\n")
+print(venn_grob[[bottom_idx]]$y)
+
+## 只向下移动一点点：
+## 这里用 mm 做微调，不影响其他标签。
+venn_grob[[bottom_idx]]$y <- venn_grob[[bottom_idx]]$y - unit(2.8, "mm")
+
+cat("\nAdjusted bottom label y:\n")
+print(venn_grob[[bottom_idx]]$y)
+
+## =========================
+## 6. 输出 PNG / PDF
+## =========================
+
+png(
+  filename = out_png,
+  width = 15.0,
+  height = 12.0,
+  units = "cm",
+  res = 600,
+  bg = "white",
+  type = "cairo"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(venn_grob)
+showtext::showtext_end()
+
+dev.off()
+
+pdf(
+  file = out_pdf,
+  width = 5.91,
+  height = 4.72,
+  bg = "white",
+  family = "Helvetica"
+)
+
+showtext::showtext_begin()
+grid.newpage()
+grid.draw(venn_grob)
+showtext::showtext_end()
+
+dev.off()
+
+## =========================
+## 7. 输出 log
+## =========================
+
+sink(out_log)
+
+cat("Redraw Fig5-1 status macrofungi SH Venn, v4 move only bottom label\n")
+cat("============================================================\n\n")
+
+cat("Input file:\n")
+cat(pa_file, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only the bottom label '圈养野生' was moved downward.\n\n")
+
+cat("Status order:\n")
+print(status_order_CN)
+cat("\n")
+
+cat("SH set sizes:\n")
+print(sapply(set_list, length))
+cat("\n")
+
+cat("All text labels found in venn grob:\n")
+print(all_labels)
+cat("\n")
+
+cat("Bottom label grob index:\n")
+print(bottom_idx)
+cat("\n")
+
+cat("Original bottom label y:\n")
+print(venn_grob[[bottom_idx]]$y + unit(2.8, "mm"))
+cat("\n")
+
+cat("Adjusted bottom label y:\n")
+print(venn_grob[[bottom_idx]]$y)
+cat("\n")
+
+cat("Move distance:\n")
+cat("2.8 mm downward\n\n")
+
+cat("Output PNG:\n")
+cat(out_png, "\n")
+cat("Output PDF:\n")
+cat(out_pdf, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("Adjusted Venn PNG:\n", out_png, "\n")
+cat("Adjusted Venn PDF:\n", out_pdf, "\n")
+cat("Log:\n", out_log, "\n")
+#运行脚本
+Rscript scripts/chapter5_macrofungi/06_redraw_status_macrofungi_SH_venn_v4_move_only_bottom_label.R
