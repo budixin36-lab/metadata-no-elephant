@@ -1,0 +1,2105 @@
+#下面给你完整脚本。这个脚本会一次性生成：
+#不同驯养属性有蹄类动物食源大型真菌 Alpha 多样性指数表；
+#ANOVA + TukeyHSD 结果；
+#论文用均值+字母表；
+#ACE、Chao1、Shannon、Simpson 四张单独箱线图。
+#本脚本会重新计算食源大型真菌相关 SH 的 Alpha 多样性，但不会重新筛选大型真菌 SH，不会重新读取 BIOM，不会重新做 taxonomy。
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/14_status_macrofungi_alpha_diversity_ANOVA_Tukey_boxplot_v1.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5
+## 不同驯养属性有蹄类动物食源大型真菌群落 Alpha 多样性
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 分析对象：
+##   已筛选好的食源大型真菌相关 SH
+##
+## 输入：
+##   1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+##   2. macrofungi_SH_abundance_table_for_status_venn.tsv
+##
+## 统计口径：
+##   1. 基于食源大型真菌相关 SH abundance table；
+##   2. 剔除食源大型真菌 reads = 0 的样本；
+##   3. 计算样本水平 Observed_macrofungi_SH、ACE、Chao1、Shannon、Simpson；
+##   4. 按 status 分组：家养 → 野生 → 圈养野生；
+##   5. one-way ANOVA + TukeyHSD；
+##   6. 表格中用均值 + 小写字母表示差异；
+##   7. 四个指数分别输出箱线图；
+##   8. 箱线图不显示散点和离群点；
+##   9. 显著两两比较用连线和星号标注；
+##   10. ANOVA P 值标注在图中右上方。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Chapter 5 - Status macrofungi alpha diversity analysis\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tidyr",
+  "readr",
+  "tibble",
+  "vegan",
+  "openxlsx",
+  "ggplot2",
+  "showtext",
+  "sysfonts",
+  "grid"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(tibble)
+  library(vegan)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径与输出文件
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+macrofungi_status_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+macrofungi_SH_abundance_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_abundance_table_for_status_venn.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_alpha_diversity_v1"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_alpha_sample <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_zero_samples <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_zero_samples_excluded_no_elephant.csv"
+)
+
+out_sample_count_csv <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_sample_count_no_elephant.csv"
+)
+
+out_paper_no_n_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_for_paper_no_n_no_elephant.csv"
+)
+
+out_paper_with_n_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_for_paper_with_n_no_elephant.csv"
+)
+
+out_mean_sd_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_mean_sd_detail_no_elephant.csv"
+)
+
+out_anova_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_ANOVA_no_elephant.csv"
+)
+
+out_tukey_all_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_TukeyHSD_all_no_elephant.csv"
+)
+
+out_tukey_sig_csv <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_xlsx <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+out_summary <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_analysis_summary_no_elephant.txt"
+)
+
+plot_dir <- file.path(out_dir, "boxplots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_plot_ACE <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_ACE_boxplot_no_elephant_CN.png"
+)
+
+out_plot_Chao1 <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_Chao1_boxplot_no_elephant_CN.png"
+)
+
+out_plot_Shannon <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_Shannon_boxplot_no_elephant_CN.png"
+)
+
+out_plot_Simpson <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_Simpson_boxplot_no_elephant_CN.png"
+)
+
+input_files <- data.frame(
+  file_label = c(
+    "metadata",
+    "macrofungi_SH_abundance"
+  ),
+  file_path = c(
+    metadata_file,
+    macrofungi_SH_abundance_file
+  ),
+  exists = file.exists(c(
+    metadata_file,
+    macrofungi_SH_abundance_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  cat("\n以下输入文件不存在，请检查路径：\n")
+  print(input_files[!input_files$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_path, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+
+status_order <- c("家养", "野生", "圈养野生")
+
+status_label_map <- c(
+  "domesticated" = "家养",
+  "wild" = "野生",
+  "captive" = "圈养野生"
+)
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_macrofungi_SH", metrics_for_table)
+
+metric_y_labels <- c(
+  "ACE" = "ACE指数",
+  "Chao1" = "Chao1指数",
+  "Shannon" = "Shannon指数",
+  "Simpson" = "Simpson指数"
+)
+
+plot_files <- c(
+  "ACE" = out_plot_ACE,
+  "Chao1" = out_plot_Chao1,
+  "Shannon" = out_plot_Shannon,
+  "Simpson" = out_plot_Simpson
+)
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001",
+      sprintf("%.4f", p)
+    )
+  )
+}
+
+sig_label <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+make_tukey_letters_no_package <- function(df, group_col, metric, alpha = 0.05) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  groups_ordered <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value)) %>%
+    pull(group) %>%
+    as.character()
+
+  if (length(groups_ordered) == 1) {
+    return(setNames("a", groups_ordered))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  sig_mat <- matrix(
+    FALSE,
+    nrow = length(groups_ordered),
+    ncol = length(groups_ordered),
+    dimnames = list(groups_ordered, groups_ordered)
+  )
+
+  for (comp in rownames(tk)) {
+    p <- tk[comp, "p adj"]
+    parts <- strsplit(comp, "-", fixed = TRUE)[[1]]
+
+    if (length(parts) == 2) {
+      g1 <- parts[1]
+      g2 <- parts[2]
+
+      if (g1 %in% groups_ordered && g2 %in% groups_ordered) {
+        if (!is.na(p) && p < alpha) {
+          sig_mat[g1, g2] <- TRUE
+          sig_mat[g2, g1] <- TRUE
+        }
+      }
+    }
+  }
+
+  letters_pool <- letters
+  group_letters <- setNames(rep("", length(groups_ordered)), groups_ordered)
+  letter_groups <- list()
+
+  for (g in groups_ordered) {
+    assigned <- FALSE
+
+    if (length(letter_groups) > 0) {
+      for (li in seq_along(letter_groups)) {
+        members <- letter_groups[[li]]
+        can_share <- all(!sig_mat[g, members])
+
+        if (can_share) {
+          letter_groups[[li]] <- c(members, g)
+          group_letters[g] <- paste0(group_letters[g], letters_pool[li])
+          assigned <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!assigned) {
+      new_i <- length(letter_groups) + 1
+
+      if (new_i > length(letters_pool)) {
+        stop("分组过多，字母池不够。")
+      }
+
+      letter_groups[[new_i]] <- g
+      group_letters[g] <- paste0(group_letters[g], letters_pool[new_i])
+    }
+  }
+
+  for (i in seq_along(groups_ordered)) {
+    for (j in seq_along(groups_ordered)) {
+      if (j <= i) next
+
+      g1 <- groups_ordered[i]
+      g2 <- groups_ordered[j]
+
+      if (!sig_mat[g1, g2]) {
+        chars1 <- unlist(strsplit(group_letters[g1], split = ""))
+        chars2 <- unlist(strsplit(group_letters[g2], split = ""))
+
+        shared <- length(intersect(chars1, chars2)) > 0
+
+        if (!shared) {
+          added <- FALSE
+
+          for (li in seq_along(letter_groups)) {
+            members <- letter_groups[[li]]
+
+            if (g1 %in% members && !(g2 %in% members)) {
+              can_add <- all(!sig_mat[g2, members])
+
+              if (can_add) {
+                letter_groups[[li]] <- c(members, g2)
+                group_letters[g2] <- paste0(group_letters[g2], letters_pool[li])
+                added <- TRUE
+                break
+              }
+            }
+          }
+
+          if (!added) {
+            for (li in seq_along(letter_groups)) {
+              members <- letter_groups[[li]]
+
+              if (g2 %in% members && !(g1 %in% members)) {
+                can_add <- all(!sig_mat[g1, members])
+
+                if (can_add) {
+                  letter_groups[[li]] <- c(members, g1)
+                  group_letters[g1] <- paste0(group_letters[g1], letters_pool[li])
+                  added <- TRUE
+                  break
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  group_letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics, group_order = NULL) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    out[[mean_sd_col]] <- sprintf(
+      "%.2f ± %.2f",
+      out[[mean_col]],
+      out[[sd_col]]
+    )
+  }
+
+  if (!is.null(group_order)) {
+    out <- out %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  out
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table, group_order = NULL, include_n = TRUE) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  for (m in metrics) {
+    letter_vec <- make_tukey_letters_no_package(df, group_col, m, alpha = 0.05)
+    mean_col <- paste0(m, "_mean")
+
+    paper[[m]] <- paste0(
+      sprintf("%.2f", paper[[mean_col]]),
+      letter_vec[as.character(paper$group)]
+    )
+  }
+
+  if (!is.null(group_order)) {
+    paper <- paper %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  if (include_n) {
+    paper <- paper %>% select(group, n, all_of(metrics))
+  } else {
+    paper <- paper %>% select(group, all_of(metrics))
+  }
+
+  if (include_n) {
+    anova_row <- data.frame(
+      group = "ANOVA（P 值）",
+      n = NA_integer_,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    anova_row <- data.frame(
+      group = "ANOVA（P 值）",
+      stringsAsFactors = FALSE
+    )
+  }
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    try(
+      setColWidths(wb, sheet = s, cols = 1:80, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+parse_comparison <- function(x) {
+  parts <- strsplit(x, "-", fixed = TRUE)[[1]]
+  if (length(parts) != 2) return(c(NA_character_, NA_character_))
+  parts
+}
+
+plot_alpha_box <- function(alpha_df, metric, anova_df, tukey_sig_df, out_file) {
+  dat <- alpha_df %>%
+    select(status_CN, value = all_of(metric)) %>%
+    filter(!is.na(status_CN), !is.na(value))
+
+  dat$status_CN <- factor(dat$status_CN, levels = status_order)
+
+  p_raw <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  p_label <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_for_paper)
+
+  if (length(p_label) == 0) p_label <- NA_character_
+
+  sig_pairs <- tukey_sig_df %>%
+    filter(metric == !!metric) %>%
+    mutate(
+      g1 = vapply(comparison, function(z) parse_comparison(z)[1], character(1)),
+      g2 = vapply(comparison, function(z) parse_comparison(z)[2], character(1)),
+      label = significance
+    ) %>%
+    filter(
+      !is.na(g1),
+      !is.na(g2),
+      g1 %in% status_order,
+      g2 %in% status_order,
+      label %in% c("*", "**", "***")
+    )
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  base_y <- y_max + 0.08 * y_range
+  step_y <- 0.12 * y_range
+
+  if (nrow(sig_pairs) > 0) {
+    sig_pairs <- sig_pairs %>%
+      mutate(
+        x1 = match(g1, status_order),
+        x2 = match(g2, status_order),
+        y = base_y + (row_number() - 1) * step_y,
+        y_text = y + 0.025 * y_range
+      )
+    y_top <- max(sig_pairs$y_text, na.rm = TRUE) + 0.08 * y_range
+  } else {
+    y_top <- y_max + 0.25 * y_range
+  }
+
+  p_text <- paste0("ANOVA: P = ", p_label)
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = status_CN,
+      y = value,
+      fill = status_CN
+    )
+  ) +
+    geom_boxplot(
+      width = 0.58,
+      outlier.shape = NA,
+      linewidth = 0.55,
+      color = "black"
+    ) +
+    scale_fill_manual(
+      values = status_colors,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 12,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 11,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.55,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.55,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 2.55,
+      y = y_top - 0.06 * y_range,
+      label = p_text,
+      hjust = 1,
+      vjust = 1,
+      family = "songti",
+      size = 3.4
+    )
+
+  if (nrow(sig_pairs) > 0) {
+    for (i in seq_len(nrow(sig_pairs))) {
+      p <- p +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i],
+          yend = sig_pairs$y[i],
+          linewidth = 0.45
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x1[i],
+          y = sig_pairs$y[i] - 0.025 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.45
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x2[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i] - 0.025 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.45
+        ) +
+        annotate(
+          "text",
+          x = mean(c(sig_pairs$x1[i], sig_pairs$x2[i])),
+          y = sig_pairs$y_text[i],
+          label = sig_pairs$label[i],
+          family = "songti",
+          size = 4.0
+        )
+    }
+  }
+
+  ggsave(
+    filename = out_file,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_file),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取 metadata
+## =========================
+
+cat("读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c("sampleid", "status")
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = clean_value(sampleid),
+    status_original = clean_value(status),
+    status_clean = tolower(status_original),
+    status_CN = unname(status_label_map[tolower(status_original)])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(status_CN),
+    status_CN %in% status_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$status_CN <- factor(meta2$status_CN, levels = status_order)
+
+cat("metadata 有效 status 样本数：", nrow(meta2), "\n", sep = "")
+cat("status 样本数：\n")
+print(table(meta2$status_CN))
+
+## =========================
+## 6. 读取食源大型真菌 SH abundance table
+## =========================
+
+cat("\n读取食源大型真菌 SH abundance table ...\n")
+
+macro_tab <- read.delim(
+  macrofungi_SH_abundance_file,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  comment.char = "",
+  quote = ""
+)
+
+if (!"SH" %in% colnames(macro_tab)) {
+  stop(
+    "大型真菌 SH abundance table 缺少 SH 列。\n当前列名为：",
+    paste(colnames(macro_tab), collapse = " | ")
+  )
+}
+
+feature_ids <- as.character(macro_tab$SH)
+
+mat_df <- macro_tab[, setdiff(colnames(macro_tab), "SH"), drop = FALSE]
+
+for (cc in colnames(mat_df)) {
+  mat_df[[cc]] <- suppressWarnings(as.numeric(as.character(mat_df[[cc]])))
+  mat_df[[cc]][is.na(mat_df[[cc]])] <- 0
+}
+
+mat <- as.matrix(mat_df)
+rownames(mat) <- feature_ids
+storage.mode(mat) <- "numeric"
+
+## 目标方向：SH × sample
+common_samples <- intersect(colnames(mat), meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("食源大型真菌 SH abundance table 和 metadata 没有匹配到共同样本。")
+}
+
+mat <- mat[, common_samples, drop = FALSE]
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% common_samples)
+
+meta_use <- meta_use[match(colnames(mat), meta_use$sample_id), ]
+
+if (!all(meta_use$sample_id == colnames(mat))) {
+  stop("metadata 与丰度表样本顺序匹配失败。")
+}
+
+sample_total <- colSums(mat, na.rm = TRUE)
+
+zero_samples <- data.frame(
+  sample_id = names(sample_total)[sample_total <= 0],
+  total_macrofungi_reads = sample_total[sample_total <= 0],
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  zero_samples,
+  out_zero_samples,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+valid_samples <- names(sample_total)[sample_total > 0]
+
+if (length(valid_samples) == 0) {
+  stop("所有样本的大型真菌 reads 均为 0，无法计算 alpha 多样性。")
+}
+
+mat <- mat[, valid_samples, drop = FALSE]
+
+meta_use <- meta_use %>%
+  filter(sample_id %in% valid_samples)
+
+meta_use <- meta_use[match(colnames(mat), meta_use$sample_id), ]
+
+cat("共同样本数：", length(common_samples), "\n", sep = "")
+cat("大型真菌 reads = 0 样本数：", nrow(zero_samples), "\n", sep = "")
+cat("进入 alpha 分析样本数：", ncol(mat), "\n", sep = "")
+cat("大型真菌 SH 数：", nrow(mat), "\n", sep = "")
+
+## vegan 要求 sample × feature
+comm <- t(mat)
+
+## =========================
+## 7. 计算 alpha 多样性
+## =========================
+
+cat("\nCalculating alpha diversity ...\n")
+
+est <- estimateR(comm)
+
+alpha_df <- data.frame(
+  sample_id = rownames(comm),
+  Observed_macrofungi_SH = specnumber(comm),
+  ACE = as.numeric(est["S.ACE", ]),
+  Chao1 = as.numeric(est["S.chao1", ]),
+  Shannon = diversity(comm, index = "shannon"),
+  Simpson = diversity(comm, index = "simpson"),
+  stringsAsFactors = FALSE
+)
+
+alpha_df <- alpha_df %>%
+  left_join(
+    meta_use %>% select(sample_id, status_CN),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, status_CN)
+
+alpha_df$status_CN <- factor(alpha_df$status_CN, levels = status_order)
+
+write.csv(
+  alpha_df,
+  out_alpha_sample,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 8. 统计检验与表格
+## =========================
+
+alpha_status <- alpha_df %>%
+  filter(!is.na(status_CN), status_CN != "")
+
+alpha_status$status_CN <- factor(alpha_status$status_CN, levels = status_order)
+
+status_sample_count <- alpha_status %>%
+  count(status_CN, name = "n") %>%
+  mutate(status_CN = factor(status_CN, levels = status_order)) %>%
+  arrange(status_CN)
+
+write.csv(
+  status_sample_count,
+  out_sample_count_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+status_mean_sd_detail <- make_mean_sd_detail(
+  alpha_status,
+  "status_CN",
+  metrics_all,
+  group_order = status_order
+)
+
+status_anova <- run_anova_table(
+  alpha_status,
+  "status_CN",
+  metrics_for_table
+)
+
+status_tukey_all <- run_tukey_table(
+  alpha_status,
+  "status_CN",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+status_tukey_sig <- run_tukey_table(
+  alpha_status,
+  "status_CN",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+status_paper_with_n <- make_paper_table(
+  alpha_status,
+  "status_CN",
+  metrics_for_table,
+  status_anova,
+  group_order = status_order,
+  include_n = TRUE
+)
+
+status_paper_no_n <- make_paper_table(
+  alpha_status,
+  "status_CN",
+  metrics_for_table,
+  status_anova,
+  group_order = status_order,
+  include_n = FALSE
+)
+
+write.csv(status_paper_no_n, out_paper_no_n_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(status_paper_with_n, out_paper_with_n_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(status_mean_sd_detail, out_mean_sd_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(status_anova, out_anova_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(status_tukey_all, out_tukey_all_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(status_tukey_sig, out_tukey_sig_csv, row.names = FALSE, fileEncoding = "UTF-8")
+
+## =========================
+## 9. Excel 汇总
+## =========================
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "paper_table_no_n")
+addWorksheet(wb, "paper_table_with_n")
+addWorksheet(wb, "mean_sd_detail")
+addWorksheet(wb, "ANOVA")
+addWorksheet(wb, "TukeyHSD_significant")
+addWorksheet(wb, "TukeyHSD_all")
+addWorksheet(wb, "sample_count")
+addWorksheet(wb, "sample_alpha")
+addWorksheet(wb, "zero_samples_excluded")
+
+writeData(wb, "paper_table_no_n", status_paper_no_n)
+writeData(wb, "paper_table_with_n", status_paper_with_n)
+writeData(wb, "mean_sd_detail", status_mean_sd_detail)
+writeData(wb, "ANOVA", status_anova)
+writeData(wb, "TukeyHSD_significant", status_tukey_sig)
+writeData(wb, "TukeyHSD_all", status_tukey_all)
+writeData(wb, "sample_count", status_sample_count)
+writeData(wb, "sample_alpha", alpha_df)
+writeData(wb, "zero_samples_excluded", zero_samples)
+
+save_workbook_with_auto_width(wb, out_xlsx)
+
+## =========================
+## 10. 绘制四张箱线图
+## =========================
+
+cat("\nDrawing alpha diversity boxplots ...\n")
+
+for (m in metrics_for_table) {
+  plot_alpha_box(
+    alpha_df = alpha_status,
+    metric = m,
+    anova_df = status_anova,
+    tukey_sig_df = status_tukey_sig,
+    out_file = plot_files[[m]]
+  )
+}
+
+## =========================
+## 11. Summary
+## =========================
+
+sink(out_summary)
+
+cat("Status macrofungi alpha diversity analysis, no-elephant version\n")
+cat("================================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input macrofungi SH abundance table:\n")
+cat(macrofungi_SH_abundance_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis object:\n")
+cat("Food-derived macrofungi-related SH only.\n")
+cat("Alpha diversity reflects macrofungi-related SH diversity, not total gut fungal SH diversity.\n\n")
+
+cat("Zero sample handling:\n")
+cat("Samples with total macrofungi reads = 0 were excluded before alpha calculation.\n\n")
+
+cat("Grouping:\n")
+cat("status, fixed order: 家养 → 野生 → 圈养野生\n\n")
+
+cat("Matched samples before zero filtering:", length(common_samples), "\n")
+cat("Zero macrofungi samples excluded:", nrow(zero_samples), "\n")
+cat("Samples used for alpha:", ncol(mat), "\n")
+cat("Macrofungi SH number:", nrow(mat), "\n\n")
+
+cat("Sample counts:\n")
+print(status_sample_count)
+
+cat("\nANOVA:\n")
+print(status_anova)
+
+cat("\nSignificant TukeyHSD results:\n")
+print(status_tukey_sig)
+
+cat("\nPaper table without n:\n")
+print(status_paper_no_n)
+
+cat("\nPaper table with n:\n")
+print(status_paper_with_n)
+
+cat("\nMean ± SD detail:\n")
+print(status_mean_sd_detail)
+
+cat("\nOutput files:\n")
+cat("Sample alpha:", out_alpha_sample, "\n")
+cat("Zero samples:", out_zero_samples, "\n")
+cat("Paper table no n:", out_paper_no_n_csv, "\n")
+cat("Paper table with n:", out_paper_with_n_csv, "\n")
+cat("Mean SD:", out_mean_sd_csv, "\n")
+cat("ANOVA:", out_anova_csv, "\n")
+cat("Tukey all:", out_tukey_all_csv, "\n")
+cat("Tukey significant:", out_tukey_sig_csv, "\n")
+cat("Excel:", out_xlsx, "\n")
+cat("ACE plot:", out_plot_ACE, "\n")
+cat("Chao1 plot:", out_plot_Chao1, "\n")
+cat("Shannon plot:", out_plot_Shannon, "\n")
+cat("Simpson plot:", out_plot_Simpson, "\n")
+
+sink()
+
+## =========================
+## 12. Console output
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n\n")
+
+cat("Matched samples before zero filtering:", length(common_samples), "\n")
+cat("Zero macrofungi samples excluded:", nrow(zero_samples), "\n")
+cat("Samples used for alpha:", ncol(mat), "\n")
+cat("Macrofungi SH number:", nrow(mat), "\n\n")
+
+cat("Key output files:\n")
+cat("1. ", out_alpha_sample, "\n", sep = "")
+cat("2. ", out_xlsx, "\n", sep = "")
+cat("3. ", out_paper_no_n_csv, "\n", sep = "")
+cat("4. ", out_paper_with_n_csv, "\n", sep = "")
+cat("5. ", out_summary, "\n", sep = "")
+
+cat("\nBoxplots:\n")
+cat(out_plot_ACE, "\n")
+cat(out_plot_Chao1, "\n")
+cat(out_plot_Shannon, "\n")
+cat(out_plot_Simpson, "\n")
+
+cat("\nPaper table without n:\n")
+print(status_paper_no_n)
+#运行脚本
+Rscript scripts/chapter5_macrofungi/14_status_macrofungi_alpha_diversity_ANOVA_Tukey_boxplot_v1.R
+#新建重画脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/15_redraw_status_macrofungi_alpha_boxplots_v2.R
+#粘贴以下脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Alpha boxplots redraw v2
+##
+## 目的：
+##   不重算 alpha 多样性；
+##   不重做 ANOVA/TukeyHSD；
+##   只读取已有结果，重新绘制四张箱线图。
+##
+## 修改：
+##   1. 整体字号下调；
+##   2. ANOVA 标注中 <0.001 不写等号、不带星号；
+##   3. ANOVA P 值与两两显著性横线错开，避免重叠；
+##   4. 显著性星号和线条稍微缩小；
+##   5. 适合一行两图、总宽 14.5 cm 排版。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_alpha_diversity_v1"
+)
+
+plot_dir <- file.path(out_dir, "boxplots_v2")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+alpha_file <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+anova_file <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_ANOVA_no_elephant.csv"
+)
+
+tukey_sig_file <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_log <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_boxplots_v2_redraw_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("sample_alpha", "ANOVA", "TukeyHSD_significant"),
+  file_path = c(alpha_file, anova_file, tukey_sig_file),
+  exists = file.exists(c(alpha_file, anova_file, tukey_sig_file)),
+  stringsAsFactors = FALSE
+)
+
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 参数
+## =========================
+
+status_order <- c("家养", "野生", "圈养野生")
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+metrics_for_plot <- c("ACE", "Chao1", "Shannon", "Simpson")
+
+metric_y_labels <- c(
+  "ACE" = "ACE指数",
+  "Chao1" = "Chao1指数",
+  "Shannon" = "Shannon指数",
+  "Simpson" = "Simpson指数"
+)
+
+plot_files <- c(
+  "ACE" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_ACE_boxplot_no_elephant_CN_v2.png"),
+  "Chao1" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Chao1_boxplot_no_elephant_CN_v2.png"),
+  "Shannon" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Shannon_boxplot_no_elephant_CN_v2.png"),
+  "Simpson" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Simpson_boxplot_no_elephant_CN_v2.png")
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_anova_label <- function(p) {
+  if (is.na(p)) return("ANOVA: P = NA")
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+parse_comparison <- function(x) {
+  parts <- strsplit(x, "-", fixed = TRUE)[[1]]
+  if (length(parts) != 2) return(c(NA_character_, NA_character_))
+  parts
+}
+
+plot_alpha_box_v2 <- function(alpha_df, metric, anova_df, tukey_sig_df, out_file) {
+  dat <- alpha_df %>%
+    select(status_CN, value = all_of(metric)) %>%
+    filter(!is.na(status_CN), !is.na(value))
+
+  dat$status_CN <- factor(dat$status_CN, levels = status_order)
+
+  p_raw <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  if (length(p_raw) == 0) {
+    p_raw <- NA_real_
+  }
+
+  p_text <- format_anova_label(p_raw[1])
+
+  sig_pairs <- tukey_sig_df %>%
+    filter(metric == !!metric) %>%
+    mutate(
+      g1 = vapply(comparison, function(z) parse_comparison(z)[1], character(1)),
+      g2 = vapply(comparison, function(z) parse_comparison(z)[2], character(1)),
+      label = significance
+    ) %>%
+    filter(
+      !is.na(g1),
+      !is.na(g2),
+      g1 %in% status_order,
+      g2 %in% status_order,
+      label %in% c("*", "**", "***")
+    )
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  ## 给显著性线和 ANOVA 文本预留空间
+  base_y <- y_max + 0.10 * y_range
+  step_y <- 0.105 * y_range
+
+  if (nrow(sig_pairs) > 0) {
+    sig_pairs <- sig_pairs %>%
+      mutate(
+        x1 = match(g1, status_order),
+        x2 = match(g2, status_order),
+        y = base_y + (row_number() - 1) * step_y,
+        y_text = y + 0.025 * y_range
+      )
+
+    y_top <- max(sig_pairs$y_text, na.rm = TRUE) + 0.12 * y_range
+  } else {
+    y_top <- y_max + 0.25 * y_range
+  }
+
+  ## ANOVA 文本放左上方，低于显著性线区域，避免重叠
+  anova_y <- y_top - 0.08 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = status_CN,
+      y = value,
+      fill = status_CN
+    )
+  ) +
+    geom_boxplot(
+      width = 0.54,
+      outlier.shape = NA,
+      linewidth = 0.38,
+      color = "black"
+    ) +
+    scale_fill_manual(
+      values = status_colors,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 9.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 8.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 7, r = 6, b = 5, l = 6)
+    ) +
+    annotate(
+      "text",
+      x = 0.72,
+      y = anova_y,
+      label = p_text,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.7
+    )
+
+  if (nrow(sig_pairs) > 0) {
+    for (i in seq_len(nrow(sig_pairs))) {
+      p <- p +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i],
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x1[i],
+          y = sig_pairs$y[i] - 0.020 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x2[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i] - 0.020 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "text",
+          x = mean(c(sig_pairs$x1[i], sig_pairs$x2[i])),
+          y = sig_pairs$y_text[i],
+          label = sig_pairs$label[i],
+          family = "songti",
+          size = 3.2
+        )
+    }
+  }
+
+  ggsave(
+    filename = out_file,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_file),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取已有结果
+## =========================
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+anova_df <- read.csv(
+  anova_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+tukey_sig_df <- read.csv(
+  tukey_sig_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c("status_CN", metrics_for_plot)
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+alpha_df$status_CN <- factor(alpha_df$status_CN, levels = status_order)
+
+## =========================
+## 6. 重画四张图
+## =========================
+
+for (m in metrics_for_plot) {
+  plot_alpha_box_v2(
+    alpha_df = alpha_df,
+    metric = m,
+    anova_df = anova_df,
+    tukey_sig_df = tukey_sig_df,
+    out_file = plot_files[[m]]
+  )
+}
+
+## =========================
+## 7. log
+## =========================
+
+sink(out_log)
+
+cat("Redraw status macrofungi alpha boxplots v2\n")
+cat("==========================================\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only figure style was adjusted.\n\n")
+
+cat("Input alpha file:\n", alpha_file, "\n", sep = "")
+cat("Input ANOVA file:\n", anova_file, "\n", sep = "")
+cat("Input Tukey significant file:\n", tukey_sig_file, "\n\n", sep = "")
+
+cat("Changes:\n")
+cat("1. Overall font size reduced.\n")
+cat("2. ANOVA label uses 'P < 0.001' without '=' and without significance stars.\n")
+cat("3. ANOVA label is separated from pairwise significance brackets.\n")
+cat("4. Bracket and star sizes reduced.\n")
+cat("5. No data or statistics recomputed.\n\n")
+
+cat("Output files:\n")
+print(plot_files)
+
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", plot_dir, "\n", sep = "")
+cat("ACE:\n", plot_files[["ACE"]], "\n", sep = "")
+cat("Chao1:\n", plot_files[["Chao1"]], "\n", sep = "")
+cat("Shannon:\n", plot_files[["Shannon"]], "\n", sep = "")
+cat("Simpson:\n", plot_files[["Simpson"]], "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/16_redraw_status_macrofungi_alpha_boxplots_v3.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Alpha boxplots redraw v3
+##
+## 目的：
+##   不重算 alpha 多样性；
+##   不重做 ANOVA/TukeyHSD；
+##   只读取已有结果，重新绘制四张箱线图。
+##
+## 本次修改：
+##   1. 四张图的 ANOVA P 值统一整体上移；
+##   2. 保证 ANOVA 文本位于显著性连线/星号上方；
+##   3. 四张图位置逻辑一致；
+##   4. 不覆盖上一版图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_alpha_diversity_v1"
+)
+
+plot_dir <- file.path(out_dir, "boxplots_v3")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+alpha_file <- file.path(
+  out_dir,
+  "status_macrofungi_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+anova_file <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_ANOVA_no_elephant.csv"
+)
+
+tukey_sig_file <- file.path(
+  out_dir,
+  "Table5_x_status_macrofungi_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_log <- file.path(
+  plot_dir,
+  "Fig5_x_status_macrofungi_alpha_boxplots_v3_redraw_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("sample_alpha", "ANOVA", "TukeyHSD_significant"),
+  file_path = c(alpha_file, anova_file, tukey_sig_file),
+  exists = file.exists(c(alpha_file, anova_file, tukey_sig_file)),
+  stringsAsFactors = FALSE
+)
+
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 参数
+## =========================
+
+status_order <- c("家养", "野生", "圈养野生")
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+metrics_for_plot <- c("ACE", "Chao1", "Shannon", "Simpson")
+
+metric_y_labels <- c(
+  "ACE" = "ACE指数",
+  "Chao1" = "Chao1指数",
+  "Shannon" = "Shannon指数",
+  "Simpson" = "Simpson指数"
+)
+
+plot_files <- c(
+  "ACE" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_ACE_boxplot_no_elephant_CN_v3.png"),
+  "Chao1" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Chao1_boxplot_no_elephant_CN_v3.png"),
+  "Shannon" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Shannon_boxplot_no_elephant_CN_v3.png"),
+  "Simpson" = file.path(plot_dir, "Fig5_x_status_macrofungi_alpha_Simpson_boxplot_no_elephant_CN_v3.png")
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_anova_label <- function(p) {
+  if (is.na(p)) return("ANOVA: P = NA")
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+parse_comparison <- function(x) {
+  parts <- strsplit(x, "-", fixed = TRUE)[[1]]
+  if (length(parts) != 2) return(c(NA_character_, NA_character_))
+  parts
+}
+
+plot_alpha_box_v3 <- function(alpha_df, metric, anova_df, tukey_sig_df, out_file) {
+  dat <- alpha_df %>%
+    select(status_CN, value = all_of(metric)) %>%
+    filter(!is.na(status_CN), !is.na(value))
+
+  dat$status_CN <- factor(dat$status_CN, levels = status_order)
+
+  p_raw <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  if (length(p_raw) == 0) {
+    p_raw <- NA_real_
+  }
+
+  p_text <- format_anova_label(p_raw[1])
+
+  sig_pairs <- tukey_sig_df %>%
+    filter(metric == !!metric) %>%
+    mutate(
+      g1 = vapply(comparison, function(z) parse_comparison(z)[1], character(1)),
+      g2 = vapply(comparison, function(z) parse_comparison(z)[2], character(1)),
+      label = significance
+    ) %>%
+    filter(
+      !is.na(g1),
+      !is.na(g2),
+      g1 %in% status_order,
+      g2 %in% status_order,
+      label %in% c("*", "**", "***")
+    )
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  ## 显著性线仍位于上方，但比 ANOVA 文本低一层
+  base_y <- y_max + 0.10 * y_range
+  step_y <- 0.10 * y_range
+
+  if (nrow(sig_pairs) > 0) {
+    sig_pairs <- sig_pairs %>%
+      mutate(
+        x1 = match(g1, status_order),
+        x2 = match(g2, status_order),
+        y = base_y + (row_number() - 1) * step_y,
+        y_text = y + 0.022 * y_range
+      )
+
+    max_sig_top <- max(sig_pairs$y_text, na.rm = TRUE)
+  } else {
+    max_sig_top <- y_max + 0.12 * y_range
+  }
+
+  ## 统一把 ANOVA 文本再往上移
+  anova_y <- max_sig_top + 0.11 * y_range
+  y_top <- anova_y + 0.10 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = status_CN,
+      y = value,
+      fill = status_CN
+    )
+  ) +
+    geom_boxplot(
+      width = 0.54,
+      outlier.shape = NA,
+      linewidth = 0.38,
+      color = "black"
+    ) +
+    scale_fill_manual(
+      values = status_colors,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 9.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 8.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 7, r = 6, b = 5, l = 6)
+    ) +
+    annotate(
+      "text",
+      x = 0.72,
+      y = anova_y,
+      label = p_text,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.7
+    )
+
+  if (nrow(sig_pairs) > 0) {
+    for (i in seq_len(nrow(sig_pairs))) {
+      p <- p +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i],
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x1[i],
+          xend = sig_pairs$x1[i],
+          y = sig_pairs$y[i] - 0.018 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "segment",
+          x = sig_pairs$x2[i],
+          xend = sig_pairs$x2[i],
+          y = sig_pairs$y[i] - 0.018 * y_range,
+          yend = sig_pairs$y[i],
+          linewidth = 0.32
+        ) +
+        annotate(
+          "text",
+          x = mean(c(sig_pairs$x1[i], sig_pairs$x2[i])),
+          y = sig_pairs$y_text[i],
+          label = sig_pairs$label[i],
+          family = "songti",
+          size = 3.2
+        )
+    }
+  }
+
+  ggsave(
+    filename = out_file,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_file),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取已有结果
+## =========================
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+anova_df <- read.csv(
+  anova_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+tukey_sig_df <- read.csv(
+  tukey_sig_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c("status_CN", metrics_for_plot)
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+alpha_df$status_CN <- factor(alpha_df$status_CN, levels = status_order)
+
+## =========================
+## 6. 重画四张图
+## =========================
+
+for (m in metrics_for_plot) {
+  plot_alpha_box_v3(
+    alpha_df = alpha_df,
+    metric = m,
+    anova_df = anova_df,
+    tukey_sig_df = tukey_sig_df,
+    out_file = plot_files[[m]]
+  )
+}
+
+## =========================
+## 7. log
+## =========================
+
+sink(out_log)
+
+cat("Redraw status macrofungi alpha boxplots v3\n")
+cat("==========================================\n\n")
+
+cat("No recomputation performed.\n")
+cat("Only figure style was adjusted.\n\n")
+
+cat("Input alpha file:\n", alpha_file, "\n", sep = "")
+cat("Input ANOVA file:\n", anova_file, "\n", sep = "")
+cat("Input Tukey significant file:\n", tukey_sig_file, "\n\n", sep = "")
+
+cat("Changes in v3:\n")
+cat("1. ANOVA text moved upward in all four plots.\n")
+cat("2. Same ANOVA placement logic used across all four plots.\n")
+cat("3. Pairwise significance brackets kept below ANOVA label.\n")
+cat("4. No data or statistics recomputed.\n\n")
+
+cat("Output files:\n")
+print(plot_files)
+
+sink()
+
+cat("\nDone!\n")
+cat("Output directory:\n", plot_dir, "\n", sep = "")
+cat("ACE:\n", plot_files[["ACE"]], "\n", sep = "")
+cat("Chao1:\n", plot_files[["Chao1"]], "\n", sep = "")
+cat("Shannon:\n", plot_files[["Shannon"]], "\n", sep = "")
+cat("Simpson:\n", plot_files[["Simpson"]], "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+#运行
+Rscript scripts/chapter5_macrofungi/16_redraw_status_macrofungi_alpha_boxplots_v3.R
