@@ -1,0 +1,1968 @@
+#下面给你完整脚本。这个脚本会生成：
+#不同驯养属性有蹄类动物食源大型真菌 Top20 优势属组成弦图
+#图号暂定为：Fig5_3
+#本脚本会重新计算属水平组成和 Top20 属，但不会重新读取 BIOM、不会重新匹配大型真菌属、不会重新筛选大型真菌 SH。它直接使用前面已经生成好的：
+#macrofungi_SH_abundance_table_for_status_venn.tsv
+#macrofungi_SH_taxonomy_matched_by_strict_genus.csv
+#计算口径为：
+#食源大型真菌相关 SH reads → 按属汇总
+#→ 每个样本内属水平相对多度
+#→ 按 status 分组求平均相对多度
+#→ 按三个分组平均相对多度之和筛选 Top20 属
+#→ 绘制弦图
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/10_status_macrofungi_top20_genus_chord_v1.R
+#第二步：把下面完整脚本粘贴进去
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-3
+## 不同驯养属性有蹄类动物食源大型真菌 Top20 优势属组成弦图
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 分析对象：
+##   上一步已经筛选好的食源大型真菌相关 SH
+##
+## 输入：
+##   1. final no-elephant metadata
+##   2. macrofungi_SH_abundance_table_for_status_venn.tsv
+##   3. macrofungi_SH_taxonomy_matched_by_strict_genus.csv
+##
+## 分组变量：
+##   metadata$status
+##
+## 分组标签：
+##   domesticated -> 家养
+##   wild         -> 野生
+##   captive      -> 圈养野生
+##
+## 统计口径：
+##   1. 读取食源大型真菌相关 SH abundance table
+##   2. 根据 SH taxonomy 中的 genus 汇总到属水平
+##   3. 先计算每个样本内各属相对多度
+##   4. 再按驯养属性分组计算平均相对多度
+##   5. 按三个分组平均相对多度之和筛选 Top20 优势属
+##
+## 单位：
+##   平均相对多度（%）
+##
+## 注意：
+##   本图只展示食源大型真菌相关 SH 内部的属水平组成；
+##   分母为每个样本中食源大型真菌相关 SH reads 总量，
+##   不是全体肠道真菌 reads 总量。
+##
+##   不重新筛选大型真菌属；
+##   不重新读取 BIOM；
+##   不重新匹配大型真菌 SH；
+##   不重新做 SH taxonomy；
+##   不重新计算 alpha/beta 多样性；
+##   不使用旧含象科版本；
+##   不使用旧 vsearch 97% SH 结果。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Chapter 5 - Status macrofungi Top20 genus chord plot, v1\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖检查
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "tidyr",
+  "readr",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。请检查 /mnt/c/Windows/Fonts/simsun.ttc 是否存在。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+macrofungi_status_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_SH_venn_v1"
+)
+
+macrofungi_SH_abundance_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_abundance_table_for_status_venn.tsv"
+)
+
+macrofungi_SH_taxonomy_file <- file.path(
+  macrofungi_status_dir,
+  "macrofungi_SH_taxonomy_matched_by_strict_genus.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_top20_genus_chord_v1"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_chord_png <- file.path(
+  out_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN.png"
+)
+
+out_chord_pdf <- file.path(
+  out_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN.pdf"
+)
+
+out_all_genus_mean <- file.path(
+  out_dir,
+  "status_macrofungi_genus_mean_relative_abundance_no_elephant_CN.csv"
+)
+
+out_top20_list <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_list_no_elephant_CN.csv"
+)
+
+out_chord_matrix <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_chord_matrix_no_elephant_CN.csv"
+)
+
+out_chord_matrix_minlink <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv"
+)
+
+out_source_composition <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_source_composition_for_chord_no_elephant_CN.csv"
+)
+
+out_sample_counts <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_chord_sample_counts_no_elephant.csv"
+)
+
+out_zero_samples <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_samples_with_zero_macrofungi_reads_no_elephant.csv"
+)
+
+out_untranslated <- file.path(
+  out_dir,
+  "status_macrofungi_top20_genus_untranslated_names_no_elephant.csv"
+)
+
+out_sample_genus_rel <- file.path(
+  out_dir,
+  "status_macrofungi_sample_genus_relative_abundance_top20_no_elephant_CN.csv"
+)
+
+out_log <- file.path(
+  out_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c(
+    "metadata",
+    "macrofungi_SH_abundance",
+    "macrofungi_SH_taxonomy"
+  ),
+  file_path = c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  ),
+  exists = file.exists(c(
+    metadata_file,
+    macrofungi_SH_abundance_file,
+    macrofungi_SH_taxonomy_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  cat("\n以下输入文件不存在，请检查路径：\n")
+  print(input_files[!input_files$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 3. 参数
+## =========================
+
+status_order_cn <- c("家养", "野生", "圈养野生")
+
+status_label_map <- c(
+  "domesticated" = "家养",
+  "wild" = "野生",
+  "captive" = "圈养野生"
+)
+
+top_n_genus <- 20
+
+## 平均相对多度 < 0.01% 的极小连线不画
+min_link_value <- 0.01
+
+## =========================
+## 4. 中文属名映射
+## 如果 Top20 中出现未翻译属名，会保留拉丁名并输出检查表。
+## =========================
+
+genus_cn_map <- c(
+  "Agaricus" = "蘑菇属",
+  "Albatrellus" = "地花菌属",
+  "Amanita" = "鹅膏属",
+  "Armillaria" = "蜜环菌属",
+  "Aspergillus" = "曲霉属",
+  "Boletus" = "牛肝菌属",
+  "Cantharellus" = "鸡油菌属",
+  "Coprinellus" = "小鬼伞属",
+  "Coprinopsis" = "拟鬼伞属",
+  "Coprinus" = "鬼伞属",
+  "Cortinarius" = "丝膜菌属",
+  "Craterellus" = "喇叭菌属",
+  "Fomitopsis" = "拟层孔菌属",
+  "Ganoderma" = "灵芝属",
+  "Gymnopus" = "小皮伞属",
+  "Hebeloma" = "丝盖伞属",
+  "Hericium" = "猴头菌属",
+  "Hygrocybe" = "蜡伞属",
+  "Hypholoma" = "簇伞属",
+  "Inocybe" = "丝盖伞属",
+  "Laccaria" = "蜡蘑属",
+  "Lactarius" = "乳菇属",
+  "Leccinum" = "疣柄牛肝菌属",
+  "Lentinula" = "香菇属",
+  "Lepiota" = "环柄菇属",
+  "Lycoperdon" = "马勃属",
+  "Marasmius" = "小皮伞属",
+  "Mycena" = "小菇属",
+  "Panaeolus" = "斑褶菇属",
+  "Paxillus" = "桩菇属",
+  "Phellinus" = "针层孔菌属",
+  "Pholiota" = "鳞伞属",
+  "Pleurotus" = "侧耳属",
+  "Pluteus" = "光柄菇属",
+  "Polyporus" = "多孔菌属",
+  "Psathyrella" = "脆柄菇属",
+  "Ramaria" = "枝瑚菌属",
+  "Rhizopogon" = "须腹菌属",
+  "Russula" = "红菇属",
+  "Schizophyllum" = "裂褶菌属",
+  "Sebacina" = "蜡壳耳属",
+  "Suillus" = "乳牛肝菌属",
+  "Thelephora" = "革菌属",
+  "Trametes" = "栓菌属",
+  "Tricholoma" = "口蘑属",
+  "Tuber" = "块菌属",
+  "Volvariella" = "草菇属",
+
+  ## 兼容前文已出现过的属名
+  "Kazachstania" = "哈萨克酵母属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi phy Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属",
+  "Scedosporium" = "赛多孢属",
+  "Nothophoma" = "近茎点霉属",
+  "Agaricales_gen_Incertae_sedis" = "蘑菇目分类地位未定属",
+  "Neoascochyta" = "新壳二胞菌属",
+  "Neocallimastigaceae_gen_Incertae_sedis" = "新靓鞭菌科分类地位未定属",
+  "Furcasterigmium" = "叉梗壳属",
+  "Phaeosphaeriaceae_gen_Incertae_sedis" = "暗球腔菌科分类地位未定属",
+  "Neocallimastigomycota_gen_Incertae_sedis" = "新靓鞭菌门分类地位未定属",
+  "Ascobolus" = "粪盘菌属",
+  "Wickerhamomyces" = "威克汉姆酵母属"
+)
+
+to_cn <- function(x, map_vec) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(map_vec)
+  x2[hit] <- unname(map_vec[x2[hit]])
+  x2
+}
+
+## =========================
+## 5. 颜色设置
+## =========================
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 6. 工具函数：刻度
+## =========================
+
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else if (xmax >= 5) {
+    at <- c(0, round(xmax / 2, 1), xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+write_csv_base <- function(df, file) {
+  write.csv(
+    df,
+    file = file,
+    row.names = FALSE,
+    fileEncoding = "UTF-8"
+  )
+}
+
+## =========================
+## 7. 读取 metadata
+## =========================
+
+message("读取 no-elephant metadata ...")
+
+meta <- read.csv(
+  metadata_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_meta_cols <- c("sampleid", "status")
+missing_meta_cols <- setdiff(needed_meta_cols, colnames(meta))
+
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "metadata 缺少必要列：",
+    paste(missing_meta_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(meta), collapse = " | ")
+  )
+}
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(sampleid),
+    status_original = as.character(status),
+    status_clean = tolower(as.character(status)),
+    status_CN = unname(status_label_map[tolower(as.character(status))])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(status_CN),
+    status_CN %in% status_order_cn
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta2$status_CN <- factor(meta2$status_CN, levels = status_order_cn)
+
+sample_counts <- meta2 %>%
+  count(status_CN, name = "n_samples") %>%
+  tidyr::complete(
+    status_CN = factor(status_order_cn, levels = status_order_cn),
+    fill = list(n_samples = 0)
+  ) %>%
+  arrange(status_CN)
+
+write_csv(sample_counts, out_sample_counts)
+
+message("metadata 有效 status 样本数：", nrow(meta2))
+
+## =========================
+## 8. 读取大型真菌 SH taxonomy
+## =========================
+
+message("读取食源大型真菌 SH taxonomy ...")
+
+macro_tax <- read.csv(
+  macrofungi_SH_taxonomy_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_tax_cols <- c("SH", "genus")
+missing_tax_cols <- setdiff(needed_tax_cols, colnames(macro_tax))
+
+if (length(missing_tax_cols) > 0) {
+  stop(
+    "大型真菌 SH taxonomy 文件缺少必要列：",
+    paste(missing_tax_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(macro_tax), collapse = " | ")
+  )
+}
+
+## 优先使用 genus_clean；如果没有则使用 genus
+if ("genus_clean" %in% colnames(macro_tax)) {
+  genus_source_col <- "genus_clean"
+} else {
+  genus_source_col <- "genus"
+}
+
+macro_tax2 <- macro_tax %>%
+  transmute(
+    SH = as.character(SH),
+    genus = as.character(.data[[genus_source_col]])
+  ) %>%
+  filter(
+    !is.na(SH),
+    SH != "",
+    !is.na(genus),
+    genus != ""
+  ) %>%
+  distinct(SH, .keep_all = TRUE)
+
+message("大型真菌相关 SH taxonomy 记录数：", nrow(macro_tax2))
+message("大型真菌相关 SH 涉及属数：", length(unique(macro_tax2$genus)))
+
+## =========================
+## 9. 读取大型真菌 SH abundance table
+## =========================
+
+message("读取食源大型真菌 SH abundance table ...")
+
+macro_abund <- read.delim(
+  macrofungi_SH_abundance_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+if (!"SH" %in% colnames(macro_abund)) {
+  stop(
+    "食源大型真菌 SH abundance table 缺少 SH 列。\n当前列名为：",
+    paste(colnames(macro_abund), collapse = " | ")
+  )
+}
+
+macro_abund$SH <- as.character(macro_abund$SH)
+
+macro_abund <- macro_abund %>%
+  filter(SH %in% macro_tax2$SH)
+
+macro_tax2 <- macro_tax2 %>%
+  filter(SH %in% macro_abund$SH)
+
+message("丰度表中与 taxonomy 匹配的大型真菌 SH 数：", nrow(macro_abund))
+
+## =========================
+## 10. 构建属 × 样本丰度矩阵
+## =========================
+
+message("按属汇总食源大型真菌 SH reads ...")
+
+sample_cols <- setdiff(colnames(macro_abund), "SH")
+
+## 只保留 metadata 中存在的样本列
+common_samples <- intersect(sample_cols, meta2$sample_id)
+
+if (length(common_samples) == 0) {
+  stop("大型真菌 SH abundance table 与 metadata 没有匹配样本。")
+}
+
+macro_abund_use <- macro_abund[, c("SH", common_samples), drop = FALSE]
+
+macro_abund_use <- macro_abund_use[
+  match(macro_tax2$SH, macro_abund_use$SH),
+  ,
+  drop = FALSE
+]
+
+abund_mat <- as.matrix(macro_abund_use[, common_samples, drop = FALSE])
+storage.mode(abund_mat) <- "numeric"
+abund_mat[is.na(abund_mat)] <- 0
+
+rownames(abund_mat) <- macro_abund_use$SH
+
+genus_vec <- macro_tax2$genus[
+  match(rownames(abund_mat), macro_tax2$SH)
+]
+
+if (any(is.na(genus_vec))) {
+  stop("部分 SH 未匹配到 genus，脚本停止。")
+}
+
+genus_mat <- rowsum(abund_mat, group = genus_vec, reorder = FALSE)
+genus_mat <- genus_mat[rowSums(genus_mat) > 0, , drop = FALSE]
+
+message("汇总后食源大型真菌属数：", nrow(genus_mat))
+message("匹配样本数：", ncol(genus_mat))
+
+## =========================
+## 11. 计算样本内属水平相对多度
+## =========================
+
+message("计算样本内属水平相对多度 ...")
+
+sample_total <- colSums(genus_mat)
+
+zero_samples <- data.frame(
+  sample_id = names(sample_total)[sample_total <= 0],
+  total_macrofungi_abundance = sample_total[sample_total <= 0],
+  stringsAsFactors = FALSE
+)
+
+write_csv(zero_samples, out_zero_samples)
+
+message("大型真菌 reads 为 0 的样本数：", nrow(zero_samples))
+
+valid_samples <- names(sample_total)[sample_total > 0]
+
+if (length(valid_samples) == 0) {
+  stop("所有样本的大型真菌 reads 均为 0，无法作图。")
+}
+
+genus_rel_mat <- sweep(
+  genus_mat[, valid_samples, drop = FALSE],
+  2,
+  sample_total[valid_samples],
+  "/"
+) * 100
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% valid_samples)
+
+meta_use <- meta_use[match(valid_samples, meta_use$sample_id), , drop = FALSE]
+
+## =========================
+## 12. 按 status 计算平均相对多度
+## =========================
+
+message("按 status 计算属水平平均相对多度 ...")
+
+status_genus_mean_list <- list()
+
+for (st in status_order_cn) {
+  samples_st <- meta_use$sample_id[as.character(meta_use$status_CN) == st]
+
+  if (length(samples_st) == 0) {
+    tmp <- data.frame(
+      status_CN = st,
+      genus = rownames(genus_rel_mat),
+      mean_relative_abundance = 0,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    tmp <- data.frame(
+      status_CN = st,
+      genus = rownames(genus_rel_mat),
+      mean_relative_abundance = rowMeans(
+        genus_rel_mat[, samples_st, drop = FALSE],
+        na.rm = TRUE
+      ),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  status_genus_mean_list[[st]] <- tmp
+}
+
+status_genus_mean <- bind_rows(status_genus_mean_list) %>%
+  mutate(
+    genus_cn = to_cn(genus, genus_cn_map)
+  )
+
+write_csv(status_genus_mean, out_all_genus_mean)
+
+## =========================
+## 13. 筛选 Top20 优势属
+## =========================
+
+message("筛选 Top20 优势属 ...")
+
+top20_genus <- status_genus_mean %>%
+  group_by(genus, genus_cn) %>%
+  summarise(
+    sum_mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    mean_of_status_means = mean(mean_relative_abundance, na.rm = TRUE),
+    max_mean_relative_abundance = max(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(sum_mean_relative_abundance), genus) %>%
+  slice_head(n = top_n_genus)
+
+write_csv(top20_genus, out_top20_list)
+
+top_genus_order_en <- top20_genus$genus
+top_genus_order_cn <- top20_genus$genus_cn
+
+untranslated <- top20_genus %>%
+  filter(genus == genus_cn) %>%
+  select(genus, genus_cn, sum_mean_relative_abundance)
+
+write_csv(untranslated, out_untranslated)
+
+if (nrow(untranslated) > 0) {
+  message("注意：Top20 中存在未翻译属名，已输出检查表：", out_untranslated)
+}
+
+## =========================
+## 14. 输出 Top20 样本水平相对多度长表
+## =========================
+
+top20_rel_mat <- genus_rel_mat[
+  rownames(genus_rel_mat) %in% top_genus_order_en,
+  ,
+  drop = FALSE
+]
+
+top20_sample_rel <- as.data.frame(t(top20_rel_mat), check.names = FALSE)
+top20_sample_rel$sample_id <- rownames(top20_sample_rel)
+
+top20_sample_rel_long <- top20_sample_rel %>%
+  pivot_longer(
+    cols = -sample_id,
+    names_to = "genus",
+    values_to = "rel_abundance"
+  ) %>%
+  left_join(meta_use %>% select(sample_id, status_CN), by = "sample_id") %>%
+  mutate(
+    genus_cn = to_cn(genus, genus_cn_map)
+  ) %>%
+  select(sample_id, status_CN, genus, genus_cn, rel_abundance)
+
+write_csv(top20_sample_rel_long, out_sample_genus_rel)
+
+## =========================
+## 15. 构建弦图矩阵：status × Top20 属
+## 若多个英文属名映射到同一个中文名，按中文名合并
+## =========================
+
+message("构建弦图矩阵 ...")
+
+chord_df <- status_genus_mean %>%
+  filter(genus %in% top_genus_order_en) %>%
+  mutate(
+    status_CN = factor(status_CN, levels = status_order_cn),
+    genus = factor(genus, levels = top_genus_order_en),
+    genus_cn = factor(genus_cn, levels = unique(top_genus_order_cn))
+  ) %>%
+  group_by(status_CN, genus_cn) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(status_CN, genus_cn)
+
+genus_order_plot_all <- unique(as.character(chord_df$genus_cn))
+
+mat_wide <- chord_df %>%
+  tidyr::pivot_wider(
+    names_from = genus_cn,
+    values_from = mean_relative_abundance,
+    values_fill = 0
+  ) %>%
+  arrange(factor(status_CN, levels = status_order_cn))
+
+mat <- as.matrix(mat_wide[, setdiff(colnames(mat_wide), "status_CN"), drop = FALSE])
+rownames(mat) <- as.character(mat_wide$status_CN)
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 保存未过滤矩阵
+mat_out <- as.data.frame(mat, check.names = FALSE)
+mat_out <- cbind("驯养属性" = rownames(mat), mat_out)
+write_csv_base(mat_out, out_chord_matrix)
+
+## 极小连线过滤
+mat_plot <- mat
+mat_plot[mat_plot < min_link_value] <- 0
+
+mat_plot <- mat_plot[rowSums(mat_plot) > 0, , drop = FALSE]
+mat_plot <- mat_plot[, colSums(mat_plot) > 0, drop = FALSE]
+
+status_order_plot_cn <- rownames(mat_plot)
+genus_order_plot_cn <- colnames(mat_plot)
+
+mat_plot_out <- as.data.frame(mat_plot, check.names = FALSE)
+mat_plot_out <- cbind("驯养属性" = rownames(mat_plot), mat_plot_out)
+write_csv_base(mat_plot_out, out_chord_matrix_minlink)
+
+if (nrow(mat_plot) < 2 || ncol(mat_plot) < 2) {
+  stop("min_link_value 过滤后可绘制的分组或属过少，请降低 min_link_value。")
+}
+
+## =========================
+## 16. 属侧来源组成表
+## 每个属由各 status 贡献的比例，用于属扇区内侧色条
+## =========================
+
+genus_source_prop <- apply(mat_plot, 2, function(x) {
+  if (sum(x) == 0) {
+    rep(0, length(x))
+  } else {
+    x / sum(x)
+  }
+})
+
+genus_source_prop <- as.matrix(genus_source_prop)
+rownames(genus_source_prop) <- rownames(mat_plot)
+
+source_out <- as.data.frame(t(genus_source_prop), check.names = FALSE)
+source_out <- cbind("属" = rownames(source_out), source_out)
+write_csv_base(source_out, out_source_composition)
+
+## =========================
+## 17. 弦图函数：沿用图4-3最终 fontfix/namefix 版式
+## =========================
+
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_plot_cn)),
+    genus_order_plot_cn
+  )
+
+  grid_cols <- c(
+    genus_colors[genus_order_plot_cn],
+    status_colors[status_order_plot_cn]
+  )
+
+  link_col_mat <- matrix(
+    NA,
+    nrow = nrow(mat_plot),
+    ncol = ncol(mat_plot)
+  )
+
+  rownames(link_col_mat) <- rownames(mat_plot)
+  colnames(link_col_mat) <- colnames(mat_plot)
+
+  for (g in genus_order_plot_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(
+      genus_colors[g],
+      transparency = 0.45
+    )
+  }
+
+  n_status <- length(status_order_plot_cn)
+  n_genus <- length(genus_order_plot_cn)
+
+  ## 关键：先属，后分组，沿用图4-3最终样式
+  sector_order <- c(genus_order_plot_cn, status_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4.2, n_status - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.55, 1.55),
+    canvas.ylim = c(-1.55, 1.55),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat_plot,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.038,
+    preAllocateTracks = list(
+      list(track.height = 0.160),
+      list(track.height = 0.032)
+    )
+  )
+
+  ## Track 1: 刻度 + 径向标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      axis_h <- 0.08
+
+      at <- nice_axis_at(
+        sector,
+        xlim[2],
+        drop_sectors = character(0)
+      )
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.50
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.45),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.020 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.030 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.44,
+            col = "grey25"
+          )
+        }
+      }
+
+      if (sector %in% status_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.58,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 1.18,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.78,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧 status 贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_plot_cn) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[status_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (st in names(prop)) {
+            w <- total_width * prop[st]
+
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start,
+                0,
+                start + w,
+                1,
+                col = status_colors[st],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 18. 输出图
+## =========================
+
+message("绘制弦图 ...")
+
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+## =========================
+## 19. log
+## =========================
+
+sink(out_log)
+
+cat("Fig5-3 status macrofungi Top20 genus chord plot\n")
+cat("====================================================\n\n")
+
+cat("Input files:\n")
+cat("Metadata:", metadata_file, "\n")
+cat("Macrofungi SH abundance table:", macrofungi_SH_abundance_file, "\n")
+cat("Macrofungi SH taxonomy:", macrofungi_SH_taxonomy_file, "\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n")
+cat("No old elephant-containing version\n")
+cat("No old vsearch 97% SH results\n\n")
+
+cat("Analysis logic:\n")
+cat("Use already filtered macrofungi-related SH table from Fig5-1.\n")
+cat("Do not re-read BIOM.\n")
+cat("Do not re-match macrofungi genera.\n")
+cat("Aggregate macrofungi-related SH reads to genus level.\n")
+cat("Calculate sample-level genus relative abundance first, then average by status.\n")
+cat("Relative abundance denominator: total macrofungi-related SH reads in each sample.\n")
+cat("Top20 genera selected by sum of mean relative abundance across status groups.\n")
+cat("Chord width represents status × genus mean relative abundance.\n")
+cat("Links smaller than min_link_value are set to zero for plotting.\n")
+cat("Plot style follows Fig4-3 final fontfix/namefix radial-label chord plot.\n\n")
+
+cat("Fixed status order:\n")
+print(status_order_cn)
+
+cat("\nmin_link_value:", min_link_value, "\n")
+cat("Top N genus:", top_n_genus, "\n\n")
+
+cat("Sample counts from metadata:\n")
+print(sample_counts)
+
+cat("\nMatched samples in macrofungi SH table:", length(common_samples), "\n")
+cat("Samples with zero macrofungi reads:", nrow(zero_samples), "\n")
+cat("Samples used for relative abundance:", length(valid_samples), "\n\n")
+
+cat("Macrofungi SH taxonomy records:", nrow(macro_tax2), "\n")
+cat("Macrofungi SH abundance rows after taxonomy matching:", nrow(macro_abund), "\n")
+cat("Genus count after aggregating SH reads:", nrow(genus_mat), "\n\n")
+
+cat("Top20 genera:\n")
+print(top20_genus)
+
+cat("\nUntranslated Top20 genera:\n")
+print(untranslated)
+
+cat("\nChord matrix before min-link filtering:\n")
+print(mat_out)
+
+cat("\nChord matrix after min-link filtering:\n")
+print(mat_plot_out)
+
+cat("\nGenus source composition:\n")
+print(source_out)
+
+cat("\nStatus colors:\n")
+print(status_colors)
+
+cat("\nGenus translation map stored in script:\n")
+print(genus_cn_map)
+
+cat("\nOutput files:\n")
+cat("PNG:", out_chord_png, "\n")
+cat("PDF:", out_chord_pdf, "\n")
+cat("All genus mean:", out_all_genus_mean, "\n")
+cat("Top20 list:", out_top20_list, "\n")
+cat("Chord matrix:", out_chord_matrix, "\n")
+cat("Chord matrix minlink:", out_chord_matrix_minlink, "\n")
+cat("Source composition:", out_source_composition, "\n")
+cat("Sample counts:", out_sample_counts, "\n")
+cat("Zero samples:", out_zero_samples, "\n")
+cat("Sample genus relative abundance:", out_sample_genus_rel, "\n")
+cat("Untranslated genera:", out_untranslated, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Top20 list:\n", out_top20_list, "\n", sep = "")
+cat("Chord matrix:\n", out_chord_matrix_minlink, "\n", sep = "")
+cat("Source composition:\n", out_source_composition, "\n", sep = "")
+cat("Untranslated genera:\n", out_untranslated, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+#运行脚本
+#第一步：新建重画脚本
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/11_redraw_status_macrofungi_top20_genus_chord_v2_namefix.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5 - Fig5-3 重画脚本 v2
+##
+## 目的：
+##   不重算 Top20 属；
+##   不重算样本内相对多度；
+##   不改变弦宽矩阵；
+##   只补充 Top20 属中文译名并重画图。
+##
+## 本次新增译名：
+##   Trichoderma -> 木霉属
+##   Monascus -> 红曲霉属
+##   Ustilago -> 黑粉菌属
+##   Beauveria -> 白僵菌属
+##   Coniochaeta -> 锥毛壳属
+##   Ramularia -> 柱隔孢属
+##   Claviceps -> 麦角菌属
+##   Simplicillium -> 蜡蚧菌属
+##   Sphaerobolus -> 弹球菌属
+##   Paecilomyces -> 拟青霉属
+##   Parasola -> 近地伞属
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Redraw Fig5-3 status macrofungi Top20 genus chord, namefix v2\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. R 包路径与依赖
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "circlize",
+  "showtext",
+  "sysfonts"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(circlize)
+  library(showtext)
+  library(sysfonts)
+})
+
+## =========================
+## 1. 中文字体
+## =========================
+
+cn_font <- "CNFont"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+sysfonts::font_add(family = cn_font, regular = font_file)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 2. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "status_macrofungi_top20_genus_chord_v1"
+)
+
+mat_input <- file.path(
+  in_dir,
+  "status_macrofungi_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN.csv"
+)
+
+source_input <- file.path(
+  in_dir,
+  "status_macrofungi_top20_genus_source_composition_for_chord_no_elephant_CN.csv"
+)
+
+out_chord_png <- file.path(
+  in_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN_v2_namefix.png"
+)
+
+out_chord_pdf <- file.path(
+  in_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN_v2_namefix.pdf"
+)
+
+out_matrix_fixed <- file.path(
+  in_dir,
+  "status_macrofungi_top20_genus_chord_matrix_minlink_filtered_no_elephant_CN_v2_namefix.csv"
+)
+
+out_source_fixed <- file.path(
+  in_dir,
+  "status_macrofungi_top20_genus_source_composition_for_chord_no_elephant_CN_v2_namefix.csv"
+)
+
+out_untranslated_after <- file.path(
+  in_dir,
+  "status_macrofungi_top20_genus_untranslated_names_after_v2_namefix.csv"
+)
+
+out_log <- file.path(
+  in_dir,
+  "Fig5_3_status_macrofungi_top20_genus_chord_no_elephant_CN_v2_namefix_log.txt"
+)
+
+if (!file.exists(mat_input)) {
+  stop("找不到已有弦图矩阵：", mat_input)
+}
+
+if (!file.exists(source_input)) {
+  warning("找不到已有属侧来源组成表，将根据矩阵重新生成：", source_input)
+}
+
+cat("输入矩阵：", mat_input, "\n", sep = "")
+cat("输入来源组成表：", source_input, "\n", sep = "")
+
+## =========================
+## 3. 固定顺序与颜色
+## =========================
+
+status_order_cn <- c("家养", "野生", "圈养野生")
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "野生" = "#00A087",
+  "圈养野生" = "#4DBBD5"
+)
+
+genus_base_cols <- c(
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+  "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+  "#CCEBC5", "#FFED6F", "#A6CEE3", "#1F78B4", "#B2DF8A",
+  "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00"
+)
+
+## =========================
+## 4. 属名中文映射
+## =========================
+
+genus_rename_map <- c(
+  "Agaricus" = "蘑菇属",
+  "Albatrellus" = "地花菌属",
+  "Amanita" = "鹅膏属",
+  "Armillaria" = "蜜环菌属",
+  "Aspergillus" = "曲霉属",
+  "Boletus" = "牛肝菌属",
+  "Cantharellus" = "鸡油菌属",
+  "Coprinellus" = "小鬼伞属",
+  "Coprinopsis" = "拟鬼伞属",
+  "Coprinus" = "鬼伞属",
+  "Cortinarius" = "丝膜菌属",
+  "Craterellus" = "喇叭菌属",
+  "Fomitopsis" = "拟层孔菌属",
+  "Ganoderma" = "灵芝属",
+  "Gymnopus" = "小皮伞属",
+  "Hebeloma" = "丝盖伞属",
+  "Hericium" = "猴头菌属",
+  "Hygrocybe" = "蜡伞属",
+  "Hypholoma" = "簇伞属",
+  "Inocybe" = "丝盖伞属",
+  "Laccaria" = "蜡蘑属",
+  "Lactarius" = "乳菇属",
+  "Leccinum" = "疣柄牛肝菌属",
+  "Lentinula" = "香菇属",
+  "Lepiota" = "环柄菇属",
+  "Lycoperdon" = "马勃属",
+  "Marasmius" = "小皮伞属",
+  "Mycena" = "小菇属",
+  "Panaeolus" = "斑褶菇属",
+  "Paxillus" = "桩菇属",
+  "Phellinus" = "针层孔菌属",
+  "Pholiota" = "鳞伞属",
+  "Pleurotus" = "侧耳属",
+  "Pluteus" = "光柄菇属",
+  "Polyporus" = "多孔菌属",
+  "Psathyrella" = "脆柄菇属",
+  "Ramaria" = "枝瑚菌属",
+  "Rhizopogon" = "须腹菌属",
+  "Russula" = "红菇属",
+  "Schizophyllum" = "裂褶菌属",
+  "Sebacina" = "蜡壳耳属",
+  "Suillus" = "乳牛肝菌属",
+  "Thelephora" = "革菌属",
+  "Trametes" = "栓菌属",
+  "Tricholoma" = "口蘑属",
+  "Tuber" = "块菌属",
+  "Volvariella" = "草菇属",
+
+  ## 本次新增 / 修正
+  "Trichoderma" = "木霉属",
+  "Monascus" = "红曲霉属",
+  "Ustilago" = "黑粉菌属",
+  "Beauveria" = "白僵菌属",
+  "Coniochaeta" = "锥毛壳属",
+  "Ramularia" = "柱隔孢属",
+  "Claviceps" = "麦角菌属",
+  "Simplicillium" = "蜡蚧菌属",
+  "Sphaerobolus" = "弹球菌属",
+  "Paecilomyces" = "拟青霉属",
+  "Parasola" = "近地伞属",
+
+  ## 前文章节已有映射
+  "Kazachstania" = "哈萨克酵母属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi phy Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属",
+  "Scedosporium" = "赛多孢属",
+  "Nothophoma" = "近茎点霉属",
+  "Agaricales_gen_Incertae_sedis" = "蘑菇目分类地位未定属",
+  "Neoascochyta" = "新壳二胞菌属",
+  "Neocallimastigaceae_gen_Incertae_sedis" = "新靓鞭菌科分类地位未定属",
+  "Furcasterigmium" = "叉梗壳属",
+  "Phaeosphaeriaceae_gen_Incertae_sedis" = "暗球腔菌科分类地位未定属",
+  "Neocallimastigomycota_gen_Incertae_sedis" = "新靓鞭菌门分类地位未定属",
+  "Ascobolus" = "粪盘菌属",
+  "Wickerhamomyces" = "威克汉姆酵母属"
+)
+
+rename_genus <- function(x) {
+  x2 <- as.character(x)
+  hit <- x2 %in% names(genus_rename_map)
+  x2[hit] <- unname(genus_rename_map[x2[hit]])
+  x2
+}
+
+## =========================
+## 5. 工具函数：刻度
+## =========================
+
+fmt_tick <- function(x) {
+  ifelse(
+    abs(x - round(x)) < 1e-6,
+    as.character(round(x)),
+    sprintf("%.1f", x)
+  )
+}
+
+nice_axis_at <- function(sector, xmax, drop_sectors = character(0)) {
+  if (is.na(xmax) || xmax <= 0) return(NULL)
+
+  if (xmax > 20) {
+    at <- seq(0, floor(xmax / 20) * 20, by = 20)
+    if (length(at) == 0) at <- 0
+    if (abs(max(at) - xmax) > 1e-6) {
+      at <- c(at, xmax)
+    }
+  } else if (xmax >= 15) {
+    at <- c(0, 10, xmax)
+  } else if (xmax >= 5) {
+    at <- c(0, round(xmax / 2, 1), xmax)
+  } else {
+    at <- c(0, xmax)
+  }
+
+  at <- at[at >= 0 & at <= xmax]
+  at <- unique(round(at, 6))
+
+  if (sector %in% drop_sectors && length(at) >= 3) {
+    at <- at[-(length(at) - 1)]
+  }
+
+  at
+}
+
+nice_axis_lab <- function(at) {
+  if (is.null(at) || length(at) == 0) return(character(0))
+  fmt_tick(at)
+}
+
+## =========================
+## 6. 读取弦图矩阵，并统一属名
+## =========================
+
+mat_df <- read.csv(
+  mat_input,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+if (!"驯养属性" %in% colnames(mat_df)) {
+  colnames(mat_df)[1] <- "驯养属性"
+}
+
+missing_status <- setdiff(status_order_cn, mat_df$驯养属性)
+
+if (length(missing_status) > 0) {
+  stop("矩阵缺少以下分组：", paste(missing_status, collapse = ", "))
+}
+
+mat_df <- mat_df[match(status_order_cn, mat_df$驯养属性), , drop = FALSE]
+
+old_genus_names <- setdiff(colnames(mat_df), "驯养属性")
+new_genus_names <- rename_genus(old_genus_names)
+
+mat <- as.matrix(mat_df[, old_genus_names, drop = FALSE])
+rownames(mat) <- mat_df$驯养属性
+colnames(mat) <- new_genus_names
+storage.mode(mat) <- "numeric"
+mat[is.na(mat)] <- 0
+
+## 如果翻译后出现重复中文属名，合并同名列
+if (any(duplicated(colnames(mat)))) {
+  mat <- rowsum(t(mat), group = colnames(mat))
+  mat <- t(mat)
+}
+
+mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+mat <- mat[, colSums(mat) > 0, drop = FALSE]
+
+status_order_plot_cn <- rownames(mat)
+genus_order_plot_cn <- colnames(mat)
+
+write.csv(
+  cbind("驯养属性" = rownames(mat), as.data.frame(mat, check.names = FALSE)),
+  out_matrix_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 检查是否仍有未翻译属名
+## =========================
+
+still_untranslated <- setdiff(old_genus_names, names(genus_rename_map))
+
+untranslated_after <- data.frame(
+  genus = still_untranslated,
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  untranslated_after,
+  out_untranslated_after,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (nrow(untranslated_after) > 0) {
+  message("仍有未翻译属名，已输出：", out_untranslated_after)
+} else {
+  message("Top20 属名已全部完成中文映射。")
+}
+
+## =========================
+## 8. 读取来源组成表；若不匹配，按矩阵重建
+## =========================
+
+rebuild_source <- TRUE
+genus_source_prop <- NULL
+
+if (file.exists(source_input)) {
+  source_df <- read.csv(
+    source_input,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  if (!"属" %in% colnames(source_df)) {
+    colnames(source_df)[1] <- "属"
+  }
+
+  source_df$属 <- rename_genus(source_df$属)
+
+  source_num_cols <- intersect(colnames(source_df), status_order_cn)
+
+  if (length(source_num_cols) == length(status_order_cn)) {
+    source_df2 <- source_df %>%
+      group_by(属) %>%
+      summarise(
+        across(all_of(source_num_cols), ~sum(.x, na.rm = TRUE)),
+        .groups = "drop"
+      )
+
+    source_mat <- as.matrix(source_df2[, status_order_cn, drop = FALSE])
+    rownames(source_mat) <- source_df2$属
+    storage.mode(source_mat) <- "numeric"
+    source_mat[is.na(source_mat)] <- 0
+
+    source_try <- t(source_mat)
+
+    source_has_all <- all(
+      status_order_plot_cn %in% rownames(source_try)
+    ) && all(
+      genus_order_plot_cn %in% colnames(source_try)
+    )
+
+    if (source_has_all) {
+      genus_source_prop <- source_try[
+        status_order_plot_cn,
+        genus_order_plot_cn,
+        drop = FALSE
+      ]
+      rebuild_source <- FALSE
+    }
+  }
+}
+
+if (rebuild_source) {
+  message("来源组成表与矩阵列名不完全一致，已根据弦图矩阵重新计算属侧来源组成。")
+
+  genus_source_prop <- apply(mat, 2, function(x) {
+    if (sum(x) == 0) {
+      rep(0, length(x))
+    } else {
+      x / sum(x)
+    }
+  })
+
+  genus_source_prop <- as.matrix(genus_source_prop)
+  rownames(genus_source_prop) <- rownames(mat)
+}
+
+write.csv(
+  cbind("属" = colnames(genus_source_prop), as.data.frame(t(genus_source_prop), check.names = FALSE)),
+  out_source_fixed,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 9. 弦图函数：沿用 Fig4-3 最终 fontfix/namefix 版参数
+## =========================
+
+plot_chord_cn_radial <- function(outfile, type = c("png", "pdf")) {
+  type <- match.arg(type)
+
+  if (type == "png") {
+    png(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      units = "in",
+      res = 600,
+      bg = "white",
+      type = "cairo"
+    )
+  } else {
+    cairo_pdf(
+      outfile,
+      width = 12.5,
+      height = 12.5,
+      family = cn_font,
+      bg = "white"
+    )
+  }
+
+  par(family = cn_font)
+
+  circos.clear()
+
+  genus_colors <- setNames(
+    rep(genus_base_cols, length.out = length(genus_order_plot_cn)),
+    genus_order_plot_cn
+  )
+
+  grid_cols <- c(
+    genus_colors[genus_order_plot_cn],
+    status_colors[status_order_plot_cn]
+  )
+
+  link_col_mat <- matrix(
+    NA,
+    nrow = nrow(mat),
+    ncol = ncol(mat)
+  )
+
+  rownames(link_col_mat) <- rownames(mat)
+  colnames(link_col_mat) <- colnames(mat)
+
+  for (g in genus_order_plot_cn) {
+    link_col_mat[, g] <- circlize::add_transparency(
+      genus_colors[g],
+      transparency = 0.45
+    )
+  }
+
+  n_status <- length(status_order_plot_cn)
+  n_genus <- length(genus_order_plot_cn)
+
+  sector_order <- c(genus_order_plot_cn, status_order_plot_cn)
+
+  gap_after <- c(
+    rep(1.4, n_genus - 1),
+    18,
+    rep(4.2, n_status - 1),
+    18
+  )
+
+  circos.par(
+    start.degree = 92,
+    gap.after = gap_after,
+    track.margin = c(0.002, 0.002),
+    cell.padding = c(0, 0, 0, 0),
+    canvas.xlim = c(-1.55, 1.55),
+    canvas.ylim = c(-1.55, 1.55),
+    points.overflow.warning = FALSE
+  )
+
+  chordDiagram(
+    x = mat,
+    order = sector_order,
+    grid.col = grid_cols,
+    col = link_col_mat,
+    transparency = 0,
+    directional = 0,
+    annotationTrack = c("grid"),
+    annotationTrackHeight = 0.038,
+    preAllocateTracks = list(
+      list(track.height = 0.160),
+      list(track.height = 0.032)
+    )
+  )
+
+  ## Track 1: 刻度 + 径向标签
+  circos.trackPlotRegion(
+    track.index = 1,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      xrange <- xlim[2] - xlim[1]
+
+      axis_h <- 0.08
+
+      at <- nice_axis_at(
+        sector,
+        xlim[2],
+        drop_sectors = character(0)
+      )
+
+      circos.lines(
+        x = c(xlim[1], xlim[2]),
+        y = c(axis_h, axis_h),
+        col = "grey30",
+        lwd = 0.50
+      )
+
+      if (!is.null(at) && length(at) >= 2) {
+        circos.axis(
+          h = axis_h,
+          major.at = at,
+          labels = FALSE,
+          major.tick.length = mm_y(0.45),
+          col = "grey30",
+          minor.ticks = 0,
+          direction = "outside"
+        )
+
+        labs <- nice_axis_lab(at)
+
+        for (ii in seq_along(at)) {
+          xx <- at[ii]
+
+          if (abs(xx - xlim[1]) < 1e-8) {
+            xx2 <- xlim[1] + 0.020 * xrange
+          } else if (abs(xx - xlim[2]) < 1e-8) {
+            xx2 <- xlim[2] - 0.030 * xrange
+          } else {
+            xx2 <- xx
+          }
+
+          circos.text(
+            x = xx2,
+            y = 0.18,
+            labels = labs[ii],
+            facing = "clockwise",
+            niceFacing = TRUE,
+            adj = c(0.5, 0.5),
+            cex = 0.44,
+            col = "grey25"
+          )
+        }
+      }
+
+      if (sector %in% status_order_plot_cn) {
+        circos.text(
+          x = mean(xlim),
+          y = 0.58,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 1.18,
+          font = 2,
+          col = "black"
+        )
+      } else {
+        circos.text(
+          x = mean(xlim),
+          y = 0.56,
+          labels = sector,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(0, 0.5),
+          cex = 0.78,
+          font = 1,
+          col = "black"
+        )
+      }
+    }
+  )
+
+  ## Track 2: 属扇区内侧 status 贡献组成条
+  circos.trackPlotRegion(
+    track.index = 2,
+    ylim = c(0, 1),
+    bg.border = NA,
+    panel.fun = function(x, y) {
+      sector <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+
+      if (sector %in% genus_order_plot_cn) {
+        prop <- genus_source_prop[, sector]
+        prop <- prop[status_order_plot_cn]
+        prop[is.na(prop)] <- 0
+
+        if (sum(prop) > 0) {
+          start <- xlim[1]
+          total_width <- diff(xlim)
+
+          for (st in names(prop)) {
+            w <- total_width * prop[st]
+
+            if (!is.na(w) && w > 0) {
+              circos.rect(
+                start,
+                0,
+                start + w,
+                1,
+                col = status_colors[st],
+                border = NA
+              )
+              start <- start + w
+            }
+          }
+        }
+      }
+    }
+  )
+
+  dev.off()
+  circos.clear()
+}
+
+## =========================
+## 10. 输出图
+## =========================
+
+plot_chord_cn_radial(out_chord_png, "png")
+plot_chord_cn_radial(out_chord_pdf, "pdf")
+
+## =========================
+## 11. log
+## =========================
+
+sink(out_log)
+
+cat("Fig5-3 status macrofungi Top20 genus chord redraw: v2 namefix\n")
+cat("=============================================================\n\n")
+
+cat("This script does NOT recalculate Top20 genera or relative abundance.\n")
+cat("It reads the existing status macrofungi chord matrix and redraws the chord plot.\n\n")
+
+cat("Input matrix:\n", mat_input, "\n", sep = "")
+cat("Input source composition:\n", source_input, "\n", sep = "")
+cat("Source composition rebuilt from matrix:", rebuild_source, "\n\n")
+
+cat("Font file:\n", font_file, "\n\n", sep = "")
+
+cat("Name replacements:\n")
+print(genus_rename_map)
+
+cat("\nStatus order:\n")
+print(status_order_plot_cn)
+
+cat("\nGenus order after name replacement:\n")
+print(genus_order_plot_cn)
+
+cat("\nUntranslated after namefix:\n")
+print(untranslated_after)
+
+cat("\nChord matrix used for plot:\n")
+print(cbind("驯养属性" = rownames(mat), as.data.frame(mat, check.names = FALSE)))
+
+cat("\nSource composition used for genus inner bars:\n")
+print(cbind("属" = colnames(genus_source_prop), as.data.frame(t(genus_source_prop), check.names = FALSE)))
+
+cat("\nOutput files:\n")
+cat("PNG:", out_chord_png, "\n")
+cat("PDF:", out_chord_pdf, "\n")
+cat("Renamed matrix:", out_matrix_fixed, "\n")
+cat("Source composition:", out_source_fixed, "\n")
+cat("Untranslated after:", out_untranslated_after, "\n")
+
+sink()
+
+cat("\nDone!\n")
+cat("没有重新计算 Top20 属或相对多度，只补充中文译名并重画弦图。\n")
+cat("PNG:\n", out_chord_png, "\n", sep = "")
+cat("PDF:\n", out_chord_pdf, "\n", sep = "")
+cat("Renamed matrix:\n", out_matrix_fixed, "\n", sep = "")
+cat("Source composition:\n", out_source_fixed, "\n", sep = "")
+cat("Untranslated after:\n", out_untranslated_after, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+#运行脚本
+Rscript scripts/chapter5_macrofungi/11_redraw_status_macrofungi_top20_genus_chord_v2_namefix.R
