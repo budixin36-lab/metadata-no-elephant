@@ -1,0 +1,1429 @@
+#先做一个很短的环境和文件检查脚本，确认包、路径、sheet、表头都没问题，然后我再给你正式整理大型真菌属名录的脚本。
+#这一步只检查，不输出最终名录、不分析。
+############################################################
+## Chapter 5 - 大型真菌属级名录整理前环境检查
+## 只检查 R 环境、R 包、输入文件、Excel sheet 和表头
+## 不整理名录、不输出最终结果、不读取 SH 表
+############################################################
+
+rm(list = ls())
+
+cat("========== R environment ==========\n")
+cat("R version:\n")
+print(R.version.string)
+
+cat("\n.libPaths():\n")
+print(.libPaths())
+
+cat("\nWorking directory:\n")
+print(getwd())
+
+cat("\n========== Check packages ==========\n")
+
+needed_pkgs <- c("readxl", "dplyr", "tidyr", "stringr", "purrr", "readr")
+
+pkg_check <- data.frame(
+  package = needed_pkgs,
+  installed = sapply(needed_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再继续：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+library(readxl)
+
+cat("\n========== Check input files ==========\n")
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+input_dir <- file.path(project_dir, "input_macrofungi_reference")
+
+mst_file <- file.path(input_dir, "MSTEM_macrofungi_genera.xlsx")
+
+cadotte_s1_file <- file.path(
+  input_dir,
+  "Table S1 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+cadotte_s2_file <- file.path(
+  input_dir,
+  "Table S2 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+lee_file <- file.path(
+  input_dir,
+  "Seasonal Variation in the Diet Composition of Wild Boars (Sus scrofa).xlsx"
+)
+
+files_to_check <- data.frame(
+  file_label = c(
+    "MSTEM",
+    "Cadotte_S1",
+    "Cadotte_S2",
+    "Lee_wild_boar"
+  ),
+  file_path = c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file
+  ),
+  exists = file.exists(c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+print(files_to_check)
+
+if (any(!files_to_check$exists)) {
+  cat("\n以下文件不存在，请检查是否已经放入 input_macrofungi_reference 目录：\n")
+  print(files_to_check[!files_to_check$exists, ])
+  stop("Input file check failed.")
+}
+
+cat("\n========== Check Excel sheets ==========\n")
+
+cat("\nMSTEM sheets:\n")
+print(excel_sheets(mst_file))
+
+cat("\nCadotte S1 sheets:\n")
+print(excel_sheets(cadotte_s1_file))
+
+cat("\nCadotte S2 sheets:\n")
+print(excel_sheets(cadotte_s2_file))
+
+cat("\nLee wild boar sheets:\n")
+lee_sheets <- excel_sheets(lee_file)
+print(lee_sheets)
+
+if (!"Macrofungi" %in% lee_sheets) {
+  stop("Lee 文件中没有找到名为 Macrofungi 的 sheet。")
+}
+
+cat("\n========== Check column names ==========\n")
+
+cat("\nMSTEM first sheet column names:\n")
+mst_head <- read_excel(mst_file, n_max = 3)
+print(names(mst_head))
+print(mst_head)
+
+cat("\nCadotte S1 column names:\n")
+cadotte_s1_head <- read_excel(cadotte_s1_file, n_max = 3)
+print(names(cadotte_s1_head))
+print(cadotte_s1_head)
+
+cat("\nCadotte S2 column names:\n")
+cadotte_s2_head <- read_excel(cadotte_s2_file, n_max = 3)
+print(names(cadotte_s2_head))
+print(cadotte_s2_head)
+
+cat("\nLee Macrofungi: try skip = 0, first 5 rows:\n")
+lee_try0 <- read_excel(lee_file, sheet = "Macrofungi", n_max = 5)
+print(names(lee_try0))
+print(lee_try0)
+
+cat("\nLee Macrofungi: try skip = 1, first 5 rows:\n")
+lee_try1 <- read_excel(lee_file, sheet = "Macrofungi", skip = 1, n_max = 5)
+print(names(lee_try1))
+print(lee_try1)
+
+cat("\n========== Basic expected columns ==========\n")
+
+cat("\nMSTEM has Genus column? ")
+print("Genus" %in% names(mst_head))
+
+cat("\nCadotte S1 has Species column? ")
+print("Species" %in% names(cadotte_s1_head))
+
+cat("\nCadotte S2 has Species column? ")
+print("Species" %in% names(cadotte_s2_head))
+
+cat("\nLee Macrofungi with skip = 1 has Genus column? ")
+print("Genus" %in% names(lee_try1))
+
+cat("\n========== Check finished ==========\n")
+cat("如果上面几个 expected columns 都是 TRUE，就可以继续写正式整理脚本。\n")
+#你现在按这个方式操作：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/00_check_macrofungi_environment.R
+#粘进去，保存后运行：
+Rscript scripts/chapter5_macrofungi/00_check_macrofungi_environment.R
+#这次脚本是正式版：scripts/chapter5_macrofungi/01_build_macrofungi_genus_reference.R
+#它只整理大型真菌属级名录，不读取 metadata，不读取 SH abundance table，也不和肠道真菌属取交集。你的环境检查已经确认 R 4.3.3、/mnt/d/Rlibs、所需 R 包、4 个 Excel 文件、Lee 的 Macrofungi sheet 和关键列名都正常，所以可以进入这一步。
+#第一步：在 WSL 终端运行这几行
+#先复制下面这几行到 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/01_build_macrofungi_genus_reference.R
+#运行后会打开 nano 编辑器。
+#第二步：把下面完整 R 脚本粘贴进 nano
+#从这里开始复制，一直到脚本结尾都复制进去。
+############################################################
+## Chapter 5 - 构建最终大型真菌属级参考名录
+##
+## 数据来源：
+## 1. MSTEM 平台提取的大型真菌属
+## 2. Cadotte et al. 2021 白尾鹿食菌研究 Table S1 + S2
+## 3. Lee et al. 2025 韩国野猪食性研究 Macrofungi sheet
+##
+## 目的：
+## 将三类来源整理为属级 Genus 名录，并取并集，
+## 得到最终大型真菌属级参考名录。
+##
+## 注意：
+## 本脚本只整理大型真菌属级名录；
+## 不读取 metadata；
+## 不读取 SH abundance table；
+## 不与有蹄类动物肠道真菌属取交集；
+## 不做图；
+## 不做 alpha/beta 多样性分析。
+############################################################
+
+rm(list = ls())
+
+cat("============================================================\n")
+cat("Chapter 5 - Build macrofungi genus reference list\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. 加载 R 包
+## =========================
+
+needed_pkgs <- c("readxl", "dplyr", "tidyr", "stringr", "purrr", "readr", "tibble")
+
+pkg_check <- data.frame(
+  package = needed_pkgs,
+  installed = sapply(needed_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(readr)
+library(tibble)
+
+## =========================
+## 1. 路径设置
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+input_dir <- file.path(project_dir, "input_macrofungi_reference")
+
+output_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "macrofungi_reference_genus_list_v1"
+)
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+mst_file <- file.path(input_dir, "MSTEM_macrofungi_genera.xlsx")
+
+cadotte_s1_file <- file.path(
+  input_dir,
+  "Table S1 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+cadotte_s2_file <- file.path(
+  input_dir,
+  "Table S2 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+lee_file <- file.path(
+  input_dir,
+  "Seasonal Variation in the Diet Composition of Wild Boars (Sus scrofa).xlsx"
+)
+
+cat("\n========== Input files ==========\n")
+
+files_to_check <- tibble(
+  file_label = c(
+    "MSTEM",
+    "Cadotte_S1",
+    "Cadotte_S2",
+    "Lee_wild_boar"
+  ),
+  file_path = c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file
+  ),
+  exists = file.exists(c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file
+  ))
+)
+
+print(files_to_check)
+
+if (any(!files_to_check$exists)) {
+  cat("\n以下输入文件不存在，请检查路径或文件名：\n")
+  print(files_to_check %>% filter(!exists))
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(output_dir, "\n\n")
+
+## =========================
+## 2. 通用函数
+## =========================
+
+clean_text <- function(x) {
+  x %>%
+    as.character() %>%
+    stringr::str_trim() %>%
+    stringr::str_replace_all("\\s+", " ")
+}
+
+clean_genus_name <- function(x) {
+  x %>%
+    clean_text() %>%
+    stringr::str_replace_all("×", "x")
+}
+
+extract_genus_from_taxon <- function(x) {
+  ## 从物种名、属级记录或带 sp./aff. 的记录中提取第一个拉丁属名
+  ## 示例：
+  ## "Agaricus sp. GAL12215" -> "Agaricus"
+  ## "Albatrellus caeruleoporus" -> "Albatrellus"
+  ## "Amphinema aff. byssoides UC2022834" -> "Amphinema"
+  ## "Agaricus sp.;Agaricus sp." 会先拆分，再分别提取
+  x %>%
+    clean_text() %>%
+    stringr::str_extract("^[A-Z][A-Za-z-]+")
+}
+
+filter_valid_genus <- function(df, genus_col = "Genus") {
+  df %>%
+    mutate(
+      Genus = clean_genus_name(.data[[genus_col]])
+    ) %>%
+    filter(
+      !is.na(Genus),
+      Genus != "",
+      !Genus %in% c(
+        "Total",
+        "Other",
+        "Others",
+        "Unclassified",
+        "Unidentified",
+        "Unknown",
+        "uncultured",
+        "Uncultured",
+        "Fungi",
+        "Fungal",
+        "NA",
+        "N/A"
+      ),
+      stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$")
+    )
+}
+
+write_csv_utf8 <- function(x, path) {
+  readr::write_csv(x, path)
+  cat("Saved: ", path, "\n", sep = "")
+}
+
+## =========================
+## 3. 读取并整理 MSTEM 大型真菌属
+## =========================
+
+cat("\n========== 1. MSTEM macrofungi genera ==========\n")
+
+mst_raw <- readxl::read_excel(mst_file)
+
+cat("MSTEM columns:\n")
+print(names(mst_raw))
+
+if (!"Genus" %in% names(mst_raw)) {
+  stop("MSTEM 文件中未找到 Genus 列，请检查表头。")
+}
+
+mst_clean <- mst_raw %>%
+  filter_valid_genus(genus_col = "Genus") %>%
+  distinct(Genus) %>%
+  mutate(
+    source_MSTEM = TRUE
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  mst_clean,
+  file.path(output_dir, "macrofungi_genera_MSTEM_cleaned.csv")
+)
+
+cat("MSTEM cleaned genera number: ", nrow(mst_clean), "\n", sep = "")
+
+## =========================
+## 4. 读取并整理 Cadotte 白尾鹿 S1/S2
+## =========================
+
+cat("\n========== 2. Cadotte deer Table S1 + S2 ==========\n")
+
+cadotte_s1_raw <- readxl::read_excel(cadotte_s1_file)
+cadotte_s2_raw <- readxl::read_excel(cadotte_s2_file)
+
+cat("Cadotte S1 columns:\n")
+print(names(cadotte_s1_raw))
+
+cat("Cadotte S2 columns:\n")
+print(names(cadotte_s2_raw))
+
+if (!"Species" %in% names(cadotte_s1_raw)) {
+  stop("Cadotte S1 文件中未找到 Species 列，请检查表头。")
+}
+
+if (!"Species" %in% names(cadotte_s2_raw)) {
+  stop("Cadotte S2 文件中未找到 Species 列，请检查表头。")
+}
+
+cadotte_species_raw <- bind_rows(
+  cadotte_s1_raw %>%
+    mutate(source_table = "Cadotte_Table_S1_2014"),
+  cadotte_s2_raw %>%
+    mutate(source_table = "Cadotte_Table_S2_2015")
+) %>%
+  mutate(
+    Species_original_cell = as.character(Species)
+  ) %>%
+  filter(
+    !is.na(Species_original_cell),
+    stringr::str_trim(Species_original_cell) != ""
+  )
+
+cadotte_species_long <- cadotte_species_raw %>%
+  ## 有些单元格内多个候选名用分号连接，先拆成多行
+  tidyr::separate_rows(Species_original_cell, sep = ";") %>%
+  mutate(
+    Species_original = clean_text(Species_original_cell),
+    Genus = extract_genus_from_taxon(Species_original)
+  ) %>%
+  filter(
+    !is.na(Genus),
+    Genus != "",
+    stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$"),
+    !Genus %in% c(
+      "Unclassified",
+      "Unidentified",
+      "Unknown",
+      "Uncultured",
+      "Fungi",
+      "Fungal"
+    )
+  )
+
+cadotte_check <- cadotte_species_long %>%
+  select(
+    source_table,
+    Species_original,
+    Genus,
+    everything()
+  ) %>%
+  arrange(Genus, source_table, Species_original)
+
+cadotte_clean <- cadotte_species_long %>%
+  distinct(Genus) %>%
+  mutate(
+    source_Cadotte_deer = TRUE
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  cadotte_check,
+  file.path(output_dir, "Cadotte_S1S2_species_to_genus_check.csv")
+)
+
+write_csv_utf8(
+  cadotte_clean,
+  file.path(output_dir, "macrofungi_genera_Cadotte_deer_S1S2_cleaned.csv")
+)
+
+cat("Cadotte original rows after merging S1/S2: ", nrow(cadotte_species_raw), "\n", sep = "")
+cat("Cadotte rows after splitting semicolon names: ", nrow(cadotte_species_long), "\n", sep = "")
+cat("Cadotte cleaned genera number: ", nrow(cadotte_clean), "\n", sep = "")
+
+## =========================
+## 5. 读取并整理 Lee 野猪 Macrofungi sheet
+## =========================
+
+cat("\n========== 3. Lee wild boar Macrofungi sheet ==========\n")
+
+lee_sheets <- readxl::excel_sheets(lee_file)
+
+cat("Lee file sheets:\n")
+print(lee_sheets)
+
+if (!"Macrofungi" %in% lee_sheets) {
+  stop("Lee 野猪附表中未找到 Macrofungi sheet，请检查 sheet 名。")
+}
+
+lee_raw <- readxl::read_excel(
+  lee_file,
+  sheet = "Macrofungi",
+  skip = 1
+)
+
+cat("Lee Macrofungi columns after skip = 1:\n")
+print(names(lee_raw))
+
+if (!"Genus" %in% names(lee_raw)) {
+  stop("Lee Macrofungi sheet 中未找到 Genus 列，请检查表头或 skip 参数。")
+}
+
+lee_clean <- lee_raw %>%
+  filter_valid_genus(genus_col = "Genus") %>%
+  distinct(Genus) %>%
+  mutate(
+    source_Lee_boar = TRUE
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  lee_clean,
+  file.path(output_dir, "macrofungi_genera_Lee_boar_cleaned.csv")
+)
+
+cat("Lee wild boar cleaned genera number: ", nrow(lee_clean), "\n", sep = "")
+
+if (nrow(lee_clean) != 22) {
+  warning(
+    "Lee Macrofungi 表清洗后属数不是 22，而是 ",
+    nrow(lee_clean),
+    "。请检查是否存在 Total 行、空行或表头读取问题。"
+  )
+}
+
+## =========================
+## 6. 三类来源取并集
+## =========================
+
+cat("\n========== 4. Merge three macrofungi genus sources ==========\n")
+
+all_genera <- bind_rows(
+  mst_clean %>%
+    transmute(
+      Genus,
+      source_MSTEM = TRUE,
+      source_Cadotte_deer = FALSE,
+      source_Lee_boar = FALSE
+    ),
+  cadotte_clean %>%
+    transmute(
+      Genus,
+      source_MSTEM = FALSE,
+      source_Cadotte_deer = TRUE,
+      source_Lee_boar = FALSE
+    ),
+  lee_clean %>%
+    transmute(
+      Genus,
+      source_MSTEM = FALSE,
+      source_Cadotte_deer = FALSE,
+      source_Lee_boar = TRUE
+    )
+)
+
+macrofungi_union <- all_genera %>%
+  group_by(Genus) %>%
+  summarise(
+    source_MSTEM = any(source_MSTEM),
+    source_Cadotte_deer = any(source_Cadotte_deer),
+    source_Lee_boar = any(source_Lee_boar),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    source_count =
+      as.integer(source_MSTEM) +
+      as.integer(source_Cadotte_deer) +
+      as.integer(source_Lee_boar),
+    source_detail = purrr::pmap_chr(
+      list(source_MSTEM, source_Cadotte_deer, source_Lee_boar),
+      function(mstem, cadotte, lee) {
+        src <- c()
+        if (mstem) src <- c(src, "MSTEM")
+        if (cadotte) src <- c(src, "Cadotte_deer")
+        if (lee) src <- c(src, "Lee_boar")
+        paste(src, collapse = "; ")
+      }
+    )
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  macrofungi_union,
+  file.path(output_dir, "macrofungi_genera_union_final.csv")
+)
+
+cat("Final union genera number: ", nrow(macrofungi_union), "\n", sep = "")
+
+## =========================
+## 7. 来源统计 summary
+## =========================
+
+cat("\n========== 5. Source summary ==========\n")
+
+source_summary <- tibble::tibble(
+  item = c(
+    "MSTEM_cleaned_genera",
+    "Cadotte_deer_S1S2_cleaned_genera",
+    "Lee_boar_cleaned_genera",
+    "Final_union_genera",
+    "In_all_three_sources",
+    "In_MSTEM_and_Cadotte_only",
+    "In_MSTEM_and_Lee_only",
+    "In_Cadotte_and_Lee_only",
+    "Only_MSTEM",
+    "Only_Cadotte_deer",
+    "Only_Lee_boar"
+  ),
+  count = c(
+    nrow(mst_clean),
+    nrow(cadotte_clean),
+    nrow(lee_clean),
+    nrow(macrofungi_union),
+    sum(
+      macrofungi_union$source_MSTEM &
+        macrofungi_union$source_Cadotte_deer &
+        macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union$source_MSTEM &
+        macrofungi_union$source_Cadotte_deer &
+        !macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union$source_MSTEM &
+        !macrofungi_union$source_Cadotte_deer &
+        macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union$source_MSTEM &
+        macrofungi_union$source_Cadotte_deer &
+        macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union$source_MSTEM &
+        !macrofungi_union$source_Cadotte_deer &
+        !macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union$source_MSTEM &
+        macrofungi_union$source_Cadotte_deer &
+        !macrofungi_union$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union$source_MSTEM &
+        !macrofungi_union$source_Cadotte_deer &
+        macrofungi_union$source_Lee_boar
+    )
+  )
+)
+
+write_csv_utf8(
+  source_summary,
+  file.path(output_dir, "macrofungi_genera_source_summary.csv")
+)
+
+print(source_summary)
+
+## =========================
+## 8. 输出前 20 行预览
+## =========================
+
+cat("\n========== 6. Preview final union list ==========\n")
+print(head(macrofungi_union, 20))
+
+## =========================
+## 9. 结束
+## =========================
+
+cat("\n============================================================\n")
+cat("Macrofungi genus reference list construction finished.\n")
+cat("Output directory:\n")
+cat(output_dir, "\n")
+cat("\nMain output:\n")
+cat(file.path(output_dir, "macrofungi_genera_union_final.csv"), "\n")
+cat("\nImportant check file:\n")
+cat(file.path(output_dir, "Cadotte_S1S2_species_to_genus_check.csv"), "\n")
+cat("============================================================\n")
+#运行脚本：
+Rscript scripts/chapter5_macrofungi/01_build_macrofungi_genus_reference.R
+#这个 v2 脚本的逻辑是：
+#1. MSTEM 属名直接保留，不做地衣型过滤；
+#2. Cadotte 白尾鹿 S1/S2：先从 Species 提取 Genus，再剔除非属级记录，再与地衣型真菌属参考表匹配并剔除；
+#3. Lee 野猪 Macrofungi：读取 Genus，再与地衣型真菌属参考表匹配并剔除；
+#4. 三个来源取并集；
+#5. 只输出严格大型真菌版，不输出广义版。
+#输出目录为新目录，不覆盖 v1：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter5_macrofungi_no_elephant/macrofungi_reference_genus_list_v2_strict/
+#第一步：在 WSL 终端新建脚本
+#复制运行：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+mkdir -p scripts/chapter5_macrofungi
+nano scripts/chapter5_macrofungi/02_build_macrofungi_genus_reference_v2_strict.R
+#运行后会打开 nano。
+#第二步：把下面完整脚本粘贴进 nano
+############################################################
+## Chapter 5 - 构建严格版大型真菌属级参考名录 v2
+##
+## 数据来源：
+## 1. MSTEM 平台提取的大型真菌属
+##    - 作为官方大型真菌分类系统及经济真菌信息平台来源
+##    - 不进行地衣型真菌过滤
+##
+## 2. Cadotte et al. 2021 白尾鹿食菌研究 Table S1 + S2
+##    - 从 Species 列提取属名
+##    - 剔除非属级记录
+##    - 与 World Checklist of Genera of Lichenized Fungi 匹配
+##    - 剔除匹配到的地衣型真菌属
+##
+## 3. Lee et al. 2025 韩国野猪食性研究 Macrofungi sheet
+##    - 读取 Genus 列
+##    - 与 World Checklist of Genera of Lichenized Fungi 匹配
+##    - 剔除匹配到的地衣型真菌属
+##
+## 4. 三来源取并集，输出严格大型真菌属级名录
+##
+## 注意：
+## 本脚本只整理大型真菌属级参考名录；
+## 不读取 metadata；
+## 不读取 SH abundance table；
+## 不与有蹄类动物肠道真菌属取交集；
+## 不做图；
+## 不做 alpha/beta 多样性分析。
+############################################################
+
+rm(list = ls())
+
+cat("============================================================\n")
+cat("Chapter 5 - Build STRICT macrofungi genus reference list v2\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. 加载 R 包
+## =========================
+
+needed_pkgs <- c(
+  "readxl",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "purrr",
+  "readr",
+  "tibble"
+)
+
+pkg_check <- data.frame(
+  package = needed_pkgs,
+  installed = sapply(needed_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(readr)
+library(tibble)
+
+## =========================
+## 1. 路径设置
+## =========================
+
+project_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+input_dir <- file.path(project_dir, "input_macrofungi_reference")
+
+output_dir <- file.path(
+  project_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "macrofungi_reference_genus_list_v2_strict"
+)
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+mst_file <- file.path(input_dir, "MSTEM_macrofungi_genera.xlsx")
+
+cadotte_s1_file <- file.path(
+  input_dir,
+  "Table S1 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+cadotte_s2_file <- file.path(
+  input_dir,
+  "Table S2 of Mycophagy of White-Tailed Deer (Odocoileus virginianus Zimmermann) in the Boreal F.xlsx"
+)
+
+lee_file <- file.path(
+  input_dir,
+  "Seasonal Variation in the Diet Composition of Wild Boars (Sus scrofa).xlsx"
+)
+
+lichen_file <- file.path(
+  input_dir,
+  "World Checklist of Genera of Lichenized Fungi_1780453467.csv"
+)
+
+cat("\n========== Input files ==========\n")
+
+files_to_check <- tibble(
+  file_label = c(
+    "MSTEM",
+    "Cadotte_S1",
+    "Cadotte_S2",
+    "Lee_wild_boar",
+    "World_Checklist_Lichenized_Fungi"
+  ),
+  file_path = c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file,
+    lichen_file
+  ),
+  exists = file.exists(c(
+    mst_file,
+    cadotte_s1_file,
+    cadotte_s2_file,
+    lee_file,
+    lichen_file
+  ))
+)
+
+print(files_to_check)
+
+if (any(!files_to_check$exists)) {
+  cat("\n以下输入文件不存在，请检查路径或文件名：\n")
+  print(files_to_check %>% filter(!exists))
+  stop("Input file check failed.")
+}
+
+cat("\nOutput directory:\n")
+cat(output_dir, "\n\n")
+
+## =========================
+## 2. 通用函数
+## =========================
+
+clean_text <- function(x) {
+  x %>%
+    as.character() %>%
+    stringr::str_trim() %>%
+    stringr::str_replace_all("\\s+", " ")
+}
+
+clean_genus_name <- function(x) {
+  x %>%
+    clean_text() %>%
+    stringr::str_replace_all("×", "x")
+}
+
+extract_genus_from_taxon <- function(x) {
+  ## 从物种名、属级记录或带 sp./aff. 的记录中提取第一个拉丁属名
+  ## 示例：
+  ## "Agaricus sp. GAL12215" -> "Agaricus"
+  ## "Albatrellus caeruleoporus" -> "Albatrellus"
+  ## "Acarospora sp." -> "Acarospora"
+  x %>%
+    clean_text() %>%
+    stringr::str_extract("^[A-Z][A-Za-z-]+")
+}
+
+filter_valid_genus <- function(df, genus_col = "Genus") {
+  df %>%
+    mutate(
+      Genus = clean_genus_name(.data[[genus_col]])
+    ) %>%
+    filter(
+      !is.na(Genus),
+      Genus != "",
+      !Genus %in% c(
+        "Total",
+        "Other",
+        "Others",
+        "Unclassified",
+        "Unidentified",
+        "Unknown",
+        "uncultured",
+        "Uncultured",
+        "Fungi",
+        "Fungal",
+        "NA",
+        "N/A"
+      ),
+      stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$")
+    )
+}
+
+is_non_genus_name <- function(x) {
+  ## 用于 Cadotte S1/S2：剔除明显不是属级名称的记录
+  ## 例如目级 -ales，科级 -aceae，亚门级 -mycotina，以及描述性词
+  x_clean <- clean_genus_name(x)
+
+  stringr::str_detect(x_clean, "ales$") |
+    stringr::str_detect(x_clean, "aceae$") |
+    stringr::str_detect(x_clean, "mycotina$") |
+    x_clean %in% c(
+      "Mycorrhizal",
+      "Thelephoroid",
+      "Fungal",
+      "Fungi",
+      "Unidentified",
+      "Unclassified",
+      "Unknown"
+    )
+}
+
+write_csv_utf8 <- function(x, path) {
+  readr::write_csv(x, path)
+  cat("Saved: ", path, "\n", sep = "")
+}
+
+## =========================
+## 3. 读取地衣型真菌属参考表
+## =========================
+
+cat("\n========== 1. Lichenized fungi genus reference ==========\n")
+
+lichen_raw <- readr::read_csv(
+  lichen_file,
+  show_col_types = FALSE,
+  locale = readr::locale(encoding = "UTF-8")
+)
+
+cat("Lichenized fungi checklist columns:\n")
+print(names(lichen_raw))
+
+if (!"ScientificName" %in% names(lichen_raw)) {
+  stop("地衣型真菌参考表中未找到 ScientificName 列，请检查文件。")
+}
+
+lichen_genus_ref <- lichen_raw %>%
+  mutate(
+    ScientificName_original = as.character(ScientificName),
+    Genus = extract_genus_from_taxon(ScientificName_original)
+  ) %>%
+  filter(
+    !is.na(Genus),
+    Genus != "",
+    stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$")
+  ) %>%
+  distinct(Genus, .keep_all = TRUE) %>%
+  select(
+    Genus,
+    Family,
+    ScientificName,
+    ScientificNameAuthorship,
+    Notes,
+    TaxonId
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  lichen_genus_ref,
+  file.path(output_dir, "lichenized_genera_reference_cleaned.csv")
+)
+
+cat("Lichenized fungi reference genera number: ", nrow(lichen_genus_ref), "\n", sep = "")
+
+## =========================
+## 4. 读取并整理 MSTEM 大型真菌属
+## =========================
+
+cat("\n========== 2. MSTEM macrofungi genera ==========\n")
+
+mst_raw <- readxl::read_excel(mst_file)
+
+cat("MSTEM columns:\n")
+print(names(mst_raw))
+
+if (!"Genus" %in% names(mst_raw)) {
+  stop("MSTEM 文件中未找到 Genus 列，请检查表头。")
+}
+
+mst_clean <- mst_raw %>%
+  filter_valid_genus(genus_col = "Genus") %>%
+  distinct(Genus) %>%
+  mutate(
+    source_MSTEM = TRUE,
+    note = "MSTEM retained directly; not filtered by lichenized reference"
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  mst_clean,
+  file.path(output_dir, "macrofungi_genera_MSTEM_cleaned_retained_directly.csv")
+)
+
+cat("MSTEM cleaned genera number: ", nrow(mst_clean), "\n", sep = "")
+
+## =========================
+## 5. 读取并整理 Cadotte 白尾鹿 S1/S2
+## =========================
+
+cat("\n========== 3. Cadotte deer Table S1 + S2 ==========\n")
+
+cadotte_s1_raw <- readxl::read_excel(cadotte_s1_file)
+cadotte_s2_raw <- readxl::read_excel(cadotte_s2_file)
+
+cat("Cadotte S1 columns:\n")
+print(names(cadotte_s1_raw))
+
+cat("Cadotte S2 columns:\n")
+print(names(cadotte_s2_raw))
+
+if (!"Species" %in% names(cadotte_s1_raw)) {
+  stop("Cadotte S1 文件中未找到 Species 列，请检查表头。")
+}
+
+if (!"Species" %in% names(cadotte_s2_raw)) {
+  stop("Cadotte S2 文件中未找到 Species 列，请检查表头。")
+}
+
+cadotte_species_raw <- bind_rows(
+  cadotte_s1_raw %>%
+    mutate(source_table = "Cadotte_Table_S1_2014"),
+  cadotte_s2_raw %>%
+    mutate(source_table = "Cadotte_Table_S2_2015")
+) %>%
+  mutate(
+    Species_original_cell = as.character(Species)
+  ) %>%
+  filter(
+    !is.na(Species_original_cell),
+    stringr::str_trim(Species_original_cell) != ""
+  )
+
+cadotte_species_long_all <- cadotte_species_raw %>%
+  tidyr::separate_rows(Species_original_cell, sep = ";") %>%
+  mutate(
+    Species_original = clean_text(Species_original_cell),
+    Genus = extract_genus_from_taxon(Species_original),
+    non_genus_record = is_non_genus_name(Genus)
+  )
+
+cadotte_non_genus_excluded <- cadotte_species_long_all %>%
+  filter(
+    is.na(Genus) |
+      Genus == "" |
+      non_genus_record |
+      !stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$")
+  ) %>%
+  mutate(
+    exclude_reason = case_when(
+      is.na(Genus) | Genus == "" ~ "No valid genus extracted",
+      non_genus_record ~ "Higher-rank or descriptive non-genus record",
+      !stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$") ~ "Invalid genus format",
+      TRUE ~ "Excluded"
+    )
+  ) %>%
+  select(
+    source_table,
+    Species_original,
+    Genus,
+    exclude_reason,
+    everything()
+  ) %>%
+  arrange(source_table, Species_original)
+
+cadotte_valid_before_lichen_filter <- cadotte_species_long_all %>%
+  filter(
+    !is.na(Genus),
+    Genus != "",
+    !non_genus_record,
+    stringr::str_detect(Genus, "^[A-Z][A-Za-z-]+$")
+  ) %>%
+  filter(
+    !Genus %in% c(
+      "Unclassified",
+      "Unidentified",
+      "Unknown",
+      "Uncultured",
+      "Fungi",
+      "Fungal"
+    )
+  ) %>%
+  mutate(
+    is_lichenized = Genus %in% lichen_genus_ref$Genus
+  )
+
+cadotte_lichenized_excluded <- cadotte_valid_before_lichen_filter %>%
+  filter(is_lichenized) %>%
+  select(
+    source_table,
+    Species_original,
+    Genus,
+    is_lichenized,
+    everything()
+  ) %>%
+  arrange(Genus, source_table, Species_original)
+
+cadotte_check_all <- cadotte_valid_before_lichen_filter %>%
+  select(
+    source_table,
+    Species_original,
+    Genus,
+    is_lichenized,
+    everything()
+  ) %>%
+  arrange(Genus, source_table, Species_original)
+
+cadotte_clean_strict <- cadotte_valid_before_lichen_filter %>%
+  filter(!is_lichenized) %>%
+  distinct(Genus) %>%
+  mutate(
+    source_Cadotte_deer = TRUE
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  cadotte_check_all,
+  file.path(output_dir, "Cadotte_S1S2_species_to_genus_check_with_lichenized_flag.csv")
+)
+
+write_csv_utf8(
+  cadotte_non_genus_excluded,
+  file.path(output_dir, "Cadotte_S1S2_excluded_non_genus_records.csv")
+)
+
+write_csv_utf8(
+  cadotte_lichenized_excluded,
+  file.path(output_dir, "Cadotte_S1S2_excluded_lichenized_records.csv")
+)
+
+write_csv_utf8(
+  cadotte_clean_strict,
+  file.path(output_dir, "macrofungi_genera_Cadotte_deer_S1S2_strict_no_lichenized.csv")
+)
+
+cat("Cadotte original rows after merging S1/S2: ", nrow(cadotte_species_raw), "\n", sep = "")
+cat("Cadotte rows after splitting semicolon names: ", nrow(cadotte_species_long_all), "\n", sep = "")
+cat("Cadotte non-genus excluded rows: ", nrow(cadotte_non_genus_excluded), "\n", sep = "")
+cat("Cadotte lichenized excluded rows: ", nrow(cadotte_lichenized_excluded), "\n", sep = "")
+cat("Cadotte strict genera number after removing lichenized genera: ", nrow(cadotte_clean_strict), "\n", sep = "")
+
+## =========================
+## 6. 读取并整理 Lee 野猪 Macrofungi sheet
+## =========================
+
+cat("\n========== 4. Lee wild boar Macrofungi sheet ==========\n")
+
+lee_sheets <- readxl::excel_sheets(lee_file)
+
+cat("Lee file sheets:\n")
+print(lee_sheets)
+
+if (!"Macrofungi" %in% lee_sheets) {
+  stop("Lee 野猪附表中未找到 Macrofungi sheet，请检查 sheet 名。")
+}
+
+lee_raw <- readxl::read_excel(
+  lee_file,
+  sheet = "Macrofungi",
+  skip = 1
+)
+
+cat("Lee Macrofungi columns after skip = 1:\n")
+print(names(lee_raw))
+
+if (!"Genus" %in% names(lee_raw)) {
+  stop("Lee Macrofungi sheet 中未找到 Genus 列，请检查表头或 skip 参数。")
+}
+
+lee_valid_before_lichen_filter <- lee_raw %>%
+  filter_valid_genus(genus_col = "Genus") %>%
+  mutate(
+    is_lichenized = Genus %in% lichen_genus_ref$Genus
+  )
+
+lee_lichenized_excluded <- lee_valid_before_lichen_filter %>%
+  filter(is_lichenized) %>%
+  select(
+    Genus,
+    is_lichenized,
+    everything()
+  ) %>%
+  arrange(Genus)
+
+lee_clean_strict <- lee_valid_before_lichen_filter %>%
+  filter(!is_lichenized) %>%
+  distinct(Genus) %>%
+  mutate(
+    source_Lee_boar = TRUE
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  lee_valid_before_lichen_filter,
+  file.path(output_dir, "Lee_boar_macrofungi_check_with_lichenized_flag.csv")
+)
+
+write_csv_utf8(
+  lee_lichenized_excluded,
+  file.path(output_dir, "Lee_boar_excluded_lichenized_records.csv")
+)
+
+write_csv_utf8(
+  lee_clean_strict,
+  file.path(output_dir, "macrofungi_genera_Lee_boar_strict_no_lichenized.csv")
+)
+
+cat("Lee wild boar genera before lichenized filtering: ",
+    n_distinct(lee_valid_before_lichen_filter$Genus),
+    "\n", sep = "")
+
+cat("Lee lichenized excluded rows: ", nrow(lee_lichenized_excluded), "\n", sep = "")
+cat("Lee strict genera number after removing lichenized genera: ", nrow(lee_clean_strict), "\n", sep = "")
+
+if (n_distinct(lee_valid_before_lichen_filter$Genus) != 22) {
+  warning(
+    "Lee Macrofungi 表清洗后过滤前属数不是 22，而是 ",
+    n_distinct(lee_valid_before_lichen_filter$Genus),
+    "。请检查是否存在 Total 行、空行或表头读取问题。"
+  )
+}
+
+## =========================
+## 7. 三类来源取并集
+## =========================
+
+cat("\n========== 5. Merge strict macrofungi genus sources ==========\n")
+
+all_genera_strict <- bind_rows(
+  mst_clean %>%
+    transmute(
+      Genus,
+      source_MSTEM = TRUE,
+      source_Cadotte_deer = FALSE,
+      source_Lee_boar = FALSE
+    ),
+  cadotte_clean_strict %>%
+    transmute(
+      Genus,
+      source_MSTEM = FALSE,
+      source_Cadotte_deer = TRUE,
+      source_Lee_boar = FALSE
+    ),
+  lee_clean_strict %>%
+    transmute(
+      Genus,
+      source_MSTEM = FALSE,
+      source_Cadotte_deer = FALSE,
+      source_Lee_boar = TRUE
+    )
+)
+
+macrofungi_union_strict <- all_genera_strict %>%
+  group_by(Genus) %>%
+  summarise(
+    source_MSTEM = any(source_MSTEM),
+    source_Cadotte_deer = any(source_Cadotte_deer),
+    source_Lee_boar = any(source_Lee_boar),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    source_count =
+      as.integer(source_MSTEM) +
+      as.integer(source_Cadotte_deer) +
+      as.integer(source_Lee_boar),
+    source_detail = purrr::pmap_chr(
+      list(source_MSTEM, source_Cadotte_deer, source_Lee_boar),
+      function(mstem, cadotte, lee) {
+        src <- c()
+        if (mstem) src <- c(src, "MSTEM")
+        if (cadotte) src <- c(src, "Cadotte_deer")
+        if (lee) src <- c(src, "Lee_boar")
+        paste(src, collapse = "; ")
+      }
+    )
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  macrofungi_union_strict,
+  file.path(output_dir, "macrofungi_genera_union_strict_final_v2.csv")
+)
+
+cat("Final strict union genera number: ", nrow(macrofungi_union_strict), "\n", sep = "")
+
+## =========================
+## 8. 汇总被剔除的记录
+## =========================
+
+cat("\n========== 6. Excluded record summary ==========\n")
+
+excluded_lichenized_genera_summary <- bind_rows(
+  cadotte_lichenized_excluded %>%
+    distinct(Genus) %>%
+    mutate(source = "Cadotte_deer"),
+  lee_lichenized_excluded %>%
+    distinct(Genus) %>%
+    mutate(source = "Lee_boar")
+) %>%
+  group_by(Genus) %>%
+  summarise(
+    excluded_from = paste(sort(unique(source)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(Genus)
+
+write_csv_utf8(
+  excluded_lichenized_genera_summary,
+  file.path(output_dir, "excluded_lichenized_genera_summary_Cadotte_Lee_only.csv")
+)
+
+## =========================
+## 9. 来源统计 summary
+## =========================
+
+cat("\n========== 7. Source summary ==========\n")
+
+source_summary <- tibble::tibble(
+  item = c(
+    "MSTEM_cleaned_genera_retained_directly",
+    "Lichenized_reference_genera",
+    "Cadotte_raw_rows_S1S2",
+    "Cadotte_rows_after_semicolon_split",
+    "Cadotte_non_genus_excluded_rows",
+    "Cadotte_lichenized_excluded_rows",
+    "Cadotte_strict_genera_after_filtering",
+    "Lee_genera_before_lichenized_filtering",
+    "Lee_lichenized_excluded_rows",
+    "Lee_strict_genera_after_filtering",
+    "Final_strict_union_genera",
+    "In_all_three_sources",
+    "In_MSTEM_and_Cadotte_only",
+    "In_MSTEM_and_Lee_only",
+    "In_Cadotte_and_Lee_only",
+    "Only_MSTEM",
+    "Only_Cadotte_deer",
+    "Only_Lee_boar"
+  ),
+  count = c(
+    nrow(mst_clean),
+    nrow(lichen_genus_ref),
+    nrow(cadotte_species_raw),
+    nrow(cadotte_species_long_all),
+    nrow(cadotte_non_genus_excluded),
+    nrow(cadotte_lichenized_excluded),
+    nrow(cadotte_clean_strict),
+    n_distinct(lee_valid_before_lichen_filter$Genus),
+    nrow(lee_lichenized_excluded),
+    nrow(lee_clean_strict),
+    nrow(macrofungi_union_strict),
+    sum(
+      macrofungi_union_strict$source_MSTEM &
+        macrofungi_union_strict$source_Cadotte_deer &
+        macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union_strict$source_MSTEM &
+        macrofungi_union_strict$source_Cadotte_deer &
+        !macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union_strict$source_MSTEM &
+        !macrofungi_union_strict$source_Cadotte_deer &
+        macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union_strict$source_MSTEM &
+        macrofungi_union_strict$source_Cadotte_deer &
+        macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      macrofungi_union_strict$source_MSTEM &
+        !macrofungi_union_strict$source_Cadotte_deer &
+        !macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union_strict$source_MSTEM &
+        macrofungi_union_strict$source_Cadotte_deer &
+        !macrofungi_union_strict$source_Lee_boar
+    ),
+    sum(
+      !macrofungi_union_strict$source_MSTEM &
+        !macrofungi_union_strict$source_Cadotte_deer &
+        macrofungi_union_strict$source_Lee_boar
+    )
+  )
+)
+
+write_csv_utf8(
+  source_summary,
+  file.path(output_dir, "macrofungi_genera_source_summary_strict_v2.csv")
+)
+
+print(source_summary)
+
+## =========================
+## 10. 输出前 30 行预览
+## =========================
+
+cat("\n========== 8. Preview final strict union list ==========\n")
+print(head(macrofungi_union_strict, 30))
+
+cat("\n========== 9. Preview excluded lichenized genera ==========\n")
+print(excluded_lichenized_genera_summary)
+
+## =========================
+## 11. 结束
+## =========================
+
+cat("\n============================================================\n")
+cat("STRICT macrofungi genus reference list construction finished.\n")
+cat("Output directory:\n")
+cat(output_dir, "\n")
+cat("\nMain output:\n")
+cat(file.path(output_dir, "macrofungi_genera_union_strict_final_v2.csv"), "\n")
+cat("\nImportant check files:\n")
+cat(file.path(output_dir, "lichenized_genera_reference_cleaned.csv"), "\n")
+cat(file.path(output_dir, "Cadotte_S1S2_species_to_genus_check_with_lichenized_flag.csv"), "\n")
+cat(file.path(output_dir, "Cadotte_S1S2_excluded_non_genus_records.csv"), "\n")
+cat(file.path(output_dir, "Cadotte_S1S2_excluded_lichenized_records.csv"), "\n")
+cat(file.path(output_dir, "Lee_boar_excluded_lichenized_records.csv"), "\n")
+cat(file.path(output_dir, "excluded_lichenized_genera_summary_Cadotte_Lee_only.csv"), "\n")
+cat(file.path(output_dir, "macrofungi_genera_source_summary_strict_v2.csv"), "\n")
+cat("============================================================\n")
+#运行v2脚本：
+Rscript scripts/chapter5_macrofungi/02_build_macrofungi_genus_reference_v2_strict.R
