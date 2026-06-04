@@ -1,0 +1,873 @@
+#本次任务说明
+#输入文件
+#metadata
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#已计算好的 Bray-Curtis 距离
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/bray_curtis_distance_no_elephant.rds
+#已计算好的 NMDS scores
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/NMDS_bray_curtis_scores_no_elephant.csv
+#已计算好的 NMDS 对象（用于读取 stress）
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/NMDS_bray_curtis_no_elephant_trymax50.rds
+#宿主科 NMDS 已显示范围文件
+#用于保证这次 status 图与前面宿主科/宿主物种图的显示范围一致，并且继续隐藏那 7 个离群点（只是不显示在图中，不从统计中删除）：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_beta_diversity_no_elephant/NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv
+#是否重算
+#不重算
+#Bray-Curtis 距离
+#NMDS 排序
+#需要重新做
+#按 status 分组的 Adonis / PERMANOVA
+#按 status 分组的 betadisper
+#分组口径
+#使用 metadata 中的 status 列，顺序固定为：
+#家养
+#圈养
+#野生
+#本次特别要求
+#显示范围与前面宿主科、宿主物种 NMDS 图保持一致
+#同样隐藏那 7 个离群点，但这些点不从距离矩阵、NMDS、Adonis、betadisper 分析中删除
+#横纵轴刻度继续按你确认过的规则：
+#先去掉末尾多余的 0
+#再按该轴所需最多小数位统一补齐
+#stress 值保留三位小数
+#输出目录
+#新建目录，不覆盖旧图：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_status_beta_diversity_no_elephant
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter4_status_beta
+nano scripts/chapter4_status_beta/01_status_BrayCurtis_NMDS_no_elephant.R
+#第二步：粘贴下面完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 4 - Status beta diversity NMDS plot, no-elephant
+##
+## 目的：
+##   绘制“不同生活状态下有蹄类动物肠道真菌群落基于Bray-Curtis距离的NMDS图”
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+##   2. bray_curtis_distance_no_elephant.rds
+##   3. NMDS_bray_curtis_scores_no_elephant.csv
+##   4. NMDS_bray_curtis_no_elephant_trymax50.rds
+##   5. NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv
+##
+## 分组变量：
+##   metadata$status
+##
+## status 顺序：
+##   家养 -> 圈养 -> 野生
+##
+## 注意：
+##   1. 不重新计算 Bray-Curtis 距离；
+##   2. 不重新运行 NMDS；
+##   3. 重新做 status 的 Adonis 和 betadisper；
+##   4. 图的显示范围与前面宿主科 / 宿主物种 NMDS 图保持一致；
+##   5. 同样隐藏那 7 个离群点，但这些点不从统计分析中删除；
+##   6. 坐标轴刻度按“去尾零后最大位数统一补齐”；
+##   7. stress 保留三位小数。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(vegan)
+  library(showtext)
+  library(sysfonts)
+  library(tibble)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+chapter3_beta_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_beta_diversity_no_elephant"
+)
+
+bray_rds <- file.path(
+  chapter3_beta_dir,
+  "bray_curtis_distance_no_elephant.rds"
+)
+
+nmds_scores_file <- file.path(
+  chapter3_beta_dir,
+  "NMDS_bray_curtis_scores_no_elephant.csv"
+)
+
+nmds_rds <- file.path(
+  chapter3_beta_dir,
+  "NMDS_bray_curtis_no_elephant_trymax50.rds"
+)
+
+host_family_display_file <- file.path(
+  chapter3_beta_dir,
+  "NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_status_beta_diversity_no_elephant"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_status_nmds_merged <- file.path(
+  out_dir,
+  "NMDS_status_scores_with_metadata_no_elephant.csv"
+)
+
+out_display_csv <- file.path(
+  out_dir,
+  "NMDS_status_display_zoom_v1_no_elephant_CN.csv"
+)
+
+out_hidden_csv <- file.path(
+  out_dir,
+  "NMDS_status_hidden_outliers_zoom_v1_no_elephant_CN.csv"
+)
+
+out_sample_count_csv <- file.path(
+  out_dir,
+  "status_sample_count_for_beta_no_elephant.csv"
+)
+
+out_adonis_csv <- file.path(
+  out_dir,
+  "status_adonis_bray_curtis_no_elephant.csv"
+)
+
+out_betadisper_anova_csv <- file.path(
+  out_dir,
+  "status_betadisper_anova_no_elephant.csv"
+)
+
+out_betadisper_tukey_csv <- file.path(
+  out_dir,
+  "status_betadisper_tukeyHSD_no_elephant.csv"
+)
+
+out_png <- file.path(
+  out_dir,
+  "Fig4_x_status_BrayCurtis_NMDS_no_elephant_CN_zoom_v1.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig4_x_status_BrayCurtis_NMDS_no_elephant_CN_zoom_v1.pdf"
+)
+
+out_log <- file.path(
+  out_dir,
+  "status_BrayCurtis_NMDS_no_elephant_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c(
+    "metadata",
+    "bray_rds",
+    "nmds_scores",
+    "nmds_rds",
+    "host_family_display"
+  ),
+  file_path = c(
+    metadata_file,
+    bray_rds,
+    nmds_scores_file,
+    nmds_rds,
+    host_family_display_file
+  ),
+  exists = file.exists(c(
+    metadata_file,
+    bray_rds,
+    nmds_scores_file,
+    nmds_rds,
+    host_family_display_file
+  )),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+
+if (is.na(font_file)) {
+  stop("找不到可用中文字体。")
+}
+
+font_add("CNFont", regular = font_file)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("\n使用中文字体：", font_file, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+
+status_order_cn <- c("家养", "圈养", "野生")
+
+status_colors_cn <- c(
+  "家养" = "#E64B35",
+  "圈养" = "#4DBBD5",
+  "野生" = "#00A087"
+)
+
+axis_padding <- 0.05
+point_size <- 1.05
+point_alpha <- 0.58
+
+## =========================
+## 4. 工具函数
+## =========================
+
+detect_sample_col <- function(df, df_name = "data.frame") {
+  candidate_cols <- c(
+    "sample_id", "SampleID", "#SampleID", "sampleid",
+    "sample_name", "id", "X", "X.1"
+  )
+
+  found <- candidate_cols[candidate_cols %in% colnames(df)][1]
+
+  if (is.na(found)) {
+    stop(df_name, " 中未找到可识别的样本 ID 列。")
+  }
+
+  found
+}
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "", "NA", "N/A", "na", "n/a",
+    "unknown", "Unknown", "UNKNOWN",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+normalize_status <- function(x) {
+  x <- clean_value(x)
+  x_low <- tolower(x)
+  x_low <- gsub("_", " ", x_low)
+  x_low <- gsub("-", " ", x_low)
+  x_low <- gsub("\\s+", " ", x_low)
+  x_low <- trimws(x_low)
+
+  dplyr::case_when(
+    x_low %in% c("domesticated", "domestic", "家养") ~ "家养",
+    x_low %in% c("captive", "captivity", "圈养") ~ "圈养",
+    x_low %in% c("wild", "野生") ~ "野生",
+    TRUE ~ NA_character_
+  )
+}
+
+get_padded_range <- function(x, padding = 0.05) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+
+  if (is.na(d) || d == 0) {
+    d <- max(abs(r), 1e-6)
+  }
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+fmt_decimal_align <- function(x, max_digits = 8) {
+  out <- rep(NA_character_, length(x))
+
+  ok <- !is.na(x)
+  if (!any(ok)) return(out)
+
+  x2 <- x[ok]
+  x2[abs(x2) < 1e-12] <- 0
+
+  raw <- sprintf(paste0("%.", max_digits, "f"), x2)
+  trimmed <- sub("0+$", "", raw)
+  trimmed <- sub("\\.$", "", trimmed)
+
+  decimal_digits <- ifelse(
+    grepl("\\.", trimmed),
+    nchar(sub("^.*\\.", "", trimmed)),
+    0
+  )
+
+  keep_digits <- max(decimal_digits, na.rm = TRUE)
+
+  out[ok] <- sprintf(paste0("%.", keep_digits, "f"), x2)
+  out
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "status_cn")
+  if (length(idx) == 0) idx <- which(adonis_df$term == "status")
+  if (length(idx) == 0) idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  if (length(idx) == 0) stop("无法识别 Adonis 主效应行。")
+  idx[1]
+}
+
+dist_subset_by_ids <- function(dist_obj, ids) {
+  mat <- as.matrix(dist_obj)
+  ids <- ids[ids %in% rownames(mat)]
+  mat2 <- mat[ids, ids, drop = FALSE]
+  as.dist(mat2)
+}
+
+## =========================
+## 5. 读取 metadata
+## =========================
+
+cat("\n读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+meta_sample_col <- detect_sample_col(meta, "metadata")
+
+if (!"status" %in% colnames(meta)) {
+  stop("metadata 中没有 status 列。")
+}
+
+meta_status <- meta %>%
+  transmute(
+    sample_id = as.character(.data[[meta_sample_col]]),
+    status_raw = clean_value(status),
+    status_cn = normalize_status(status_raw)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(status_cn)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  mutate(
+    status_cn = factor(status_cn, levels = status_order_cn)
+  ) %>%
+  arrange(status_cn)
+
+cat("metadata 中有效 status 样本数：", nrow(meta_status), "\n", sep = "")
+cat("metadata 中 status 分组样本数：\n")
+print(table(meta_status$status_cn, useNA = "ifany"))
+
+## =========================
+## 6. 读取已有 NMDS scores 与 display 文件
+## =========================
+
+cat("\n读取已有 NMDS scores ...\n")
+
+nmds_scores <- read.csv(
+  nmds_scores_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+nmds_sample_col <- detect_sample_col(nmds_scores, "NMDS scores")
+
+if (!all(c("NMDS1", "NMDS2") %in% colnames(nmds_scores))) {
+  stop("NMDS scores 文件缺少 NMDS1 / NMDS2 列。")
+}
+
+nmds_scores <- nmds_scores %>%
+  transmute(
+    sample_id = as.character(.data[[nmds_sample_col]]),
+    NMDS1 = as.numeric(NMDS1),
+    NMDS2 = as.numeric(NMDS2)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(NMDS1),
+    !is.na(NMDS2)
+  )
+
+host_family_display <- read.csv(
+  host_family_display_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+display_sample_col <- detect_sample_col(host_family_display, "host_family_display")
+
+if (!all(c("NMDS1", "NMDS2") %in% colnames(host_family_display))) {
+  stop("host_family_display 文件缺少 NMDS1 / NMDS2 列。")
+}
+
+host_family_display <- host_family_display %>%
+  transmute(
+    sample_id = as.character(.data[[display_sample_col]]),
+    NMDS1 = as.numeric(NMDS1),
+    NMDS2 = as.numeric(NMDS2)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(NMDS1),
+    !is.na(NMDS2)
+  )
+
+## 合并 status 到 NMDS scores
+status_nmds <- nmds_scores %>%
+  inner_join(meta_status %>% select(sample_id, status_cn), by = "sample_id") %>%
+  mutate(
+    status_cn = factor(status_cn, levels = status_order_cn)
+  )
+
+cat("进入 status NMDS 作图候选样本数：", nrow(status_nmds), "\n", sep = "")
+cat("进入作图候选的 status 样本数：\n")
+print(table(status_nmds$status_cn, useNA = "ifany"))
+
+write.csv(
+  status_nmds,
+  out_status_nmds_merged,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 使用宿主科显示集，保持相同显示范围，并隐藏同样 7 个离群点
+## =========================
+
+display_ids <- intersect(status_nmds$sample_id, host_family_display$sample_id)
+
+display_df <- status_nmds %>%
+  filter(sample_id %in% display_ids) %>%
+  mutate(status_cn = factor(status_cn, levels = status_order_cn))
+
+hidden_df <- status_nmds %>%
+  filter(!sample_id %in% display_ids) %>%
+  mutate(status_cn = factor(status_cn, levels = status_order_cn))
+
+## 显示范围仍由宿主科 display 文件决定，并继续加同样的 padding
+x_range <- get_padded_range(host_family_display$NMDS1, axis_padding)
+y_range <- get_padded_range(host_family_display$NMDS2, axis_padding)
+
+write.csv(
+  display_df,
+  out_display_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  hidden_df,
+  out_hidden_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+status_sample_count <- status_nmds %>%
+  count(status_cn, name = "n") %>%
+  mutate(status_cn = factor(status_cn, levels = status_order_cn)) %>%
+  arrange(status_cn) %>%
+  mutate(status_cn = as.character(status_cn))
+
+write.csv(
+  status_sample_count,
+  out_sample_count_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\n显示范围与宿主科/宿主物种 NMDS 图保持一致。\n")
+cat("图中显示样本数：", nrow(display_df), "\n", sep = "")
+cat("图中隐藏离群点数：", nrow(hidden_df), "\n", sep = "")
+cat("status 图 x 范围：", x_range["lower"], " to ", x_range["upper"], "\n", sep = "")
+cat("status 图 y 范围：", y_range["lower"], " to ", y_range["upper"], "\n", sep = "")
+
+## =========================
+## 8. 读取已有 Bray-Curtis 距离和 NMDS RDS，重新做 status 的 Adonis / betadisper
+## =========================
+
+cat("\n读取已有 Bray-Curtis 距离与 NMDS RDS ...\n")
+
+bray_dist <- readRDS(bray_rds)
+nmds_obj <- readRDS(nmds_rds)
+
+bray_ids <- attr(bray_dist, "Labels")
+
+meta_for_stats <- meta_status %>%
+  filter(sample_id %in% bray_ids) %>%
+  mutate(status_cn = factor(status_cn, levels = status_order_cn)) %>%
+  arrange(match(sample_id, bray_ids))
+
+common_ids <- meta_for_stats$sample_id
+bray_status <- dist_subset_by_ids(bray_dist, common_ids)
+
+meta_for_stats <- meta_for_stats %>%
+  filter(sample_id %in% attr(bray_status, "Labels")) %>%
+  arrange(match(sample_id, attr(bray_status, "Labels")))
+
+cat("进入 status Adonis/betadisper 的样本数：", nrow(meta_for_stats), "\n", sep = "")
+cat("进入统计的 status 分组样本数：\n")
+print(table(meta_for_stats$status_cn, useNA = "ifany"))
+
+## Adonis
+adonis_fit <- adonis2(
+  bray_status ~ status_cn,
+  data = meta_for_stats,
+  permutations = 999
+)
+
+adonis_df <- as.data.frame(adonis_fit) %>%
+  tibble::rownames_to_column("term")
+
+write.csv(
+  adonis_df,
+  out_adonis_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## betadisper
+beta_disp <- betadisper(
+  bray_status,
+  group = meta_for_stats$status_cn
+)
+
+beta_disp_anova <- as.data.frame(anova(beta_disp)) %>%
+  tibble::rownames_to_column("term")
+
+beta_disp_tukey <- TukeyHSD(beta_disp)$group %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("comparison")
+
+write.csv(
+  beta_disp_anova,
+  out_betadisper_anova_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  beta_disp_tukey,
+  out_betadisper_tukey_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+main_idx <- extract_adonis_main_row(adonis_df)
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+if (is.na(p_col)) {
+  stop("Adonis 结果中没有 P 值列。")
+}
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p  <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+stress_label <- paste0(
+  "Bray-Curtis NMDS stress = ",
+  sprintf("%.3f", nmds_obj$stress)
+)
+
+cat("Adonis 标注：", adonis_label, "\n", sep = "")
+cat("stress 标注：", stress_label, "\n", sep = "")
+
+## =========================
+## 9. 绘图
+## =========================
+
+x_anno <- x_range["lower"] + 0.05 * diff(x_range)
+y_anno <- y_range["upper"] - 0.08 * diff(y_range)
+
+p <- ggplot(
+  display_df,
+  aes(
+    x = NMDS1,
+    y = NMDS2,
+    color = status_cn
+  )
+) +
+  stat_ellipse(
+    aes(fill = status_cn),
+    geom = "polygon",
+    type = "t",
+    level = 0.95,
+    alpha = 0.10,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    aes(group = status_cn, color = status_cn),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.75,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    size = point_size,
+    alpha = point_alpha
+  ) +
+  annotate(
+    "text",
+    x = x_anno,
+    y = y_anno,
+    label = adonis_label,
+    hjust = 0,
+    vjust = 1,
+    size = 4.6,
+    family = "CNFont",
+    color = "black"
+  ) +
+  scale_color_manual(
+    values = status_colors_cn,
+    breaks = status_order_cn,
+    drop = FALSE,
+    name = NULL
+  ) +
+  scale_fill_manual(
+    values = status_colors_cn,
+    breaks = status_order_cn,
+    drop = FALSE,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = fmt_decimal_align,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_y_continuous(
+    labels = fmt_decimal_align,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "NMDS1",
+    y = "NMDS2",
+    color = NULL,
+    caption = stress_label
+  ) +
+  coord_cartesian(
+    xlim = x_range,
+    ylim = y_range,
+    clip = "off"
+  ) +
+  theme_bw(base_size = 14, base_family = "CNFont") +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_blank(),
+
+    axis.title = element_text(
+      size = 19,
+      colour = "black",
+      family = "CNFont"
+    ),
+    axis.text = element_text(
+      size = 13,
+      colour = "black",
+      family = "CNFont"
+    ),
+
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 16,
+      colour = "black",
+      family = "CNFont"
+    ),
+    legend.key = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.key.height = unit(0.62, "cm"),
+    legend.key.width = unit(0.62, "cm"),
+    legend.spacing.y = unit(0.14, "cm"),
+    legend.position = "right",
+
+    plot.caption = element_text(
+      size = 13,
+      hjust = 0,
+      colour = "black",
+      family = "CNFont",
+      lineheight = 1.15
+    ),
+    plot.caption.position = "plot",
+
+    plot.margin = margin(
+      t = 10,
+      r = 28,
+      b = 34,
+      l = 12
+    )
+  ) +
+  guides(
+    color = guide_legend(
+      ncol = 1,
+      byrow = TRUE,
+      override.aes = list(
+        size = 4.2,
+        alpha = 1
+      )
+    )
+  )
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+## =========================
+## 10. 日志
+## =========================
+
+sink(out_log)
+
+cat("Status Bray-Curtis NMDS plot, no-elephant version\n")
+cat("=================================================\n\n")
+
+cat("Input files:\n")
+print(input_files)
+
+cat("\nThis script did NOT recalculate Bray-Curtis distance.\n")
+cat("This script did NOT rerun NMDS.\n")
+cat("It reused the existing Bray-Curtis distance matrix and NMDS results.\n\n")
+
+cat("This script DID recalculate:\n")
+cat("- Adonis / PERMANOVA for status\n")
+cat("- betadisper for status\n\n")
+
+cat("Grouping variable:\n")
+cat("metadata$status\n\n")
+
+cat("Status order:\n")
+print(status_order_cn)
+
+cat("\nStatus sample counts used for plotting/statistics:\n")
+print(status_sample_count)
+
+cat("\nDisplay range source:\n")
+cat(host_family_display_file, "\n\n")
+
+cat("The plotted display range is kept consistent with previous host_family / host_species NMDS figures.\n")
+cat("Outliers hidden in the figure only are NOT removed from Bray-Curtis, NMDS, Adonis or betadisper.\n\n")
+
+cat("Displayed sample number:\n")
+cat(nrow(display_df), "\n\n")
+
+cat("Hidden outlier number in plot only:\n")
+cat(nrow(hidden_df), "\n\n")
+
+cat("Displayed sample counts by status:\n")
+print(table(display_df$status_cn, useNA = "ifany"))
+
+cat("\nHidden sample counts by status:\n")
+print(table(hidden_df$status_cn, useNA = "ifany"))
+
+cat("\nX display range:\n")
+print(x_range)
+
+cat("\nY display range:\n")
+print(y_range)
+
+cat("\nAdonis table:\n")
+print(adonis_df)
+
+cat("\nBetadisper ANOVA:\n")
+print(beta_disp_anova)
+
+cat("\nBetadisper TukeyHSD:\n")
+print(beta_disp_tukey)
+
+cat("\nAdonis label:\n")
+cat(adonis_label, "\n\n")
+
+cat("Stress label:\n")
+cat(stress_label, "\n\n")
+
+cat("Output files:\n")
+cat("merged NMDS + status: ", out_status_nmds_merged, "\n", sep = "")
+cat("display CSV: ", out_display_csv, "\n", sep = "")
+cat("hidden CSV: ", out_hidden_csv, "\n", sep = "")
+cat("sample count CSV: ", out_sample_count_csv, "\n", sep = "")
+cat("adonis CSV: ", out_adonis_csv, "\n", sep = "")
+cat("betadisper anova CSV: ", out_betadisper_anova_csv, "\n", sep = "")
+cat("betadisper Tukey CSV: ", out_betadisper_tukey_csv, "\n", sep = "")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+
+sink()
+
+## =========================
+## 11. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n", sep = "")
+cat("Displayed samples:", nrow(display_df), "\n")
+cat("Hidden outliers in plot only:", nrow(hidden_df), "\n")
+cat("PNG:\n", out_png, "\n", sep = "")
+cat("PDF:\n", out_pdf, "\n", sep = "")
+cat("Log:\n", out_log, "\n", sep = "")
+#运行
