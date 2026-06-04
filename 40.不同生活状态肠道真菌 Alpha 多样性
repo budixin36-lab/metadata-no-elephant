@@ -1,0 +1,1132 @@
+#本次脚本说明
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+#是否重算：
+#不重算 Alpha 多样性指数；不读取 BIOM；
+#只基于已有样本水平 Alpha 指数，按 status 重新做 ANOVA + TukeyHSD，并作图。
+#分组顺序：
+#家养 → 圈养 → 野生
+#对应 metadata 中：
+#domesticated → captive → wild
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter4_status_alpha
+nano scripts/chapter4_status_alpha/01_status_alpha_diversity_ANOVA_Tukey_boxplot_no_elephant.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 4 - Status alpha diversity analysis, no-elephant
+##
+## 目的：
+##   基于已经计算好的样本水平 Alpha 多样性指数，
+##   按 metadata 中 status 分组，分析不同生活状态下
+##   有蹄类动物肠道真菌 Alpha 多样性差异。
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+##   2. alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+##
+## 分组变量：
+##   metadata$status
+##
+## 分组顺序：
+##   家养 → 圈养 → 野生
+##
+## 统计方法：
+##   one-way ANOVA + TukeyHSD
+##
+## 作图：
+##   ACE、Chao1、Shannon、Simpson 四张单独箱线图；
+##   TukeyHSD 字母直接标注在箱线图上方；
+##   不加额外 I 形误差线；
+##   y 轴名不写“指数”。
+##
+## 注意：
+##   本脚本不重新计算 Alpha 多样性；
+##   本脚本不读取 BIOM；
+##   本脚本不使用旧含象科版本。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+alpha_file <- file.path(
+  base_dir,
+  "results",
+  "chapter3_alpha_diversity_no_elephant",
+  "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_status_alpha_diversity_no_elephant"
+)
+
+plot_dir <- file.path(out_dir, "boxplots_letters_v1")
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_status_alpha <- file.path(
+  out_dir,
+  "status_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_sample_count <- file.path(
+  out_dir,
+  "status_alpha_sample_count_no_elephant.csv"
+)
+
+out_paper_table <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_for_paper_no_elephant.csv"
+)
+
+out_mean_sd <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_mean_sd_detail_no_elephant.csv"
+)
+
+out_anova <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_ANOVA_no_elephant.csv"
+)
+
+out_tukey_all <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_TukeyHSD_all_no_elephant.csv"
+)
+
+out_tukey_sig <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_xlsx <- file.path(
+  out_dir,
+  "Table4_x_status_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+out_log <- file.path(
+  out_dir,
+  "status_alpha_diversity_analysis_log_no_elephant.txt"
+)
+
+plot_files_png <- c(
+  "ACE" = file.path(plot_dir, "Fig4_x_status_alpha_ACE_boxplot_letters_no_elephant_CN_v1.png"),
+  "Chao1" = file.path(plot_dir, "Fig4_x_status_alpha_Chao1_boxplot_letters_no_elephant_CN_v1.png"),
+  "Shannon" = file.path(plot_dir, "Fig4_x_status_alpha_Shannon_boxplot_letters_no_elephant_CN_v1.png"),
+  "Simpson" = file.path(plot_dir, "Fig4_x_status_alpha_Simpson_boxplot_letters_no_elephant_CN_v1.png")
+)
+
+input_files <- data.frame(
+  file_label = c("metadata", "sample_alpha"),
+  file_path = c(metadata_file, alpha_file),
+  exists = file.exists(c(metadata_file, alpha_file)),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("\n使用中文字体：", font_path, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_SH", metrics_for_table)
+
+status_order <- c("家养", "圈养", "野生")
+
+status_label_map <- c(
+  "domesticated" = "家养",
+  "captive" = "圈养",
+  "wild" = "野生"
+)
+
+status_colors <- c(
+  "家养" = "#E64B35",
+  "圈养" = "#4DBBD5",
+  "野生" = "#00A087"
+)
+
+metric_y_labels <- c(
+  "ACE" = "ACE",
+  "Chao1" = "Chao1",
+  "Shannon" = "Shannon",
+  "Simpson" = "Simpson"
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001",
+      sprintf("%.4f", p)
+    )
+  )
+}
+
+format_anova_label <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("ANOVA: P = NA")
+  }
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+sig_label <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+get_upper_whisker <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  boxplot.stats(x)$stats[5]
+}
+
+make_tukey_letters_no_package <- function(df, group_col, metric, alpha = 0.05) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  groups_ordered <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value)) %>%
+    pull(group) %>%
+    as.character()
+
+  if (length(groups_ordered) == 1) {
+    return(setNames("a", groups_ordered))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  sig_mat <- matrix(
+    FALSE,
+    nrow = length(groups_ordered),
+    ncol = length(groups_ordered),
+    dimnames = list(groups_ordered, groups_ordered)
+  )
+
+  for (comp in rownames(tk)) {
+    p <- tk[comp, "p adj"]
+    parts <- strsplit(comp, "-", fixed = TRUE)[[1]]
+
+    if (length(parts) == 2) {
+      g1 <- parts[1]
+      g2 <- parts[2]
+
+      if (g1 %in% groups_ordered && g2 %in% groups_ordered) {
+        if (!is.na(p) && p < alpha) {
+          sig_mat[g1, g2] <- TRUE
+          sig_mat[g2, g1] <- TRUE
+        }
+      }
+    }
+  }
+
+  letters_pool <- c(
+    letters,
+    paste0("a", letters),
+    paste0("b", letters),
+    paste0("c", letters)
+  )
+
+  group_letters <- setNames(rep("", length(groups_ordered)), groups_ordered)
+  letter_groups <- list()
+
+  for (g in groups_ordered) {
+    assigned <- FALSE
+
+    if (length(letter_groups) > 0) {
+      for (li in seq_along(letter_groups)) {
+        members <- letter_groups[[li]]
+        can_share <- all(!sig_mat[g, members])
+
+        if (can_share) {
+          letter_groups[[li]] <- c(members, g)
+          group_letters[g] <- paste0(group_letters[g], letters_pool[li])
+          assigned <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!assigned) {
+      new_i <- length(letter_groups) + 1
+      letter_groups[[new_i]] <- g
+      group_letters[g] <- paste0(group_letters[g], letters_pool[new_i])
+    }
+  }
+
+  for (i in seq_along(groups_ordered)) {
+    for (j in seq_along(groups_ordered)) {
+      if (j <= i) next
+
+      g1 <- groups_ordered[i]
+      g2 <- groups_ordered[j]
+
+      if (!sig_mat[g1, g2]) {
+        chars1 <- unlist(strsplit(group_letters[g1], split = ""))
+        chars2 <- unlist(strsplit(group_letters[g2], split = ""))
+
+        shared <- length(intersect(chars1, chars2)) > 0
+
+        if (!shared) {
+          added <- FALSE
+
+          for (li in seq_along(letter_groups)) {
+            members <- letter_groups[[li]]
+
+            if (g1 %in% members && !(g2 %in% members)) {
+              can_add <- all(!sig_mat[g2, members])
+
+              if (can_add) {
+                letter_groups[[li]] <- c(members, g2)
+                group_letters[g2] <- paste0(group_letters[g2], letters_pool[li])
+                added <- TRUE
+                break
+              }
+            }
+          }
+
+          if (!added) {
+            for (li in seq_along(letter_groups)) {
+              members <- letter_groups[[li]]
+
+              if (g2 %in% members && !(g1 %in% members)) {
+                can_add <- all(!sig_mat[g1, members])
+
+                if (can_add) {
+                  letter_groups[[li]] <- c(members, g1)
+                  group_letters[g1] <- paste0(group_letters[g1], letters_pool[li])
+                  added <- TRUE
+                  break
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  group_letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics, group_order = NULL) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      out[[mean_sd_col]] <- sprintf(
+        "%.4f ± %.4f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    } else {
+      out[[mean_sd_col]] <- sprintf(
+        "%.2f ± %.2f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    }
+  }
+
+  if (!is.null(group_order)) {
+    out <- out %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  out
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table, group_order = NULL) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  for (m in metrics) {
+    letter_vec <- make_tukey_letters_no_package(df, group_col, m, alpha = 0.05)
+    mean_col <- paste0(m, "_mean")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      paper[[m]] <- paste0(
+        sprintf("%.4f", paper[[mean_col]]),
+        letter_vec[as.character(paper$group)]
+      )
+    } else {
+      paper[[m]] <- paste0(
+        sprintf("%.2f", paper[[mean_col]]),
+        letter_vec[as.character(paper$group)]
+      )
+    }
+  }
+
+  if (!is.null(group_order)) {
+    paper <- paper %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  paper <- paper %>%
+    select(group, n, all_of(metrics))
+
+  anova_row <- data.frame(
+    group = "ANOVA（P-value）",
+    n = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    try(
+      setColWidths(wb, sheet = s, cols = 1:80, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+plot_alpha_box_letters <- function(alpha_df, letters_df, anova_df, metric, out_png) {
+
+  dat <- alpha_df %>%
+    select(status_CN, value = all_of(metric)) %>%
+    filter(!is.na(status_CN), !is.na(value), status_CN %in% status_order)
+
+  dat$status_CN <- factor(dat$status_CN, levels = status_order)
+
+  letter_dat <- letters_df %>%
+    select(group, letter = all_of(metric)) %>%
+    rename(status_CN = group) %>%
+    filter(status_CN %in% status_order)
+
+  letter_dat$status_CN <- factor(letter_dat$status_CN, levels = status_order)
+
+  letter_pos_df <- dat %>%
+    group_by(status_CN) %>%
+    summarise(
+      upper_whisker = get_upper_whisker(value),
+      .groups = "drop"
+    ) %>%
+    left_join(letter_dat, by = "status_CN") %>%
+    arrange(status_CN)
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  letter_pos_df <- letter_pos_df %>%
+    mutate(
+      letter_y = upper_whisker + 0.050 * y_range
+    )
+
+  max_letter_y <- max(letter_pos_df$letter_y, na.rm = TRUE)
+
+  anova_p <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  anova_label <- format_anova_label(anova_p[1])
+
+  anova_y <- max_letter_y + 0.13 * y_range
+  y_top <- anova_y + 0.10 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = status_CN,
+      y = value,
+      fill = status_CN
+    )
+  ) +
+    geom_boxplot(
+      width = 0.56,
+      outlier.shape = NA,
+      linewidth = 0.40,
+      color = "black"
+    ) +
+    geom_text(
+      data = letter_pos_df,
+      aes(
+        x = status_CN,
+        y = letter_y,
+        label = letter
+      ),
+      family = "songti",
+      size = 3.3,
+      vjust = 0,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(
+      values = status_colors,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 10.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 0.60,
+      y = anova_y,
+      label = anova_label,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.8
+    )
+
+  ggsave(
+    filename = out_png,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_png),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取 metadata
+## =========================
+
+cat("\n读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+possible_sample_cols <- c(
+  "sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID"
+)
+
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中没有找到样本 ID 列。")
+}
+
+if (!"status" %in% colnames(meta)) {
+  stop("metadata 中没有 status 列。")
+}
+
+meta_status <- meta %>%
+  transmute(
+    sample_id = as.character(.data[[sample_col]]),
+    status_original = clean_value(status),
+    status_clean = tolower(status_original),
+    status_CN = unname(status_label_map[status_clean])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(status_CN),
+    status_CN %in% status_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+meta_status$status_CN <- factor(meta_status$status_CN, levels = status_order)
+
+cat("metadata 中 status 有效样本数：", nrow(meta_status), "\n", sep = "")
+cat("metadata 中 status 分组样本数：\n")
+print(table(meta_status$status_CN))
+
+## =========================
+## 6. 读取样本水平 alpha 数据并合并 status
+## =========================
+
+cat("\n读取样本水平 Alpha 多样性数据 ...\n")
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c(
+  "sample_id",
+  metrics_all
+)
+
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+status_alpha <- alpha_df %>%
+  mutate(sample_id = as.character(sample_id)) %>%
+  select(sample_id, all_of(metrics_all)) %>%
+  inner_join(
+    meta_status %>% select(sample_id, status_CN, status_original),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, status_CN, status_original)
+
+status_alpha$status_CN <- factor(status_alpha$status_CN, levels = status_order)
+
+cat("进入 status Alpha 分析的样本数：", nrow(status_alpha), "\n", sep = "")
+cat("进入分析的 status 样本数：\n")
+print(table(status_alpha$status_CN))
+
+write.csv(
+  status_alpha,
+  out_status_alpha,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+status_sample_count <- status_alpha %>%
+  count(status_CN, name = "n") %>%
+  mutate(status_CN = factor(status_CN, levels = status_order)) %>%
+  arrange(status_CN) %>%
+  mutate(status_CN = as.character(status_CN))
+
+write.csv(
+  status_sample_count,
+  out_sample_count,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 统计检验与表格
+## =========================
+
+cat("\n进行 ANOVA + TukeyHSD ...\n")
+
+status_anova <- run_anova_table(
+  status_alpha,
+  "status_CN",
+  metrics_for_table
+)
+
+status_tukey_all <- run_tukey_table(
+  status_alpha,
+  "status_CN",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+status_tukey_sig <- run_tukey_table(
+  status_alpha,
+  "status_CN",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+status_mean_sd <- make_mean_sd_detail(
+  status_alpha,
+  "status_CN",
+  metrics_all,
+  group_order = status_order
+)
+
+status_paper_table <- make_paper_table(
+  status_alpha,
+  "status_CN",
+  metrics_for_table,
+  status_anova,
+  group_order = status_order
+)
+
+write.csv(
+  status_paper_table,
+  out_paper_table,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  status_mean_sd,
+  out_mean_sd,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  status_anova,
+  out_anova,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  status_tukey_all,
+  out_tukey_all,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  status_tukey_sig,
+  out_tukey_sig,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 8. Excel 汇总
+## =========================
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "paper_table")
+addWorksheet(wb, "mean_sd_detail")
+addWorksheet(wb, "ANOVA")
+addWorksheet(wb, "TukeyHSD_significant")
+addWorksheet(wb, "TukeyHSD_all")
+addWorksheet(wb, "sample_count")
+addWorksheet(wb, "sample_alpha_status")
+
+writeData(wb, "paper_table", status_paper_table)
+writeData(wb, "mean_sd_detail", status_mean_sd)
+writeData(wb, "ANOVA", status_anova)
+writeData(wb, "TukeyHSD_significant", status_tukey_sig)
+writeData(wb, "TukeyHSD_all", status_tukey_all)
+writeData(wb, "sample_count", status_sample_count)
+writeData(wb, "sample_alpha_status", status_alpha)
+
+save_workbook_with_auto_width(wb, out_xlsx)
+
+## =========================
+## 9. 绘制四张箱线图
+## =========================
+
+cat("\n绘制 Alpha 多样性箱线图 ...\n")
+
+letters_df <- status_paper_table %>%
+  filter(
+    !is.na(group),
+    group != "",
+    !grepl("^ANOVA", group)
+  ) %>%
+  select(group, all_of(metrics_for_table))
+
+for (m in metrics_for_table) {
+  letters_df[[m]] <- stringr::str_extract(
+    as.character(letters_df[[m]]),
+    "[A-Za-z]+$"
+  )
+}
+
+for (m in metrics_for_table) {
+  plot_alpha_box_letters(
+    alpha_df = status_alpha,
+    letters_df = letters_df,
+    anova_df = status_anova,
+    metric = m,
+    out_png = plot_files_png[[m]]
+  )
+}
+
+## =========================
+## 10. 日志
+## =========================
+
+sink(out_log)
+
+cat("Status alpha diversity analysis, no-elephant version\n")
+cat("===================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input sample-level alpha diversity file:\n")
+cat(alpha_file, "\n\n")
+
+cat("No alpha diversity recomputation performed.\n")
+cat("BIOM file was not read.\n")
+cat("ANOVA + TukeyHSD were recalculated for status grouping.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n\n")
+
+cat("Grouping variable:\n")
+cat("metadata$status\n\n")
+
+cat("Status mapping:\n")
+cat("domesticated -> 家养\n")
+cat("captive -> 圈养\n")
+cat("wild -> 野生\n\n")
+
+cat("Status order:\n")
+print(status_order)
+
+cat("\nSample number used:\n")
+cat(nrow(status_alpha), "\n\n")
+
+cat("Status sample counts:\n")
+print(status_sample_count)
+
+cat("\nANOVA:\n")
+print(status_anova)
+
+cat("\nSignificant TukeyHSD results:\n")
+print(status_tukey_sig)
+
+cat("\nPaper table:\n")
+print(status_paper_table)
+
+cat("\nOutput files:\n")
+cat("Status alpha sample table:", out_status_alpha, "\n")
+cat("Sample count:", out_sample_count, "\n")
+cat("Paper table:", out_paper_table, "\n")
+cat("Mean SD:", out_mean_sd, "\n")
+cat("ANOVA:", out_anova, "\n")
+cat("Tukey all:", out_tukey_all, "\n")
+cat("Tukey significant:", out_tukey_sig, "\n")
+cat("Excel:", out_xlsx, "\n")
+
+cat("\nPlots:\n")
+print(plot_files_png)
+
+sink()
+
+## =========================
+## 11. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n", sep = "")
+cat("Plot directory:\n", plot_dir, "\n\n", sep = "")
+
+cat("Sample number used:", nrow(status_alpha), "\n")
+cat("Status sample counts:\n")
+print(status_sample_count)
+
+cat("\nKey tables:\n")
+cat(out_paper_table, "\n")
+cat(out_mean_sd, "\n")
+cat(out_anova, "\n")
+cat(out_tukey_all, "\n")
+cat(out_xlsx, "\n\n")
+
+cat("Boxplots:\n")
+cat(plot_files_png[["ACE"]], "\n")
+cat(plot_files_png[["Chao1"]], "\n")
+cat(plot_files_png[["Shannon"]], "\n")
+cat(plot_files_png[["Simpson"]], "\n\n")
+
+cat("Log:\n")
+cat(out_log, "\n")
+#脚本里用了 rownames_to_column()，但这次脚本没有加载 tibble 包，所以 R 找不到这个函数。
+#最稳妥的改法不是让你手动找代码，而是直接用命令自动替换成 tibble::rownames_to_column()。这样即使没有显式 library(tibble)，也能调用。
+#在 WSL 终端直接运行下面这段：
+cd /mnt/d/ITS_SH_pipeline
+
+python3 - <<'PY'
+from pathlib import Path
+
+script = Path("scripts/chapter4_status_alpha/01_status_alpha_diversity_ANOVA_Tukey_boxplot_no_elephant.R")
+
+txt = script.read_text()
+
+old = 'rownames_to_column("comparison")'
+new = 'tibble::rownames_to_column("comparison")'
+
+if old not in txt:
+    raise SystemExit("没有找到 rownames_to_column(\"comparison\")，请检查脚本内容是否完整。")
+
+txt = txt.replace(old, new)
+
+script.write_text(txt)
+
+print("已修复：rownames_to_column() 已改为 tibble::rownames_to_column()。")
+PY
+#运行
+Rscript scripts/chapter4_status_alpha/01_status_alpha_diversity_ANOVA_Tukey_boxplot_no_elephant.R
