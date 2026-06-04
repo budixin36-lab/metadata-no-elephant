@@ -3905,3 +3905,1537 @@ cat("形状映射表：", shape_map_csv, "\n", sep = "")
 EOF
 
 Rscript scripts/07s_patch_host_species_NMDS_manualstar_no_elephant_CN.R
+#这次只改两处显示格式：
+#坐标轴刻度值：
+#先去掉末尾多余的 0，再按该轴刻度中小数位数最多者统一补齐。
+#stress：
+#由 sprintf("%.8f", nmds$stress) 改为 sprintf("%.3f", nmds$stress)。
+#下面给你完整新版脚本，输出到新文件名，不覆盖旧图。
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+nano scripts/07t_patch_host_species_NMDS_manualstar_axis_decimal_stress3_no_elephant_CN.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+# ============================================================
+# patch script v2:
+# host species NMDS centroid ±SD / ±SE
+# manual-star version, axis decimal + stress 3 digits
+#
+# 目的：
+# 1. 不重新计算 Bray-Curtis；
+# 2. 不重新运行 NMDS；
+# 3. 不重新运行 Adonis；
+# 4. 不重新运行 betadisper；
+# 5. 只读取已有 centroid / segment / Adonis / NMDS RDS 结果重画图；
+# 6. 坐标轴刻度按“去尾零后最大位数统一补齐”显示；
+# 7. stress 值保留小数点后三位；
+# 8. 不覆盖旧 manualstarpatch 图。
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+  library(cowplot)
+})
+
+# =========================
+# 1. 路径
+# =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+out_dir  <- file.path(base_dir, "results/chapter3_beta_diversity_no_elephant")
+
+centroid_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SD_SE_summary_no_elephant_CN_v3.csv"
+)
+
+sd_segment_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SD_segments_no_elephant_CN_v3.csv"
+)
+
+se_segment_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SE_segments_no_elephant_CN_v3.csv"
+)
+
+host_family_display_csv <- file.path(
+  out_dir,
+  "NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv"
+)
+
+adonis_csv <- file.path(
+  out_dir,
+  "host_species_adonis_bray_curtis_no_elephant.csv"
+)
+
+nmds_rds <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_no_elephant_trymax50.rds"
+)
+
+if (!file.exists(centroid_csv)) stop("找不到 centroid 汇总表：", centroid_csv)
+if (!file.exists(sd_segment_csv)) stop("找不到 SD 线段表：", sd_segment_csv)
+if (!file.exists(se_segment_csv)) stop("找不到 SE 线段表：", se_segment_csv)
+if (!file.exists(host_family_display_csv)) stop("找不到宿主科显示范围文件：", host_family_display_csv)
+if (!file.exists(adonis_csv)) stop("找不到 Adonis 结果：", adonis_csv)
+if (!file.exists(nmds_rds)) stop("找不到 NMDS RDS：", nmds_rds)
+
+shape_map_csv <- file.path(
+  out_dir,
+  "host_species_shape_mapping_no_elephant_CN_manualstar_axis_decimal_stress3_patch.csv"
+)
+
+out_png_sd <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SD_no_elephant_CN_manualstarpatch_axis_decimal_stress3.png"
+)
+
+out_pdf_sd <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SD_no_elephant_CN_manualstarpatch_axis_decimal_stress3.pdf"
+)
+
+out_png_se <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SE_no_elephant_CN_manualstarpatch_axis_decimal_stress3.png"
+)
+
+out_pdf_se <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SE_no_elephant_CN_manualstarpatch_axis_decimal_stress3.pdf"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "host_species_NMDS_manualstarpatch_axis_decimal_stress3_summary_no_elephant_CN.txt"
+)
+
+# =========================
+# 2. 字体
+# =========================
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+if (is.na(font_file)) stop("找不到可用中文字体。")
+
+font_add("CNFont", regular = font_file)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+# =========================
+# 3. 作图参数
+# =========================
+
+axis_padding <- 0.05
+
+fig_width  <- 10.4
+fig_height <- 7.2
+dpi_out    <- 600
+
+err_linewidth <- 0.42
+
+symbol_size_main   <- 4.0
+symbol_size_legend <- 4.4
+
+axis_title_size  <- 19
+axis_text_size   <- 13
+adonis_text_size <- 4.8
+caption_size     <- 13
+legend_text_size <- 12.4
+
+legend_step <- 1.15
+
+# =========================
+# 4. 顺序、颜色、符号
+# =========================
+
+family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_colors_cn <- c(
+  "牛科" = "#F03B35",
+  "猪科" = "#D4AE00",
+  "鹿科" = "#55B84A",
+  "马科" = "#2DB7C8",
+  "犀科" = "#7B4AB3"
+)
+
+species_order_cn <- c(
+  "家牛", "家牦牛", "家牦牛×家牛", "欧洲野牛", "瘤牛", "瘤牛×家牛",
+  "野牦牛", "绵羊", "家山羊", "藏羚", "水牛", "藏原羚",
+  "家猪", "野猪",
+  "驯鹿", "梅花鹿", "加拿大马鹿", "小麂", "黑麂", "黇鹿",
+  "家马", "藏野驴",
+  "黑犀"
+)
+
+species_family_map_cn <- c(
+  "家牛" = "牛科",
+  "家牦牛" = "牛科",
+  "家牦牛×家牛" = "牛科",
+  "欧洲野牛" = "牛科",
+  "瘤牛" = "牛科",
+  "瘤牛×家牛" = "牛科",
+  "野牦牛" = "牛科",
+  "绵羊" = "牛科",
+  "家山羊" = "牛科",
+  "藏羚" = "牛科",
+  "水牛" = "牛科",
+  "藏原羚" = "牛科",
+  "家猪" = "猪科",
+  "野猪" = "猪科",
+  "驯鹿" = "鹿科",
+  "梅花鹿" = "鹿科",
+  "加拿大马鹿" = "鹿科",
+  "小麂" = "鹿科",
+  "黑麂" = "鹿科",
+  "黇鹿" = "鹿科",
+  "家马" = "马科",
+  "藏野驴" = "马科",
+  "黑犀" = "犀科"
+)
+
+species_color_map <- setNames(
+  unname(family_colors_cn[species_family_map_cn[species_order_cn]]),
+  species_order_cn
+)
+
+# 用字符符号，避免默认 shape 与十字误差棒混淆。
+# 藏原羚保留五角星。
+species_symbol_map <- c(
+  "家牛" = "●",
+  "家牦牛" = "▲",
+  "家牦牛×家牛" = "■",
+  "欧洲野牛" = "◆",
+  "瘤牛" = "○",
+  "瘤牛×家牛" = "△",
+  "野牦牛" = "□",
+  "绵羊" = "◇",
+  "家山羊" = "▴",
+  "藏羚" = "▾",
+  "水牛" = "◈",
+  "藏原羚" = "★",
+  "家猪" = "●",
+  "野猪" = "▲",
+  "驯鹿" = "●",
+  "梅花鹿" = "▲",
+  "加拿大马鹿" = "■",
+  "小麂" = "◆",
+  "黑麂" = "○",
+  "黇鹿" = "△",
+  "家马" = "●",
+  "藏野驴" = "▲",
+  "黑犀" = "●"
+)
+
+# =========================
+# 5. 工具函数
+# =========================
+
+get_padded_range <- function(x, padding = 0.05) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+  if (is.na(d) || d == 0) d <- max(abs(r), 1e-6)
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+make_axis_ticks <- function(range_vec, target_ticks) {
+  target_ticks[target_ticks >= range_vec["lower"] & target_ticks <= range_vec["upper"]]
+}
+
+# ------------------------------------------------------------
+# 坐标轴刻度格式函数
+#
+# 逻辑：
+# 1. 对当前轴刻度值先按 max_digits 位小数转为字符；
+# 2. 去掉每个刻度末尾多余的 0；
+# 3. 判断这一组刻度中最多需要保留几位小数；
+# 4. 所有刻度统一保留这个位数。
+#
+# 例如：
+#   0.00000, 0.00050, 0.00100
+# 先变为：
+#   0, 0.0005, 0.001
+# 最多小数位数为 4；
+# 最终显示：
+#   0.0000, 0.0005, 0.0010
+# ------------------------------------------------------------
+fmt_decimal_align <- function(x, max_digits = 8) {
+  out <- rep(NA_character_, length(x))
+
+  ok <- !is.na(x)
+  if (!any(ok)) return(out)
+
+  x2 <- x[ok]
+  x2[abs(x2) < 1e-12] <- 0
+
+  raw <- sprintf(paste0("%.", max_digits, "f"), x2)
+
+  trimmed <- sub("0+$", "", raw)
+  trimmed <- sub("\\.$", "", trimmed)
+
+  decimal_digits <- ifelse(
+    grepl("\\.", trimmed),
+    nchar(sub("^.*\\.", "", trimmed)),
+    0
+  )
+
+  keep_digits <- max(decimal_digits, na.rm = TRUE)
+
+  out[ok] <- sprintf(paste0("%.", keep_digits, "f"), x2)
+
+  out
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "host_species_key")
+  if (length(idx) == 0) idx <- which(adonis_df$term == "host_species")
+  if (length(idx) == 0) idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  if (length(idx) == 0) stop("无法识别 Adonis 主效应行。")
+  idx[1]
+}
+
+# =========================
+# 6. 读取已有结果
+# =========================
+
+centroid_df <- read.csv(
+  centroid_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+sd_segments <- read.csv(
+  sd_segment_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+se_segments <- read.csv(
+  se_segment_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+family_display_df <- read.csv(
+  host_family_display_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+adonis_df <- read.csv(
+  adonis_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+nmds <- readRDS(nmds_rds)
+
+needed_centroid_cols <- c(
+  "host_species_cn",
+  "host_family_cn",
+  "NMDS1.mean",
+  "NMDS2.mean"
+)
+
+missing_centroid_cols <- setdiff(needed_centroid_cols, colnames(centroid_df))
+if (length(missing_centroid_cols) > 0) {
+  stop("centroid 表缺少列：", paste(missing_centroid_cols, collapse = ", "))
+}
+
+needed_segment_cols <- c(
+  "host_species_cn",
+  "host_family_cn",
+  "x",
+  "xend",
+  "y",
+  "yend"
+)
+
+missing_sd_cols <- setdiff(needed_segment_cols, colnames(sd_segments))
+missing_se_cols <- setdiff(needed_segment_cols, colnames(se_segments))
+
+if (length(missing_sd_cols) > 0) {
+  stop("SD 线段表缺少列：", paste(missing_sd_cols, collapse = ", "))
+}
+if (length(missing_se_cols) > 0) {
+  stop("SE 线段表缺少列：", paste(missing_se_cols, collapse = ", "))
+}
+
+if (!all(c("NMDS1", "NMDS2") %in% colnames(family_display_df))) {
+  stop("宿主科显示范围文件缺少 NMDS1 / NMDS2 列。")
+}
+
+centroid_df <- centroid_df %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn),
+    color = unname(species_color_map[as.character(host_species_cn)]),
+    symbol = unname(species_symbol_map[as.character(host_species_cn)])
+  )
+
+sd_segments <- sd_segments %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+se_segments <- se_segments %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+write.csv(
+  centroid_df %>%
+    select(host_species_cn, host_family_cn, color, symbol),
+  shape_map_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# =========================
+# 7. 范围、刻度与标注
+# =========================
+
+x_range <- get_padded_range(family_display_df$NMDS1, axis_padding)
+y_range <- get_padded_range(family_display_df$NMDS2, axis_padding)
+
+x_ticks <- make_axis_ticks(
+  x_range,
+  c(-0.0005, 0, 0.0005, 0.0010)
+)
+
+y_ticks <- make_axis_ticks(
+  y_range,
+  c(-0.0002, 0, 0.0002)
+)
+
+if (length(x_ticks) < 2) x_ticks <- pretty(x_range, n = 4)
+if (length(y_ticks) < 2) y_ticks <- pretty(y_range, n = 4)
+
+main_idx <- extract_adonis_main_row(adonis_df)
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+if (is.na(p_col)) stop("Adonis 结果中没有 P 值列。")
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p  <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+stress_label <- paste0(
+  "Bray-Curtis NMDS stress = ",
+  sprintf("%.3f", nmds$stress)
+)
+
+x_anno <- x_range["lower"] + 0.05 * diff(x_range)
+y_anno <- y_range["upper"] - 0.08 * diff(y_range)
+
+# =========================
+# 8. 主图函数
+# =========================
+
+make_main_plot <- function(segment_df) {
+  ggplot() +
+    geom_segment(
+      data = segment_df,
+      aes(
+        x = x,
+        xend = xend,
+        y = y,
+        yend = yend,
+        color = host_species_cn
+      ),
+      linewidth = err_linewidth,
+      lineend = "butt",
+      show.legend = FALSE
+    ) +
+    geom_text(
+      data = centroid_df,
+      aes(
+        x = NMDS1.mean,
+        y = NMDS2.mean,
+        label = symbol,
+        color = host_species_cn
+      ),
+      family = "CNFont",
+      size = symbol_size_main,
+      show.legend = FALSE
+    ) +
+    annotate(
+      "text",
+      x = x_anno,
+      y = y_anno,
+      label = adonis_label,
+      hjust = 0,
+      vjust = 1,
+      size = adonis_text_size,
+      family = "CNFont",
+      color = "black"
+    ) +
+    scale_color_manual(
+      values = species_color_map,
+      breaks = species_order_cn,
+      drop = FALSE
+    ) +
+    scale_x_continuous(
+      breaks = x_ticks,
+      labels = fmt_decimal_align,
+      expand = expansion(mult = c(0.04, 0.08))
+    ) +
+    scale_y_continuous(
+      breaks = y_ticks,
+      labels = fmt_decimal_align,
+      expand = expansion(mult = c(0.05, 0.08))
+    ) +
+    labs(
+      x = "NMDS1",
+      y = "NMDS2",
+      caption = stress_label
+    ) +
+    coord_cartesian(
+      xlim = x_range,
+      ylim = y_range,
+      clip = "off"
+    ) +
+    theme_bw(base_size = 14, base_family = "CNFont") +
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_blank(),
+      legend.position = "none",
+
+      axis.title = element_text(
+        size = axis_title_size,
+        colour = "black",
+        family = "CNFont"
+      ),
+      axis.text = element_text(
+        size = axis_text_size,
+        colour = "black",
+        family = "CNFont"
+      ),
+
+      plot.caption = element_text(
+        size = caption_size,
+        hjust = 0,
+        colour = "black",
+        family = "CNFont",
+        lineheight = 1.15
+      ),
+      plot.caption.position = "plot",
+
+      plot.margin = margin(t = 10, r = 8, b = 36, l = 22)
+    )
+}
+
+# =========================
+# 9. 手工图例函数
+# =========================
+
+make_symbol_legend <- function() {
+  legend_df <- data.frame(
+    host_species_cn = species_order_cn,
+    host_family_cn = unname(species_family_map_cn[species_order_cn]),
+    color = unname(species_color_map[species_order_cn]),
+    symbol = unname(species_symbol_map[species_order_cn]),
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      y = rev(seq_along(host_species_cn)) * legend_step,
+      x_symbol = 0.5,
+      x_text = 0.95,
+      host_species_cn = factor(host_species_cn, levels = species_order_cn)
+    )
+
+  ggplot(legend_df) +
+    geom_text(
+      aes(
+        x = x_symbol,
+        y = y,
+        label = symbol,
+        color = host_species_cn
+      ),
+      family = "CNFont",
+      size = symbol_size_legend,
+      show.legend = FALSE
+    ) +
+    geom_text(
+      aes(
+        x = x_text,
+        y = y,
+        label = host_species_cn
+      ),
+      hjust = 0,
+      family = "CNFont",
+      size = legend_text_size / .pt,
+      color = "black"
+    ) +
+    scale_color_manual(
+      values = species_color_map,
+      breaks = species_order_cn,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      xlim = c(0.1, 4.2),
+      ylim = c(0.3, max(legend_df$y) + 0.8),
+      clip = "off"
+    ) +
+    theme_void(base_family = "CNFont") +
+    theme(
+      legend.position = "none",
+      plot.margin = margin(t = 18, r = 4, b = 18, l = 2)
+    )
+}
+
+# =========================
+# 10. 拼接与输出
+# =========================
+
+p_sd_main <- make_main_plot(sd_segments)
+p_se_main <- make_main_plot(se_segments)
+p_legend  <- make_symbol_legend()
+
+p_sd <- cowplot::plot_grid(
+  p_sd_main,
+  p_legend,
+  ncol = 2,
+  rel_widths = c(4.95, 1.55),
+  align = "h",
+  axis = "tb"
+)
+
+p_se <- cowplot::plot_grid(
+  p_se_main,
+  p_legend,
+  ncol = 2,
+  rel_widths = c(4.95, 1.55),
+  align = "h",
+  axis = "tb"
+)
+
+ggsave(
+  filename = out_png_sd,
+  plot = p_sd,
+  width = fig_width,
+  height = fig_height,
+  dpi = dpi_out,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf_sd,
+  plot = p_sd,
+  width = fig_width,
+  height = fig_height,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_png_se,
+  plot = p_se,
+  width = fig_width,
+  height = fig_height,
+  dpi = dpi_out,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf_se,
+  plot = p_se,
+  width = fig_width,
+  height = fig_height,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+# =========================
+# 11. summary
+# =========================
+
+sink(summary_txt)
+
+cat("Host species NMDS manual-star patch axis decimal stress3 summary\n")
+cat("===============================================================\n\n")
+
+cat("本脚本未重新计算 Bray-Curtis、NMDS、Adonis 或 betadisper。\n")
+cat("仅基于已有 centroid / segment 结果重画图。\n\n")
+
+cat("本次修改：\n")
+cat("1. 坐标轴刻度先去尾零，再按该轴最大所需小数位统一补齐。\n")
+cat("2. stress 保留小数点后三位。\n")
+cat("3. 不覆盖旧 manualstarpatch 图。\n\n")
+
+cat("输入文件：\n")
+cat("centroid CSV: ", centroid_csv, "\n", sep = "")
+cat("SD segment CSV: ", sd_segment_csv, "\n", sep = "")
+cat("SE segment CSV: ", se_segment_csv, "\n", sep = "")
+cat("host family display CSV: ", host_family_display_csv, "\n", sep = "")
+cat("Adonis CSV: ", adonis_csv, "\n", sep = "")
+cat("NMDS RDS: ", nmds_rds, "\n\n", sep = "")
+
+cat("输出文件：\n")
+cat("SD PNG: ", out_png_sd, "\n", sep = "")
+cat("SD PDF: ", out_pdf_sd, "\n", sep = "")
+cat("SE PNG: ", out_png_se, "\n", sep = "")
+cat("SE PDF: ", out_pdf_se, "\n", sep = "")
+cat("shape map CSV: ", shape_map_csv, "\n\n", sep = "")
+
+cat("x ticks raw:\n")
+print(x_ticks)
+
+cat("\ny ticks raw:\n")
+print(y_ticks)
+
+cat("\nx ticks formatted:\n")
+print(fmt_decimal_align(x_ticks))
+
+cat("\ny ticks formatted:\n")
+print(fmt_decimal_align(y_ticks))
+
+cat("\nAdonis:\n")
+cat(adonis_label, "\n\n")
+
+cat("Stress:\n")
+cat(stress_label, "\n\n")
+
+cat("符号映射：\n")
+print(
+  centroid_df %>%
+    select(host_species_cn, host_family_cn, color, symbol)
+)
+
+sink()
+
+cat("\nDone!\n")
+cat("只重画图，未重新计算 Bray-Curtis、NMDS、Adonis 或 betadisper。\n")
+cat("坐标轴刻度已按去尾零后最大位数统一对齐。\n")
+cat("stress 已保留三位小数。\n")
+cat("已输出 SD 图：", out_png_sd, "\n", sep = "")
+cat("已输出 SE 图：", out_png_se, "\n", sep = "")
+cat("符号映射表：", shape_map_csv, "\n", sep = "")
+#运行
+Rscript scripts/07t_patch_host_species_NMDS_manualstar_axis_decimal_stress3_no_elephant_CN.R
+#本次修改说明
+#输入文件
+#沿用已有结果：
+#host_species_NMDS_centroid_SD_SE_summary_no_elephant_CN_v3.csv
+#host_species_NMDS_centroid_SD_segments_no_elephant_CN_v3.csv
+#host_species_NMDS_centroid_SE_segments_no_elephant_CN_v3.csv
+#NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv
+#host_species_adonis_bray_curtis_no_elephant.csv
+#NMDS_bray_curtis_no_elephant_trymax50.rds
+#是否重算
+#不重算 Bray-Curtis；不重跑 NMDS；不重跑 Adonis；不重跑 betadisper。
+#只读取已有结果重新画图。
+#本次只修改
+#修复家山羊、藏羚、水牛图例符号缺失；
+#继续保持坐标轴刻度“去尾零后按最大位数统一补齐”；
+#继续保持 stress 保留小数点后三位；
+#输出新文件，不覆盖上一版。
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+nano scripts/07u_patch_host_species_NMDS_manualstar_axis_decimal_stress3_symbolfix_no_elephant_CN.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+# ============================================================
+# patch script v3:
+# host species NMDS centroid ±SD / ±SE
+# manual-symbol version, axis decimal + stress 3 digits + symbol fix
+#
+# 目的：
+# 1. 不重新计算 Bray-Curtis；
+# 2. 不重新运行 NMDS；
+# 3. 不重新运行 Adonis；
+# 4. 不重新运行 betadisper；
+# 5. 只读取已有 centroid / segment / Adonis / NMDS RDS 结果重画图；
+# 6. 坐标轴刻度按“去尾零后最大位数统一补齐”显示；
+# 7. stress 值保留小数点后三位；
+# 8. 修复家山羊、藏羚、水牛图例符号缺失问题；
+# 9. 不覆盖旧图。
+# ============================================================
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+  library(cowplot)
+})
+
+# =========================
+# 1. 路径
+# =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+out_dir  <- file.path(base_dir, "results/chapter3_beta_diversity_no_elephant")
+
+centroid_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SD_SE_summary_no_elephant_CN_v3.csv"
+)
+
+sd_segment_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SD_segments_no_elephant_CN_v3.csv"
+)
+
+se_segment_csv <- file.path(
+  out_dir,
+  "host_species_NMDS_centroid_SE_segments_no_elephant_CN_v3.csv"
+)
+
+host_family_display_csv <- file.path(
+  out_dir,
+  "NMDS_host_family_display_zoom_v3_plot_only_no_elephant_CN.csv"
+)
+
+adonis_csv <- file.path(
+  out_dir,
+  "host_species_adonis_bray_curtis_no_elephant.csv"
+)
+
+nmds_rds <- file.path(
+  out_dir,
+  "NMDS_bray_curtis_no_elephant_trymax50.rds"
+)
+
+if (!file.exists(centroid_csv)) stop("找不到 centroid 汇总表：", centroid_csv)
+if (!file.exists(sd_segment_csv)) stop("找不到 SD 线段表：", sd_segment_csv)
+if (!file.exists(se_segment_csv)) stop("找不到 SE 线段表：", se_segment_csv)
+if (!file.exists(host_family_display_csv)) stop("找不到宿主科显示范围文件：", host_family_display_csv)
+if (!file.exists(adonis_csv)) stop("找不到 Adonis 结果：", adonis_csv)
+if (!file.exists(nmds_rds)) stop("找不到 NMDS RDS：", nmds_rds)
+
+shape_map_csv <- file.path(
+  out_dir,
+  "host_species_shape_mapping_no_elephant_CN_manualstar_axis_decimal_stress3_symbolfix_patch.csv"
+)
+
+out_png_sd <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SD_no_elephant_CN_manualstarpatch_axis_decimal_stress3_symbolfix.png"
+)
+
+out_pdf_sd <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SD_no_elephant_CN_manualstarpatch_axis_decimal_stress3_symbolfix.pdf"
+)
+
+out_png_se <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SE_no_elephant_CN_manualstarpatch_axis_decimal_stress3_symbolfix.png"
+)
+
+out_pdf_se <- file.path(
+  out_dir,
+  "Fig3_7_host_species_BrayCurtis_NMDS_centroid_SE_no_elephant_CN_manualstarpatch_axis_decimal_stress3_symbolfix.pdf"
+)
+
+summary_txt <- file.path(
+  out_dir,
+  "host_species_NMDS_manualstarpatch_axis_decimal_stress3_symbolfix_summary_no_elephant_CN.txt"
+)
+
+# =========================
+# 2. 字体
+# =========================
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/msyh.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_file <- font_candidates[file.exists(font_candidates)][1]
+if (is.na(font_file)) stop("找不到可用中文字体。")
+
+font_add("CNFont", regular = font_file)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_file, "\n", sep = "")
+
+# =========================
+# 3. 作图参数
+# =========================
+
+axis_padding <- 0.05
+
+fig_width  <- 10.4
+fig_height <- 7.2
+dpi_out    <- 600
+
+err_linewidth <- 0.42
+
+symbol_size_main   <- 4.0
+symbol_size_legend <- 4.4
+
+axis_title_size  <- 19
+axis_text_size   <- 13
+adonis_text_size <- 4.8
+caption_size     <- 13
+legend_text_size <- 12.4
+
+legend_step <- 1.15
+
+# =========================
+# 4. 顺序、颜色、符号
+# =========================
+
+family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_colors_cn <- c(
+  "牛科" = "#F03B35",
+  "猪科" = "#D4AE00",
+  "鹿科" = "#55B84A",
+  "马科" = "#2DB7C8",
+  "犀科" = "#7B4AB3"
+)
+
+species_order_cn <- c(
+  "家牛", "家牦牛", "家牦牛×家牛", "欧洲野牛", "瘤牛", "瘤牛×家牛",
+  "野牦牛", "绵羊", "家山羊", "藏羚", "水牛", "藏原羚",
+  "家猪", "野猪",
+  "驯鹿", "梅花鹿", "加拿大马鹿", "小麂", "黑麂", "黇鹿",
+  "家马", "藏野驴",
+  "黑犀"
+)
+
+species_family_map_cn <- c(
+  "家牛" = "牛科",
+  "家牦牛" = "牛科",
+  "家牦牛×家牛" = "牛科",
+  "欧洲野牛" = "牛科",
+  "瘤牛" = "牛科",
+  "瘤牛×家牛" = "牛科",
+  "野牦牛" = "牛科",
+  "绵羊" = "牛科",
+  "家山羊" = "牛科",
+  "藏羚" = "牛科",
+  "水牛" = "牛科",
+  "藏原羚" = "牛科",
+  "家猪" = "猪科",
+  "野猪" = "猪科",
+  "驯鹿" = "鹿科",
+  "梅花鹿" = "鹿科",
+  "加拿大马鹿" = "鹿科",
+  "小麂" = "鹿科",
+  "黑麂" = "鹿科",
+  "黇鹿" = "鹿科",
+  "家马" = "马科",
+  "藏野驴" = "马科",
+  "黑犀" = "犀科"
+)
+
+species_color_map <- setNames(
+  unname(family_colors_cn[species_family_map_cn[species_order_cn]]),
+  species_order_cn
+)
+
+# 只使用常见、宋体基本可显示的符号，避免 ▴、▾、◈ 等缺字。
+# 牛科内尽量不重复，且保留藏原羚为五角星。
+species_symbol_map <- c(
+  "家牛" = "●",
+  "家牦牛" = "▲",
+  "家牦牛×家牛" = "■",
+  "欧洲野牛" = "◆",
+  "瘤牛" = "○",
+  "瘤牛×家牛" = "△",
+  "野牦牛" = "□",
+  "绵羊" = "◇",
+  "家山羊" = "▼",
+  "藏羚" = "▽",
+  "水牛" = "▶",
+  "藏原羚" = "★",
+  "家猪" = "●",
+  "野猪" = "▲",
+  "驯鹿" = "●",
+  "梅花鹿" = "▲",
+  "加拿大马鹿" = "■",
+  "小麂" = "◆",
+  "黑麂" = "○",
+  "黇鹿" = "△",
+  "家马" = "●",
+  "藏野驴" = "▲",
+  "黑犀" = "●"
+)
+
+# =========================
+# 5. 工具函数
+# =========================
+
+get_padded_range <- function(x, padding = 0.05) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+  if (is.na(d) || d == 0) d <- max(abs(r), 1e-6)
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+make_axis_ticks <- function(range_vec, target_ticks) {
+  target_ticks[target_ticks >= range_vec["lower"] & target_ticks <= range_vec["upper"]]
+}
+
+fmt_decimal_align <- function(x, max_digits = 8) {
+  out <- rep(NA_character_, length(x))
+
+  ok <- !is.na(x)
+  if (!any(ok)) return(out)
+
+  x2 <- x[ok]
+  x2[abs(x2) < 1e-12] <- 0
+
+  raw <- sprintf(paste0("%.", max_digits, "f"), x2)
+
+  trimmed <- sub("0+$", "", raw)
+  trimmed <- sub("\\.$", "", trimmed)
+
+  decimal_digits <- ifelse(
+    grepl("\\.", trimmed),
+    nchar(sub("^.*\\.", "", trimmed)),
+    0
+  )
+
+  keep_digits <- max(decimal_digits, na.rm = TRUE)
+
+  out[ok] <- sprintf(paste0("%.", keep_digits, "f"), x2)
+
+  out
+}
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+extract_adonis_main_row <- function(adonis_df) {
+  idx <- which(adonis_df$term == "host_species_key")
+  if (length(idx) == 0) idx <- which(adonis_df$term == "host_species")
+  if (length(idx) == 0) idx <- which(!adonis_df$term %in% c("Residual", "Residuals", "Total"))
+  if (length(idx) == 0) stop("无法识别 Adonis 主效应行。")
+  idx[1]
+}
+
+# =========================
+# 6. 读取已有结果
+# =========================
+
+centroid_df <- read.csv(
+  centroid_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+sd_segments <- read.csv(
+  sd_segment_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+se_segments <- read.csv(
+  se_segment_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+family_display_df <- read.csv(
+  host_family_display_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+adonis_df <- read.csv(
+  adonis_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+nmds <- readRDS(nmds_rds)
+
+needed_centroid_cols <- c(
+  "host_species_cn",
+  "host_family_cn",
+  "NMDS1.mean",
+  "NMDS2.mean"
+)
+
+missing_centroid_cols <- setdiff(needed_centroid_cols, colnames(centroid_df))
+if (length(missing_centroid_cols) > 0) {
+  stop("centroid 表缺少列：", paste(missing_centroid_cols, collapse = ", "))
+}
+
+needed_segment_cols <- c(
+  "host_species_cn",
+  "host_family_cn",
+  "x",
+  "xend",
+  "y",
+  "yend"
+)
+
+missing_sd_cols <- setdiff(needed_segment_cols, colnames(sd_segments))
+missing_se_cols <- setdiff(needed_segment_cols, colnames(se_segments))
+
+if (length(missing_sd_cols) > 0) {
+  stop("SD 线段表缺少列：", paste(missing_sd_cols, collapse = ", "))
+}
+if (length(missing_se_cols) > 0) {
+  stop("SE 线段表缺少列：", paste(missing_se_cols, collapse = ", "))
+}
+
+if (!all(c("NMDS1", "NMDS2") %in% colnames(family_display_df))) {
+  stop("宿主科显示范围文件缺少 NMDS1 / NMDS2 列。")
+}
+
+centroid_df <- centroid_df %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn),
+    color = unname(species_color_map[as.character(host_species_cn)]),
+    symbol = unname(species_symbol_map[as.character(host_species_cn)])
+  )
+
+sd_segments <- sd_segments %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+se_segments <- se_segments %>%
+  mutate(
+    host_species_cn = as.character(host_species_cn),
+    host_family_cn = as.character(host_family_cn),
+    host_species_cn = factor(host_species_cn, levels = species_order_cn),
+    host_family_cn = factor(host_family_cn, levels = family_order_cn)
+  )
+
+write.csv(
+  centroid_df %>%
+    select(host_species_cn, host_family_cn, color, symbol),
+  shape_map_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# =========================
+# 7. 范围、刻度与标注
+# =========================
+
+x_range <- get_padded_range(family_display_df$NMDS1, axis_padding)
+y_range <- get_padded_range(family_display_df$NMDS2, axis_padding)
+
+x_ticks <- make_axis_ticks(
+  x_range,
+  c(-0.0005, 0, 0.0005, 0.0010)
+)
+
+y_ticks <- make_axis_ticks(
+  y_range,
+  c(-0.0002, 0, 0.0002)
+)
+
+if (length(x_ticks) < 2) x_ticks <- pretty(x_range, n = 4)
+if (length(y_ticks) < 2) y_ticks <- pretty(y_range, n = 4)
+
+main_idx <- extract_adonis_main_row(adonis_df)
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+if (is.na(p_col)) stop("Adonis 结果中没有 P 值列。")
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p  <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+stress_label <- paste0(
+  "Bray-Curtis NMDS stress = ",
+  sprintf("%.3f", nmds$stress)
+)
+
+x_anno <- x_range["lower"] + 0.05 * diff(x_range)
+y_anno <- y_range["upper"] - 0.08 * diff(y_range)
+
+# =========================
+# 8. 主图函数
+# =========================
+
+make_main_plot <- function(segment_df) {
+  ggplot() +
+    geom_segment(
+      data = segment_df,
+      aes(
+        x = x,
+        xend = xend,
+        y = y,
+        yend = yend,
+        color = host_species_cn
+      ),
+      linewidth = err_linewidth,
+      lineend = "butt",
+      show.legend = FALSE
+    ) +
+    geom_text(
+      data = centroid_df,
+      aes(
+        x = NMDS1.mean,
+        y = NMDS2.mean,
+        label = symbol,
+        color = host_species_cn
+      ),
+      family = "CNFont",
+      size = symbol_size_main,
+      show.legend = FALSE
+    ) +
+    annotate(
+      "text",
+      x = x_anno,
+      y = y_anno,
+      label = adonis_label,
+      hjust = 0,
+      vjust = 1,
+      size = adonis_text_size,
+      family = "CNFont",
+      color = "black"
+    ) +
+    scale_color_manual(
+      values = species_color_map,
+      breaks = species_order_cn,
+      drop = FALSE
+    ) +
+    scale_x_continuous(
+      breaks = x_ticks,
+      labels = fmt_decimal_align,
+      expand = expansion(mult = c(0.04, 0.08))
+    ) +
+    scale_y_continuous(
+      breaks = y_ticks,
+      labels = fmt_decimal_align,
+      expand = expansion(mult = c(0.05, 0.08))
+    ) +
+    labs(
+      x = "NMDS1",
+      y = "NMDS2",
+      caption = stress_label
+    ) +
+    coord_cartesian(
+      xlim = x_range,
+      ylim = y_range,
+      clip = "off"
+    ) +
+    theme_bw(base_size = 14, base_family = "CNFont") +
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_blank(),
+      legend.position = "none",
+
+      axis.title = element_text(
+        size = axis_title_size,
+        colour = "black",
+        family = "CNFont"
+      ),
+      axis.text = element_text(
+        size = axis_text_size,
+        colour = "black",
+        family = "CNFont"
+      ),
+
+      plot.caption = element_text(
+        size = caption_size,
+        hjust = 0,
+        colour = "black",
+        family = "CNFont",
+        lineheight = 1.15
+      ),
+      plot.caption.position = "plot",
+
+      plot.margin = margin(t = 10, r = 8, b = 36, l = 22)
+    )
+}
+
+# =========================
+# 9. 手工图例函数
+# =========================
+
+make_symbol_legend <- function() {
+  legend_df <- data.frame(
+    host_species_cn = species_order_cn,
+    host_family_cn = unname(species_family_map_cn[species_order_cn]),
+    color = unname(species_color_map[species_order_cn]),
+    symbol = unname(species_symbol_map[species_order_cn]),
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      y = rev(seq_along(host_species_cn)) * legend_step,
+      x_symbol = 0.5,
+      x_text = 0.95,
+      host_species_cn = factor(host_species_cn, levels = species_order_cn)
+    )
+
+  ggplot(legend_df) +
+    geom_text(
+      aes(
+        x = x_symbol,
+        y = y,
+        label = symbol,
+        color = host_species_cn
+      ),
+      family = "CNFont",
+      size = symbol_size_legend,
+      show.legend = FALSE
+    ) +
+    geom_text(
+      aes(
+        x = x_text,
+        y = y,
+        label = host_species_cn
+      ),
+      hjust = 0,
+      family = "CNFont",
+      size = legend_text_size / .pt,
+      color = "black"
+    ) +
+    scale_color_manual(
+      values = species_color_map,
+      breaks = species_order_cn,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      xlim = c(0.1, 4.2),
+      ylim = c(0.3, max(legend_df$y) + 0.8),
+      clip = "off"
+    ) +
+    theme_void(base_family = "CNFont") +
+    theme(
+      legend.position = "none",
+      plot.margin = margin(t = 18, r = 4, b = 18, l = 2)
+    )
+}
+
+# =========================
+# 10. 拼接与输出
+# =========================
+
+p_sd_main <- make_main_plot(sd_segments)
+p_se_main <- make_main_plot(se_segments)
+p_legend  <- make_symbol_legend()
+
+p_sd <- cowplot::plot_grid(
+  p_sd_main,
+  p_legend,
+  ncol = 2,
+  rel_widths = c(4.95, 1.55),
+  align = "h",
+  axis = "tb"
+)
+
+p_se <- cowplot::plot_grid(
+  p_se_main,
+  p_legend,
+  ncol = 2,
+  rel_widths = c(4.95, 1.55),
+  align = "h",
+  axis = "tb"
+)
+
+ggsave(
+  filename = out_png_sd,
+  plot = p_sd,
+  width = fig_width,
+  height = fig_height,
+  dpi = dpi_out,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf_sd,
+  plot = p_sd,
+  width = fig_width,
+  height = fig_height,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_png_se,
+  plot = p_se,
+  width = fig_width,
+  height = fig_height,
+  dpi = dpi_out,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf_se,
+  plot = p_se,
+  width = fig_width,
+  height = fig_height,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+# =========================
+# 11. summary
+# =========================
+
+sink(summary_txt)
+
+cat("Host species NMDS manual-symbol patch axis decimal stress3 symbolfix summary\n")
+cat("==========================================================================\n\n")
+
+cat("本脚本未重新计算 Bray-Curtis、NMDS、Adonis 或 betadisper。\n")
+cat("仅基于已有 centroid / segment 结果重画图。\n\n")
+
+cat("本次修改：\n")
+cat("1. 修复家山羊、藏羚、水牛图例符号缺失。\n")
+cat("2. 去掉上一版中可能缺字的 ▴、▾、◈ 等符号。\n")
+cat("3. 坐标轴刻度先去尾零，再按该轴最大所需小数位统一补齐。\n")
+cat("4. stress 保留小数点后三位。\n")
+cat("5. 不覆盖旧图。\n\n")
+
+cat("输入文件：\n")
+cat("centroid CSV: ", centroid_csv, "\n", sep = "")
+cat("SD segment CSV: ", sd_segment_csv, "\n", sep = "")
+cat("SE segment CSV: ", se_segment_csv, "\n", sep = "")
+cat("host family display CSV: ", host_family_display_csv, "\n", sep = "")
+cat("Adonis CSV: ", adonis_csv, "\n", sep = "")
+cat("NMDS RDS: ", nmds_rds, "\n\n", sep = "")
+
+cat("输出文件：\n")
+cat("SD PNG: ", out_png_sd, "\n", sep = "")
+cat("SD PDF: ", out_pdf_sd, "\n", sep = "")
+cat("SE PNG: ", out_png_se, "\n", sep = "")
+cat("SE PDF: ", out_pdf_se, "\n", sep = "")
+cat("shape map CSV: ", shape_map_csv, "\n\n", sep = "")
+
+cat("x ticks raw:\n")
+print(x_ticks)
+
+cat("\ny ticks raw:\n")
+print(y_ticks)
+
+cat("\nx ticks formatted:\n")
+print(fmt_decimal_align(x_ticks))
+
+cat("\ny ticks formatted:\n")
+print(fmt_decimal_align(y_ticks))
+
+cat("\nAdonis:\n")
+cat(adonis_label, "\n\n")
+
+cat("Stress:\n")
+cat(stress_label, "\n\n")
+
+cat("符号映射：\n")
+print(
+  centroid_df %>%
+    select(host_species_cn, host_family_cn, color, symbol)
+)
+
+sink()
+
+cat("\nDone!\n")
+cat("只重画图，未重新计算 Bray-Curtis、NMDS、Adonis 或 betadisper。\n")
+cat("已修复家山羊、藏羚、水牛图例符号缺失问题。\n")
+cat("坐标轴刻度已按去尾零后最大位数统一对齐。\n")
+cat("stress 已保留三位小数。\n")
+cat("已输出 SD 图：", out_png_sd, "\n", sep = "")
+cat("已输出 SE 图：", out_png_se, "\n", sep = "")
+cat("符号映射表：", shape_map_csv, "\n", sep = "")
+#运行
+Rscript scripts/07u_patch_host_species_NMDS_manualstar_axis_decimal_stress3_symbolfix_no_elephant_CN.R
+#这次是 “水牛”对应的符号 ▶ 在当前宋体/绘图环境里仍然缺字，所以图例前面显示为空。家山羊和藏羚已经正常显示，说明问题只剩水牛这个字符。
+#最稳妥的修复是把水牛的符号从 ▶ 改成最稳定的英文半角符号 >，它一定能显示，而且不会和你图中的正十字误差棒混淆。
+#你不用手动找代码，直接运行下面这段命令，它会复制上一版脚本为新脚本 07v，并把输出文件名改成 symbolfix2，不覆盖上一版图。
+cd /mnt/d/ITS_SH_pipeline
+
+python3 - <<'PY'
+from pathlib import Path
+
+old_script = Path("scripts/07u_patch_host_species_NMDS_manualstar_axis_decimal_stress3_symbolfix_no_elephant_CN.R")
+new_script = Path("scripts/07v_patch_host_species_NMDS_manualstar_axis_decimal_stress3_symbolfix2_no_elephant_CN.R")
+
+if not old_script.exists():
+    raise SystemExit(f"找不到上一版脚本：{old_script}")
+
+txt = old_script.read_text()
+
+# 1. 新输出名不覆盖旧图
+txt = txt.replace("symbolfix", "symbolfix2")
+
+# 2. 修复水牛符号缺失：把 ▶ 改为最稳定的半角 >
+txt = txt.replace('"水牛" = "▶"', '"水牛" = ">"')
+
+new_script.write_text(txt)
+
+print("已生成新脚本：", new_script)
+print("已将水牛符号从 ▶ 改为 >")
+print("新输出文件名后缀为 symbolfix2，不覆盖上一版。")
+PY
+
+Rscript scripts/07v_patch_host_species_NMDS_manualstar_axis_decimal_stress3_symbolfix2_no_elephant_CN.R
