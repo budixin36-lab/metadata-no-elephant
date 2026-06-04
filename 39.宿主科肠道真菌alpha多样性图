@@ -1,0 +1,1481 @@
+#本次任务说明
+#输入文件：
+#样本水平 alpha 多样性数据
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+#已有宿主科 ANOVA + TukeyHSD 结果
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#是否重算：
+#不重算 alpha 多样性；不重做 ANOVA；不重做 TukeyHSD。
+#只读取已有结果，重新绘制 4 张箱线图。这个判断依据与你发来的 alpha 统计脚本一致。
+#统计口径 / 计算单位：
+#箱线图：基于样本水平 ACE、Chao1、Shannon、Simpson
+#显著性字母：读取已有 TukeyHSD 结果
+#ANOVA P 值：读取已有 ANOVA 结果
+#输出文件：
+#会新建目录，不覆盖旧图：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/host_family_boxplots_letters_v1
+#输出 4 张图：
+#Fig3_x_host_family_alpha_ACE_boxplot_letters_no_elephant_CN_v1.png/pdf
+#Fig3_x_host_family_alpha_Chao1_boxplot_letters_no_elephant_CN_v1.png/pdf
+#Fig3_x_host_family_alpha_Shannon_boxplot_letters_no_elephant_CN_v1.png/pdf
+#Fig3_x_host_family_alpha_Simpson_boxplot_letters_no_elephant_CN_v1.png/pdf
+#本次改动：
+#保持箱线图形式；
+#去掉原来两两比较横线和星号；
+#改为每组箱线图上方加一条带误差帽的竖线，并在上方标注 TukeyHSD 字母；
+#y 轴名去掉“指数”，只保留 ACE、Chao1、Shannon、Simpson；
+#宿主科横轴改为中文；
+#统一宋体、白底、PNG 600 dpi，不覆盖旧图。
+#不改动：
+#不改数据版本；
+#不改 no-elephant 基准；
+#不改统计结果；
+#不覆盖旧图。
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter3_alpha_diversity
+nano scripts/chapter3_alpha_diversity/06_redraw_host_family_alpha_boxplots_letters_v1.R
+#第二步：粘贴下面完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 3 - Host family alpha boxplots redraw v1
+##
+## 目的：
+##   不重算 alpha 多样性；
+##   不重做 ANOVA / TukeyHSD；
+##   只读取已有样本水平 alpha 数据和已有统计结果，
+##   重画不同宿主科肠道真菌群落 Alpha 多样性四张箱线图。
+##
+## 本次修改：
+##   1. 保留箱线图形式；
+##   2. 去掉两两比较横线和星号；
+##   3. 改为每组上方带误差帽的竖线，并标注 TukeyHSD 字母；
+##   4. y 轴名去掉“指数”，仅保留 ACE / Chao1 / Shannon / Simpson；
+##   5. 横轴宿主科改为中文；
+##   6. 不覆盖旧图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+result_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_alpha_diversity_no_elephant"
+)
+
+alpha_file <- file.path(
+  result_dir,
+  "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+stats_xlsx <- file.path(
+  result_dir,
+  "Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+plot_dir <- file.path(
+  result_dir,
+  "host_family_boxplots_letters_v1"
+)
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_log <- file.path(
+  plot_dir,
+  "host_family_alpha_boxplots_letters_v1_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("sample_alpha_csv", "host_family_stats_xlsx"),
+  file_path = c(alpha_file, stats_xlsx),
+  exists = file.exists(c(alpha_file, stats_xlsx)),
+  stringsAsFactors = FALSE
+)
+
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 参数
+## =========================
+
+family_order <- c(
+  "Bovidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae",
+  "Suidae"
+)
+
+family_label_map <- c(
+  "Bovidae" = "牛科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科",
+  "Suidae" = "猪科"
+)
+
+family_colors <- c(
+  "Bovidae" = "#E64B35",
+  "Cervidae" = "#4DBBD5",
+  "Equidae" = "#00A087",
+  "Rhinocerotidae" = "#3C5488",
+  "Suidae" = "#F39B7F"
+)
+
+metrics_for_plot <- c("ACE", "Chao1", "Shannon", "Simpson")
+
+metric_y_labels <- c(
+  "ACE" = "ACE",
+  "Chao1" = "Chao1",
+  "Shannon" = "Shannon",
+  "Simpson" = "Simpson"
+)
+
+plot_files_png <- c(
+  "ACE" = file.path(plot_dir, "Fig3_x_host_family_alpha_ACE_boxplot_letters_no_elephant_CN_v1.png"),
+  "Chao1" = file.path(plot_dir, "Fig3_x_host_family_alpha_Chao1_boxplot_letters_no_elephant_CN_v1.png"),
+  "Shannon" = file.path(plot_dir, "Fig3_x_host_family_alpha_Shannon_boxplot_letters_no_elephant_CN_v1.png"),
+  "Simpson" = file.path(plot_dir, "Fig3_x_host_family_alpha_Simpson_boxplot_letters_no_elephant_CN_v1.png")
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_anova_label <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("ANOVA: P = NA")
+  }
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+extract_letters_from_paper_table <- function(paper_df, metrics) {
+  out <- paper_df %>%
+    filter(
+      !is.na(group),
+      group != "",
+      !grepl("^ANOVA", group)
+    ) %>%
+    select(group, all_of(metrics))
+
+  for (m in metrics) {
+    out[[m]] <- str_extract(as.character(out[[m]]), "[A-Za-z]+$")
+  }
+
+  out
+}
+
+get_upper_whisker <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  boxplot.stats(x)$stats[5]
+}
+
+plot_alpha_box_letters <- function(alpha_df, letters_df, anova_df, metric, out_png) {
+
+  dat <- alpha_df %>%
+    select(host_family, value = all_of(metric)) %>%
+    filter(!is.na(host_family), !is.na(value), host_family %in% family_order)
+
+  dat$host_family <- factor(dat$host_family, levels = family_order)
+
+  letter_dat <- letters_df %>%
+    select(group, letter = all_of(metric)) %>%
+    rename(host_family = group) %>%
+    filter(host_family %in% family_order)
+
+  letter_dat$host_family <- factor(letter_dat$host_family, levels = family_order)
+
+  whisker_df <- dat %>%
+    group_by(host_family) %>%
+    summarise(
+      upper_whisker = get_upper_whisker(value),
+      .groups = "drop"
+    ) %>%
+    left_join(letter_dat, by = "host_family") %>%
+    arrange(host_family)
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  whisker_df <- whisker_df %>%
+    mutate(
+      err_ymin = upper_whisker + 0.02 * y_range,
+      err_ymax = upper_whisker + 0.10 * y_range,
+      letter_y = err_ymax + 0.025 * y_range
+    )
+
+  max_letter_y <- max(whisker_df$letter_y, na.rm = TRUE)
+
+  anova_p <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  anova_label <- format_anova_label(anova_p[1])
+
+  anova_y <- max_letter_y + 0.10 * y_range
+  y_top <- anova_y + 0.10 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = host_family,
+      y = value,
+      fill = host_family
+    )
+  ) +
+    geom_boxplot(
+      width = 0.56,
+      outlier.shape = NA,
+      linewidth = 0.40,
+      color = "black"
+    ) +
+    geom_errorbar(
+      data = whisker_df,
+      aes(
+        x = host_family,
+        ymin = err_ymin,
+        ymax = err_ymax
+      ),
+      width = 0.18,
+      linewidth = 0.35,
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = whisker_df,
+      aes(
+        x = host_family,
+        y = letter_y,
+        label = letter
+      ),
+      family = "songti",
+      size = 3.2,
+      vjust = 0,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(
+      values = family_colors,
+      drop = FALSE
+    ) +
+    scale_x_discrete(
+      labels = family_label_map
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 10.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 0.62,
+      y = anova_y,
+      label = anova_label,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.8
+    )
+
+  ggsave(
+    filename = out_png,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_png),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取数据
+## =========================
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c(
+  "sample_id",
+  "host_family",
+  "host_species",
+  metrics_for_plot
+)
+
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+paper_table <- readWorkbook(
+  stats_xlsx,
+  sheet = "paper_table"
+)
+
+anova_df <- readWorkbook(
+  stats_xlsx,
+  sheet = "ANOVA"
+)
+
+needed_anova_cols <- c("metric", "P_value_raw")
+missing_anova_cols <- setdiff(needed_anova_cols, colnames(anova_df))
+
+if (length(missing_anova_cols) > 0) {
+  stop("ANOVA sheet 缺少列：", paste(missing_anova_cols, collapse = ", "))
+}
+
+if (!"group" %in% colnames(paper_table)) {
+  stop("paper_table sheet 缺少 group 列。")
+}
+
+letters_df <- extract_letters_from_paper_table(
+  paper_df = paper_table,
+  metrics = metrics_for_plot
+)
+
+letters_df <- letters_df %>%
+  filter(group %in% family_order)
+
+alpha_df <- alpha_df %>%
+  filter(host_family %in% family_order)
+
+alpha_df$host_family <- factor(alpha_df$host_family, levels = family_order)
+
+## =========================
+## 6. 重画四张图
+## =========================
+
+for (m in metrics_for_plot) {
+  plot_alpha_box_letters(
+    alpha_df = alpha_df,
+    letters_df = letters_df,
+    anova_df = anova_df,
+    metric = m,
+    out_png = plot_files_png[[m]]
+  )
+}
+
+## =========================
+## 7. 日志
+## =========================
+
+sink(out_log)
+
+cat("Host family alpha boxplots redraw v1\n")
+cat("====================================\n\n")
+
+cat("Input sample alpha file:\n")
+cat(alpha_file, "\n\n")
+
+cat("Input statistics Excel:\n")
+cat(stats_xlsx, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("No ANOVA recomputation performed.\n")
+cat("No TukeyHSD recomputation performed.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n\n")
+
+cat("Sample number used:\n")
+cat(nrow(alpha_df), "\n\n")
+
+cat("Host family counts:\n")
+print(table(alpha_df$host_family))
+
+cat("\nChanges in this redraw:\n")
+cat("1. Keep boxplots.\n")
+cat("2. Remove pairwise significance brackets and stars.\n")
+cat("3. Use capped vertical error lines above each group and label TukeyHSD letters.\n")
+cat("4. Remove '指数' from y-axis labels.\n")
+cat("5. Use Chinese host-family labels.\n")
+cat("6. Do not overwrite previous plots.\n\n")
+
+cat("Output files:\n")
+print(plot_files_png)
+
+sink()
+
+## =========================
+## 8. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", plot_dir, "\n\n", sep = "")
+
+cat("PNG files:\n")
+cat(plot_files_png[["ACE"]], "\n")
+cat(plot_files_png[["Chao1"]], "\n")
+cat(plot_files_png[["Shannon"]], "\n")
+cat(plot_files_png[["Simpson"]], "\n\n")
+
+cat("Log file:\n")
+cat(out_log, "\n")
+#运行：
+Rscript scripts/chapter3_alpha_diversity/06_redraw_host_family_alpha_boxplots_letters_v1.R
+#你运行后，重点看这个输出目录
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/host_family_boxplots_letters_v1
+#本次 v2 修改说明
+#输入文件不变：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#是否重算：
+#不重算 alpha 多样性；不重做 ANOVA；不重做 TukeyHSD。只读取已有结果重画图。
+#本次改动：
+#删除额外的 geom_errorbar()，去掉箱线上方的 I 形线；
+#TukeyHSD 字母直接放在每组箱线图上须线稍上方；
+#ANOVA 标注放在图内左上方，并尽量避免和字母重叠；
+#y 轴名保持 ACE、Chao1、Shannon、Simpson，不写“指数”；
+#输出到新目录 host_family_boxplots_letters_v2，不覆盖 v1。
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter3_alpha_diversity
+nano scripts/chapter3_alpha_diversity/07_redraw_host_family_alpha_boxplots_letters_v2.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 3 - Host family alpha boxplots redraw v2
+##
+## 目的：
+##   不重算 alpha 多样性；
+##   不重做 ANOVA / TukeyHSD；
+##   只读取已有样本水平 alpha 数据和已有统计结果，
+##   重画不同宿主科肠道真菌群落 Alpha 多样性四张箱线图。
+##
+## v2 修改：
+##   1. 保留箱线图形式；
+##   2. 删除 v1 中额外添加的 I 形误差线；
+##   3. TukeyHSD 字母直接标注在各组箱线图上须线上方；
+##   4. y 轴名去掉“指数”，仅保留 ACE / Chao1 / Shannon / Simpson；
+##   5. 横轴宿主科为中文；
+##   6. 不覆盖旧图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+result_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_alpha_diversity_no_elephant"
+)
+
+alpha_file <- file.path(
+  result_dir,
+  "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+stats_xlsx <- file.path(
+  result_dir,
+  "Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+plot_dir <- file.path(
+  result_dir,
+  "host_family_boxplots_letters_v2"
+)
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_log <- file.path(
+  plot_dir,
+  "host_family_alpha_boxplots_letters_v2_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("sample_alpha_csv", "host_family_stats_xlsx"),
+  file_path = c(alpha_file, stats_xlsx),
+  exists = file.exists(c(alpha_file, stats_xlsx)),
+  stringsAsFactors = FALSE
+)
+
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 参数
+## =========================
+
+family_order <- c(
+  "Bovidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae",
+  "Suidae"
+)
+
+family_label_map <- c(
+  "Bovidae" = "牛科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科",
+  "Suidae" = "猪科"
+)
+
+family_colors <- c(
+  "Bovidae" = "#E64B35",
+  "Cervidae" = "#4DBBD5",
+  "Equidae" = "#00A087",
+  "Rhinocerotidae" = "#3C5488",
+  "Suidae" = "#F39B7F"
+)
+
+metrics_for_plot <- c("ACE", "Chao1", "Shannon", "Simpson")
+
+metric_y_labels <- c(
+  "ACE" = "ACE",
+  "Chao1" = "Chao1",
+  "Shannon" = "Shannon",
+  "Simpson" = "Simpson"
+)
+
+plot_files_png <- c(
+  "ACE" = file.path(plot_dir, "Fig3_x_host_family_alpha_ACE_boxplot_letters_no_elephant_CN_v2.png"),
+  "Chao1" = file.path(plot_dir, "Fig3_x_host_family_alpha_Chao1_boxplot_letters_no_elephant_CN_v2.png"),
+  "Shannon" = file.path(plot_dir, "Fig3_x_host_family_alpha_Shannon_boxplot_letters_no_elephant_CN_v2.png"),
+  "Simpson" = file.path(plot_dir, "Fig3_x_host_family_alpha_Simpson_boxplot_letters_no_elephant_CN_v2.png")
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_anova_label <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("ANOVA: P = NA")
+  }
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+extract_letters_from_paper_table <- function(paper_df, metrics) {
+  out <- paper_df %>%
+    filter(
+      !is.na(group),
+      group != "",
+      !grepl("^ANOVA", group)
+    ) %>%
+    select(group, all_of(metrics))
+
+  for (m in metrics) {
+    out[[m]] <- str_extract(as.character(out[[m]]), "[A-Za-z]+$")
+  }
+
+  out
+}
+
+get_upper_whisker <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  boxplot.stats(x)$stats[5]
+}
+
+plot_alpha_box_letters_v2 <- function(alpha_df, letters_df, anova_df, metric, out_png) {
+
+  dat <- alpha_df %>%
+    select(host_family, value = all_of(metric)) %>%
+    filter(!is.na(host_family), !is.na(value), host_family %in% family_order)
+
+  dat$host_family <- factor(dat$host_family, levels = family_order)
+
+  letter_dat <- letters_df %>%
+    select(group, letter = all_of(metric)) %>%
+    rename(host_family = group) %>%
+    filter(host_family %in% family_order)
+
+  letter_dat$host_family <- factor(letter_dat$host_family, levels = family_order)
+
+  letter_pos_df <- dat %>%
+    group_by(host_family) %>%
+    summarise(
+      upper_whisker = get_upper_whisker(value),
+      .groups = "drop"
+    ) %>%
+    left_join(letter_dat, by = "host_family") %>%
+    arrange(host_family)
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  ## 字母直接放在箱线图上须线上方，不再额外画 I 形误差线
+  letter_pos_df <- letter_pos_df %>%
+    mutate(
+      letter_y = upper_whisker + 0.045 * y_range
+    )
+
+  max_letter_y <- max(letter_pos_df$letter_y, na.rm = TRUE)
+
+  anova_p <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  anova_label <- format_anova_label(anova_p[1])
+
+  ## ANOVA 标注放在所有字母上方，避免与字母重叠
+  anova_y <- max_letter_y + 0.11 * y_range
+  y_top <- anova_y + 0.11 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = host_family,
+      y = value,
+      fill = host_family
+    )
+  ) +
+    geom_boxplot(
+      width = 0.56,
+      outlier.shape = NA,
+      linewidth = 0.40,
+      color = "black"
+    ) +
+    geom_text(
+      data = letter_pos_df,
+      aes(
+        x = host_family,
+        y = letter_y,
+        label = letter
+      ),
+      family = "songti",
+      size = 3.3,
+      vjust = 0,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(
+      values = family_colors,
+      drop = FALSE
+    ) +
+    scale_x_discrete(
+      labels = family_label_map
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 10.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 0.62,
+      y = anova_y,
+      label = anova_label,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.8
+    )
+
+  ggsave(
+    filename = out_png,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_png),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取数据
+## =========================
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c(
+  "sample_id",
+  "host_family",
+  "host_species",
+  metrics_for_plot
+)
+
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+paper_table <- readWorkbook(
+  stats_xlsx,
+  sheet = "paper_table"
+)
+
+anova_df <- readWorkbook(
+  stats_xlsx,
+  sheet = "ANOVA"
+)
+
+needed_anova_cols <- c("metric", "P_value_raw")
+missing_anova_cols <- setdiff(needed_anova_cols, colnames(anova_df))
+
+if (length(missing_anova_cols) > 0) {
+  stop("ANOVA sheet 缺少列：", paste(missing_anova_cols, collapse = ", "))
+}
+
+if (!"group" %in% colnames(paper_table)) {
+  stop("paper_table sheet 缺少 group 列。")
+}
+
+letters_df <- extract_letters_from_paper_table(
+  paper_df = paper_table,
+  metrics = metrics_for_plot
+)
+
+letters_df <- letters_df %>%
+  filter(group %in% family_order)
+
+alpha_df <- alpha_df %>%
+  filter(host_family %in% family_order)
+
+alpha_df$host_family <- factor(alpha_df$host_family, levels = family_order)
+
+## =========================
+## 6. 重画四张图
+## =========================
+
+for (m in metrics_for_plot) {
+  plot_alpha_box_letters_v2(
+    alpha_df = alpha_df,
+    letters_df = letters_df,
+    anova_df = anova_df,
+    metric = m,
+    out_png = plot_files_png[[m]]
+  )
+}
+
+## =========================
+## 7. 日志
+## =========================
+
+sink(out_log)
+
+cat("Host family alpha boxplots redraw v2\n")
+cat("====================================\n\n")
+
+cat("Input sample alpha file:\n")
+cat(alpha_file, "\n\n")
+
+cat("Input statistics Excel:\n")
+cat(stats_xlsx, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("No ANOVA recomputation performed.\n")
+cat("No TukeyHSD recomputation performed.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n\n")
+
+cat("Sample number used:\n")
+cat(nrow(alpha_df), "\n\n")
+
+cat("Host family counts:\n")
+print(table(alpha_df$host_family))
+
+cat("\nChanges in this redraw:\n")
+cat("1. Keep boxplots.\n")
+cat("2. Remove capped vertical error lines from v1.\n")
+cat("3. Put TukeyHSD letters directly above boxplot whiskers.\n")
+cat("4. Remove '指数' from y-axis labels.\n")
+cat("5. Use Chinese host-family labels.\n")
+cat("6. Do not overwrite previous plots.\n\n")
+
+cat("Output files:\n")
+print(plot_files_png)
+
+sink()
+
+## =========================
+## 8. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", plot_dir, "\n\n", sep = "")
+
+cat("PNG files:\n")
+cat(plot_files_png[["ACE"]], "\n")
+cat(plot_files_png[["Chao1"]], "\n")
+cat(plot_files_png[["Shannon"]], "\n")
+cat(plot_files_png[["Simpson"]], "\n\n")
+
+cat("Log file:\n")
+cat(out_log, "\n")
+#运行
+#本次 v3 任务说明
+#输入文件
+#样本水平 alpha 数据
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+#宿主科 ANOVA + TukeyHSD 结果
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx
+#是否重算
+#不重算 alpha 多样性；
+#不重做 ANOVA；
+#不重做 TukeyHSD；
+#只读取已有结果，重新绘图。
+#输出目录
+#新建，不覆盖旧图：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/host_family_boxplots_letters_v3
+#本次改动
+#宿主科顺序改为：牛科 → 猪科 → 鹿科 → 马科 → 犀科
+#保持去掉 I 形误差线
+#保持字母直接放在箱线图上方
+#把 ANOVA 标注再往上调一点，避免像 Simpson 图那样和字母太近
+#不改动
+#不改数据版本
+#不改统计结果
+#不改字母结果
+#不覆盖旧图
+#第一步：新建脚本
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter3_alpha_diversity
+nano scripts/chapter3_alpha_diversity/08_redraw_host_family_alpha_boxplots_letters_v3.R
+#第二步：粘贴完整脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 3 - Host family alpha boxplots redraw v3
+##
+## 目的：
+##   不重算 alpha 多样性；
+##   不重做 ANOVA / TukeyHSD；
+##   只读取已有样本水平 alpha 数据和已有统计结果，
+##   重画不同宿主科肠道真菌群落 Alpha 多样性四张箱线图。
+##
+## v3 修改：
+##   1. 宿主科顺序改为：
+##      牛科、猪科、鹿科、马科、犀科
+##      (Bovidae, Suidae, Cervidae, Equidae, Rhinocerotidae)
+##   2. 保留箱线图形式；
+##   3. 不加 I 形误差线；
+##   4. TukeyHSD 字母直接标注在各组箱线图上须线上方；
+##   5. y 轴名去掉“指数”；
+##   6. ANOVA 标注整体再上移一点；
+##   7. 不覆盖旧图。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+result_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter3_alpha_diversity_no_elephant"
+)
+
+alpha_file <- file.path(
+  result_dir,
+  "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+stats_xlsx <- file.path(
+  result_dir,
+  "Table3_1_host_family_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+plot_dir <- file.path(
+  result_dir,
+  "host_family_boxplots_letters_v3"
+)
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_log <- file.path(
+  plot_dir,
+  "host_family_alpha_boxplots_letters_v3_log.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("sample_alpha_csv", "host_family_stats_xlsx"),
+  file_path = c(alpha_file, stats_xlsx),
+  exists = file.exists(c(alpha_file, stats_xlsx)),
+  stringsAsFactors = FALSE
+)
+
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+## =========================
+## 3. 参数
+## =========================
+
+family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+family_label_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+family_colors <- c(
+  "Bovidae" = "#E64B35",
+  "Suidae" = "#F39B7F",
+  "Cervidae" = "#4DBBD5",
+  "Equidae" = "#00A087",
+  "Rhinocerotidae" = "#3C5488"
+)
+
+metrics_for_plot <- c("ACE", "Chao1", "Shannon", "Simpson")
+
+metric_y_labels <- c(
+  "ACE" = "ACE",
+  "Chao1" = "Chao1",
+  "Shannon" = "Shannon",
+  "Simpson" = "Simpson"
+)
+
+plot_files_png <- c(
+  "ACE" = file.path(plot_dir, "Fig3_x_host_family_alpha_ACE_boxplot_letters_no_elephant_CN_v3.png"),
+  "Chao1" = file.path(plot_dir, "Fig3_x_host_family_alpha_Chao1_boxplot_letters_no_elephant_CN_v3.png"),
+  "Shannon" = file.path(plot_dir, "Fig3_x_host_family_alpha_Shannon_boxplot_letters_no_elephant_CN_v3.png"),
+  "Simpson" = file.path(plot_dir, "Fig3_x_host_family_alpha_Simpson_boxplot_letters_no_elephant_CN_v3.png")
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_anova_label <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("ANOVA: P = NA")
+  }
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+extract_letters_from_paper_table <- function(paper_df, metrics) {
+  out <- paper_df %>%
+    filter(
+      !is.na(group),
+      group != "",
+      !grepl("^ANOVA", group)
+    ) %>%
+    select(group, all_of(metrics))
+
+  for (m in metrics) {
+    out[[m]] <- str_extract(as.character(out[[m]]), "[A-Za-z]+$")
+  }
+
+  out
+}
+
+get_upper_whisker <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  boxplot.stats(x)$stats[5]
+}
+
+plot_alpha_box_letters_v3 <- function(alpha_df, letters_df, anova_df, metric, out_png) {
+
+  dat <- alpha_df %>%
+    select(host_family, value = all_of(metric)) %>%
+    filter(!is.na(host_family), !is.na(value), host_family %in% family_order)
+
+  dat$host_family <- factor(dat$host_family, levels = family_order)
+
+  letter_dat <- letters_df %>%
+    select(group, letter = all_of(metric)) %>%
+    rename(host_family = group) %>%
+    filter(host_family %in% family_order)
+
+  letter_dat$host_family <- factor(letter_dat$host_family, levels = family_order)
+
+  letter_pos_df <- dat %>%
+    group_by(host_family) %>%
+    summarise(
+      upper_whisker = get_upper_whisker(value),
+      .groups = "drop"
+    ) %>%
+    left_join(letter_dat, by = "host_family") %>%
+    arrange(host_family)
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  ## 字母位置
+  letter_pos_df <- letter_pos_df %>%
+    mutate(
+      letter_y = upper_whisker + 0.050 * y_range
+    )
+
+  max_letter_y <- max(letter_pos_df$letter_y, na.rm = TRUE)
+
+  anova_p <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  anova_label <- format_anova_label(anova_p[1])
+
+  ## ANOVA 再上移一点，避免贴近字母
+  anova_y <- max_letter_y + 0.13 * y_range
+  y_top <- anova_y + 0.10 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = host_family,
+      y = value,
+      fill = host_family
+    )
+  ) +
+    geom_boxplot(
+      width = 0.56,
+      outlier.shape = NA,
+      linewidth = 0.40,
+      color = "black"
+    ) +
+    geom_text(
+      data = letter_pos_df,
+      aes(
+        x = host_family,
+        y = letter_y,
+        label = letter
+      ),
+      family = "songti",
+      size = 3.3,
+      vjust = 0,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(
+      values = family_colors,
+      drop = FALSE
+    ) +
+    scale_x_discrete(
+      labels = family_label_map
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 10.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 0.62,
+      y = anova_y,
+      label = anova_label,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.8
+    )
+
+  ggsave(
+    filename = out_png,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_png),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取数据
+## =========================
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c(
+  "sample_id",
+  "host_family",
+  "host_species",
+  metrics_for_plot
+)
+
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+paper_table <- readWorkbook(
+  stats_xlsx,
+  sheet = "paper_table"
+)
+
+anova_df <- readWorkbook(
+  stats_xlsx,
+  sheet = "ANOVA"
+)
+
+needed_anova_cols <- c("metric", "P_value_raw")
+missing_anova_cols <- setdiff(needed_anova_cols, colnames(anova_df))
+
+if (length(missing_anova_cols) > 0) {
+  stop("ANOVA sheet 缺少列：", paste(missing_anova_cols, collapse = ", "))
+}
+
+if (!"group" %in% colnames(paper_table)) {
+  stop("paper_table sheet 缺少 group 列。")
+}
+
+letters_df <- extract_letters_from_paper_table(
+  paper_df = paper_table,
+  metrics = metrics_for_plot
+)
+
+letters_df <- letters_df %>%
+  filter(group %in% family_order)
+
+alpha_df <- alpha_df %>%
+  filter(host_family %in% family_order)
+
+alpha_df$host_family <- factor(alpha_df$host_family, levels = family_order)
+
+## =========================
+## 6. 重画四张图
+## =========================
+
+for (m in metrics_for_plot) {
+  plot_alpha_box_letters_v3(
+    alpha_df = alpha_df,
+    letters_df = letters_df,
+    anova_df = anova_df,
+    metric = m,
+    out_png = plot_files_png[[m]]
+  )
+}
+
+## =========================
+## 7. 日志
+## =========================
+
+sink(out_log)
+
+cat("Host family alpha boxplots redraw v3\n")
+cat("====================================\n\n")
+
+cat("Input sample alpha file:\n")
+cat(alpha_file, "\n\n")
+
+cat("Input statistics Excel:\n")
+cat(stats_xlsx, "\n\n")
+
+cat("No recomputation performed.\n")
+cat("No ANOVA recomputation performed.\n")
+cat("No TukeyHSD recomputation performed.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n\n")
+
+cat("Sample number used:\n")
+cat(nrow(alpha_df), "\n\n")
+
+cat("Host family counts:\n")
+print(table(alpha_df$host_family))
+
+cat("\nHost family order in v3:\n")
+print(family_order)
+
+cat("\nChanges in this redraw:\n")
+cat("1. Host family order changed to Bovidae -> Suidae -> Cervidae -> Equidae -> Rhinocerotidae.\n")
+cat("2. Keep boxplots.\n")
+cat("3. No capped vertical error lines.\n")
+cat("4. Put TukeyHSD letters directly above boxplot whiskers.\n")
+cat("5. Remove '指数' from y-axis labels.\n")
+cat("6. ANOVA label moved slightly upward.\n")
+cat("7. Do not overwrite previous plots.\n\n")
+
+cat("Output files:\n")
+print(plot_files_png)
+
+sink()
+
+## =========================
+## 8. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", plot_dir, "\n\n", sep = "")
+
+cat("PNG files:\n")
+cat(plot_files_png[["ACE"]], "\n")
+cat(plot_files_png[["Chao1"]], "\n")
+cat(plot_files_png[["Shannon"]], "\n")
+cat(plot_files_png[["Simpson"]], "\n\n")
+
+cat("Log file:\n")
+cat(out_log, "\n")
+#运行
+Rscript scripts/chapter3_alpha_diversity/08_redraw_host_family_alpha_boxplots_letters_v3.R
