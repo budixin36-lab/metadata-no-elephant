@@ -1,0 +1,1590 @@
+#本次口径如下：
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom
+#计算单位：
+#以 SH 为 feature ID，每个 SH 提取 BIOM metadata 中的 kingdom、phylum、class、order、family、genus、species，生成 FUNGuild 需要的 taxonomy 输入表。
+#是否重算：
+#不重算 SH 丰度表、不重算 taxonomy、不重算相对多度，只从已有 BIOM 中提取 taxonomy 并运行 FUNGuild。
+#输出文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.txt
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/SH_taxonomy_from_BIOM_no_elephant.tsv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/BIOM_taxonomy_extract_summary_no_elephant.txt
+#运行 FUNGuild 后还会生成 .guilds.txt 文件。
+#直接复制下面整段到 WSL 运行：
+cd /mnt/d/ITS_SH_pipeline
+
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts
+mkdir -p /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/07_make_FUNGuild_input_from_BIOM_no_elephant.py <<'PY'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+从 no-elephant BIOM 文件中提取每个 SH 的 taxonomy，
+生成 FUNGuild 可用的 OTU 表格式输入文件。
+
+输入：
+  merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom
+
+输出：
+  1. SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.txt
+     - FUNGuild 输入文件
+     - 三列：OTU_ID, dummy, taxonomy
+  2. SH_taxonomy_from_BIOM_no_elephant.tsv
+     - 每个 SH 的 taxonomy 明细表，方便检查
+  3. BIOM_taxonomy_extract_summary_no_elephant.txt
+     - 提取摘要
+"""
+
+from pathlib import Path
+import json
+import re
+import sys
+from collections import Counter
+
+BASE = Path("/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant")
+
+BIOM_FILE = BASE / "taxonomy/merged_SH_globalfungi_style_nozero_no_elephant_with_taxonomy.biom"
+
+OUT_DIR = BASE / "results/funguild_no_elephant"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+OUT_FUNGUILD = OUT_DIR / "SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.txt"
+OUT_TAXONOMY = OUT_DIR / "SH_taxonomy_from_BIOM_no_elephant.tsv"
+OUT_SUMMARY = OUT_DIR / "BIOM_taxonomy_extract_summary_no_elephant.txt"
+
+RANKS = ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
+
+RANK_PREFIX = {
+    "kingdom": "k__",
+    "phylum": "p__",
+    "class": "c__",
+    "order": "o__",
+    "family": "f__",
+    "genus": "g__",
+    "species": "s__",
+}
+
+
+def clean_taxon_value(value):
+    """
+    清理 BIOM metadata 中的分类单元名称。
+    保留 Incertae_sedis 这类信息，不强行删除。
+    """
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+
+    if value in {
+        "",
+        "NA", "N/A", "na", "n/a",
+        "None", "none", "NULL", "null",
+        "Unassigned", "unassigned",
+        "Unknown", "unknown",
+        "-", ";"
+    }:
+        return ""
+
+    # 去除已有 rank 前缀，避免出现 g__g__Aspergillus
+    value = re.sub(r"^[dkpcofgs]__+", "", value, flags=re.IGNORECASE)
+
+    # FUNGuild 输入中 taxonomy 用分号分隔，分类名本身不要再带分号
+    value = value.replace(";", "_")
+    value = value.replace(",", "_")
+    value = re.sub(r"\s+", "_", value)
+
+    # 去掉多余下划线
+    value = re.sub(r"_+", "_", value).strip("_")
+
+    return value
+
+
+def build_funguild_taxonomy(metadata):
+    """
+    将 BIOM 中的 metadata 转成 FUNGuild 常见可识别的 taxonomy 字符串：
+    k__Fungi;p__Ascomycota;c__...
+    """
+    if metadata is None:
+        metadata = {}
+
+    parts = []
+
+    for rank in RANKS:
+        value = clean_taxon_value(metadata.get(rank, ""))
+
+        if rank == "kingdom" and value == "":
+            value = "Fungi"
+
+        if value != "":
+            parts.append(RANK_PREFIX[rank] + value)
+
+    if len(parts) == 0:
+        parts = ["k__Fungi"]
+
+    return ";".join(parts)
+
+
+def main():
+    if not BIOM_FILE.exists():
+        raise SystemExit(f"找不到 BIOM 文件：{BIOM_FILE}")
+
+    print("读取 BIOM 文件：")
+    print(BIOM_FILE)
+
+    with BIOM_FILE.open("r", encoding="utf-8") as f:
+        first_char = f.read(1)
+        f.seek(0)
+
+        if first_char != "{":
+            raise SystemExit(
+                "这个脚本目前用于 JSON 格式 BIOM。\n"
+                "你的文件开头不是 '{'，可能是 HDF5 BIOM。\n"
+                "如果遇到这种情况，把报错发我，我再给你 HDF5 版提取脚本。"
+            )
+
+        biom = json.load(f)
+
+    rows = biom.get("rows", [])
+    columns = biom.get("columns", [])
+    shape = biom.get("shape", [])
+
+    print(f"BIOM shape: {shape}")
+    print(f"SH 行数: {len(rows)}")
+    print(f"样本列数: {len(columns)}")
+
+    if len(rows) == 0:
+        raise SystemExit("BIOM 中没有 rows，无法提取 SH taxonomy。")
+
+    rank_nonempty_counter = Counter()
+    kingdom_counter = Counter()
+    phylum_counter = Counter()
+    genus_nonempty = 0
+    species_nonempty = 0
+    metadata_missing = 0
+
+    with OUT_FUNGUILD.open("w", encoding="utf-8", newline="") as fg_out, \
+         OUT_TAXONOMY.open("w", encoding="utf-8", newline="") as tax_out:
+
+        fg_out.write("OTU_ID\tdummy\ttaxonomy\n")
+        tax_out.write(
+            "OTU_ID\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tfunguild_taxonomy\n"
+        )
+
+        for row in rows:
+            sh_id = str(row.get("id", "")).strip()
+            metadata = row.get("metadata", None)
+
+            if sh_id == "":
+                continue
+
+            if metadata is None:
+                metadata = {}
+                metadata_missing += 1
+
+            cleaned = {}
+            for rank in RANKS:
+                cleaned[rank] = clean_taxon_value(metadata.get(rank, ""))
+
+            if cleaned["kingdom"] == "":
+                cleaned["kingdom"] = "Fungi"
+
+            for rank in RANKS:
+                if cleaned[rank] != "":
+                    rank_nonempty_counter[rank] += 1
+
+            kingdom_counter[cleaned["kingdom"]] += 1
+            phylum_counter[cleaned["phylum"] if cleaned["phylum"] != "" else "missing"] += 1
+
+            if cleaned["genus"] != "":
+                genus_nonempty += 1
+            if cleaned["species"] != "":
+                species_nonempty += 1
+
+            funguild_taxonomy = build_funguild_taxonomy(cleaned)
+
+            fg_out.write(f"{sh_id}\t1\t{funguild_taxonomy}\n")
+
+            tax_out.write(
+                f"{sh_id}\t"
+                f"{cleaned['kingdom']}\t"
+                f"{cleaned['phylum']}\t"
+                f"{cleaned['class']}\t"
+                f"{cleaned['order']}\t"
+                f"{cleaned['family']}\t"
+                f"{cleaned['genus']}\t"
+                f"{cleaned['species']}\t"
+                f"{funguild_taxonomy}\n"
+            )
+
+    with OUT_SUMMARY.open("w", encoding="utf-8") as s:
+        s.write("BIOM taxonomy extraction summary for FUNGuild\n")
+        s.write("================================================\n\n")
+        s.write(f"Input BIOM: {BIOM_FILE}\n")
+        s.write(f"BIOM shape: {shape}\n")
+        s.write(f"Rows / SH number: {len(rows)}\n")
+        s.write(f"Columns / sample number: {len(columns)}\n\n")
+
+        s.write("Output files:\n")
+        s.write(f"FUNGuild input: {OUT_FUNGUILD}\n")
+        s.write(f"SH taxonomy table: {OUT_TAXONOMY}\n\n")
+
+        s.write("Non-empty taxonomy ranks:\n")
+        for rank in RANKS:
+            s.write(f"{rank}: {rank_nonempty_counter[rank]}\n")
+
+        s.write("\nMissing metadata rows:\n")
+        s.write(f"{metadata_missing}\n\n")
+
+        s.write("Genus non-empty SH number:\n")
+        s.write(f"{genus_nonempty}\n\n")
+
+        s.write("Species non-empty SH number:\n")
+        s.write(f"{species_nonempty}\n\n")
+
+        s.write("Kingdom summary:\n")
+        for k, v in kingdom_counter.most_common():
+            s.write(f"{k}\t{v}\n")
+
+        s.write("\nTop phylum summary:\n")
+        for k, v in phylum_counter.most_common(30):
+            s.write(f"{k}\t{v}\n")
+
+    print("\n完成 BIOM taxonomy 提取。")
+    print("FUNGuild 输入文件：")
+    print(OUT_FUNGUILD)
+    print("SH taxonomy 明细表：")
+    print(OUT_TAXONOMY)
+    print("摘要文件：")
+    print(OUT_SUMMARY)
+
+
+if __name__ == "__main__":
+    main()
+PY
+
+python3 /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/07_make_FUNGuild_input_from_BIOM_no_elephant.py
+#如果上面成功，会生成 FUNGuild 输入表。接着运行 FUNGuild：
+cd /mnt/d/ITS_SH_pipeline
+
+if [ ! -d /mnt/d/ITS_SH_pipeline/FUNGuild ]; then
+  git clone https://github.com/UMNFuN/FUNGuild.git /mnt/d/ITS_SH_pipeline/FUNGuild
+fi
+
+cd /mnt/d/ITS_SH_pipeline/FUNGuild
+
+python3 -m pip install --user requests
+
+python3 Guilds_v1.1.py \
+  -otu /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.txt \
+  -db fungi \
+  -m \
+  -u
+#运行成功后，重点看这个文件是否生成：
+ls -lh /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/*.guilds.txt
+#本次任务说明
+#1）输入文件
+#metadata
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#SH 丰度表
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/abundance_tables/SH_abundance_table_no_elephant.tsv
+#FUNGuild 注释结果
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/funguild_no_elephant/SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.guilds.txt
+#2）是否重算
+#不重跑 FUNGuild
+#不重做 SH taxonomy 注释
+#这次只是在已有 FUNGuild 结果基础上，读取 SH 丰度表和 metadata，计算：
+#各样本 FUNGuild 营养型相对多度
+#各样本 FUNGuild 功能类群相对多度
+#再按宿主科求平均相对多度并作图
+#3）计算口径
+#仅保留 Confidence Ranking 为：
+#Highly Probable
+#Probable
+#Possible、未匹配、空注释统一归为未分类
+#营养型图：展示全部 Trophic Mode
+#功能类群图：展示总体平均相对多度最高的前 10 个 Guild，其余合并为“其他功能类群”
+#先在每个样本内按 SH 丰度计算相对多度，再按宿主科求平均
+#单位为：平均相对多度（%）
+#4）输出文件
+#输出目录（新目录，不覆盖旧图）：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_FUNGuild_no_elephant
+#主要输出：
+#Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant.png
+#Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant.pdf
+#Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10.png
+#Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10.pdf
+#以及对应 CSV 和摘要文件。
+#5）改动内容
+#从原来的 FungalTraits 改为 FUNGuild
+#新增两张图：
+#营养型组成图
+#功能类群组成图
+#6）不改动内容
+#不改 no-elephant 数据版本
+#不改 metadata
+#不改 SH 丰度表
+#不改已有 FUNGuild 注释结果
+#不覆盖你之前的 FungalTraits 图
+#不改你论文统一风格要求：宋体、白底、PNG 600 dpi、中文标签、不在图内写图题
+#直接运行的完整脚本
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/08_plot_host_family_FUNGuild_trophic_and_guild_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 图3-5A/B 不同宿主科肠道真菌 FUNGuild 营养型与功能类群组成
+##
+## 口径：
+## 1. 使用 no-elephant SH 丰度表
+## 2. 使用 no-elephant metadata
+## 3. 使用已完成的 FUNGuild 结果
+## 4. 仅保留 Confidence Ranking 为 Highly Probable + Probable
+## 5. Possible、未匹配、空注释统一归为“未分类”
+## 6. 营养型图：展示全部 trophic mode
+## 7. 功能类群图：展示总体平均相对多度前10个 guild，其余并为“其他功能类群”
+## 8. 每个样本先转相对多度，再按宿主科求平均
+## ============================================================
+
+## =========================
+## 0. R包路径与依赖
+## =========================
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "data.table", "dplyr", "tidyr", "stringr",
+  "ggplot2", "showtext", "sysfonts", "grid"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## =========================
+## 1. 路径
+## =========================
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+abund_file <- file.path(
+  base_dir,
+  "abundance_tables/SH_abundance_table_no_elephant.tsv"
+)
+
+funguild_file <- file.path(
+  base_dir,
+  "results/funguild_no_elephant/SH_taxonomy_for_FUNGuild_from_BIOM_no_elephant.guilds.txt"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_FUNGuild_no_elephant"
+)
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png_trophic <- file.path(out_dir, "Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant.png")
+out_pdf_trophic <- file.path(out_dir, "Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant.pdf")
+
+out_png_guild <- file.path(out_dir, "Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10.png")
+out_pdf_guild <- file.path(out_dir, "Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10.pdf")
+
+out_csv_sample_trophic <- file.path(out_dir, "sample_FUNGuild_trophic_mode_relative_abundance_no_elephant.csv")
+out_csv_family_trophic <- file.path(out_dir, "host_family_FUNGuild_trophic_mode_mean_relative_abundance_no_elephant.csv")
+
+out_csv_sample_guild <- file.path(out_dir, "sample_FUNGuild_guild_relative_abundance_no_elephant.csv")
+out_csv_family_guild <- file.path(out_dir, "host_family_FUNGuild_guild_mean_relative_abundance_no_elephant.csv")
+out_csv_family_guild_full <- file.path(out_dir, "host_family_FUNGuild_guild_mean_relative_abundance_no_elephant_full.csv")
+
+out_csv_sh_annotation <- file.path(out_dir, "SH_FUNGuild_annotation_used_no_elephant.csv")
+out_summary_txt <- file.path(out_dir, "FUNGuild_host_family_plot_summary_no_elephant.txt")
+
+for (f in c(metadata_file, abund_file, funguild_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## =========================
+## 2. 字体
+## =========================
+base_family <- "sans"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_path <- font_candidates[file.exists(font_candidates)][1]
+
+if (!is.na(font_path)) {
+  sysfonts::font_add("CNfont", regular = font_path)
+  showtext::showtext_auto()
+  base_family <- "CNfont"
+}
+
+## =========================
+## 3. 参数
+## =========================
+keep_confidence <- c("Highly Probable", "Probable")
+top_n_guild <- 10
+
+host_family_order <- c(
+  "Bovidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae",
+  "Suidae"
+)
+
+host_family_cn_map <- c(
+  "Bovidae" = "牛科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科",
+  "Suidae" = "猪科"
+)
+
+trophic_order_cn <- c(
+  "腐生营养型",
+  "病理营养型",
+  "共生营养型",
+  "病理-腐生营养型",
+  "病理-共生营养型",
+  "腐生-共生营养型",
+  "病理-腐生-共生营养型",
+  "未分类"
+)
+
+trophic_colors <- c(
+  "腐生营养型" = "#E69F00",
+  "病理营养型" = "#D55E00",
+  "共生营养型" = "#009E73",
+  "病理-腐生营养型" = "#CC79A7",
+  "病理-共生营养型" = "#0072B2",
+  "腐生-共生营养型" = "#56B4E9",
+  "病理-腐生-共生营养型" = "#8E44AD",
+  "未分类" = "#D9D9D9"
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+pick_col <- function(candidates, cols, label) {
+  hit <- candidates[candidates %in% cols][1]
+  if (is.na(hit)) {
+    stop(
+      "找不到列：", label,
+      "\n尝试列名：", paste(candidates, collapse = ", "),
+      "\n实际列名：", paste(cols, collapse = ", ")
+    )
+  }
+  hit
+}
+
+clean_value <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x[x %in% c("", "NA", "N/A", "na", "n/a", "NULL", "None")] <- NA_character_
+  x
+}
+
+clean_fg_field <- function(x) {
+  x <- clean_value(x)
+  if (is.na(x)) return(NA_character_)
+  x <- gsub("^\\|+|\\|+$", "", x)
+  x <- gsub("\\|", "", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  if (x == "") return(NA_character_)
+  x
+}
+
+translate_trophic_mode <- function(x) {
+  x <- clean_fg_field(x)
+  if (is.na(x)) return("未分类")
+
+  map <- c(
+    "Saprotroph" = "腐生营养型",
+    "Pathotroph" = "病理营养型",
+    "Symbiotroph" = "共生营养型",
+    "Pathotroph-Saprotroph" = "病理-腐生营养型",
+    "Pathotroph-Symbiotroph" = "病理-共生营养型",
+    "Saprotroph-Symbiotroph" = "腐生-共生营养型",
+    "Pathotroph-Saprotroph-Symbiotroph" = "病理-腐生-共生营养型"
+  )
+
+  if (x %in% names(map)) {
+    return(unname(map[x]))
+  } else {
+    return("未分类")
+  }
+}
+
+translate_guild_token <- function(x) {
+  x <- trimws(x)
+
+  guild_map <- c(
+    "Animal Pathogen" = "动物病原菌",
+    "Animal Parasite" = "动物寄生菌",
+    "Animal Endosymbiont" = "动物内共生菌",
+    "Plant Pathogen" = "植物病原菌",
+    "Plant Parasite" = "植物寄生菌",
+    "Fungal Parasite" = "真菌寄生菌",
+    "Mycoparasite" = "真菌寄生菌",
+    "Lichen Parasite" = "地衣寄生菌",
+    "Bryophyte Parasite" = "苔藓寄生菌",
+    "Algal Parasite" = "藻类寄生菌",
+    "Protistan Parasite" = "原生生物寄生菌",
+
+    "Endophyte" = "内生菌",
+    "Clavicipitaceous Endophyte" = "麦角菌科内生菌",
+    "Epiphyte" = "附生菌",
+
+    "Dung Saprotroph" = "粪生腐生菌",
+    "Leaf Saprotroph" = "叶腐生菌",
+    "Litter Saprotroph" = "凋落物腐生菌",
+    "Plant Saprotroph" = "植物腐生菌",
+    "Soil Saprotroph" = "土壤腐生菌",
+    "Undefined Saprotroph" = "未定义腐生菌",
+    "Wood Saprotroph" = "木材腐生菌",
+
+    "Ectomycorrhizal" = "外生菌根菌",
+    "Arbuscular Mycorrhizal" = "丛枝菌根菌",
+    "Ericoid Mycorrhizal" = "杜鹃菌根菌",
+    "Orchid Mycorrhizal" = "兰科菌根菌",
+    "Lichenized" = "地衣型真菌",
+
+    "Sooty Mold" = "煤污菌",
+    "Bacterivore" = "食细菌型"
+  )
+
+  if (x %in% names(guild_map)) {
+    return(unname(guild_map[x]))
+  } else {
+    return(x)
+  }
+}
+
+translate_guild <- function(x) {
+  x <- clean_fg_field(x)
+  if (is.na(x)) return("未分类")
+
+  parts <- unlist(strsplit(x, "-", fixed = TRUE))
+  parts <- trimws(parts)
+  parts <- parts[parts != ""]
+  if (length(parts) == 0) return("未分类")
+
+  parts_cn <- vapply(parts, translate_guild_token, character(1))
+  paste(parts_cn, collapse = "-")
+}
+
+make_fill_colors <- function(levels_use) {
+  cols <- grDevices::hcl.colors(length(levels_use), palette = "Dark 3")
+  names(cols) <- levels_use
+
+  if ("其他功能类群" %in% names(cols)) cols["其他功能类群"] <- "#9E9E9E"
+  if ("未分类" %in% names(cols)) cols["未分类"] <- "#D9D9D9"
+
+  cols
+}
+
+write_summary_section <- function(title, obj, con) {
+  writeLines(c(title, capture.output(print(obj)), ""), con = con)
+}
+
+## =========================
+## 5. 读取 metadata
+## =========================
+cat("读取 metadata ...\n")
+
+meta <- data.table::fread(
+  metadata_file,
+  sep = ",",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+sample_col <- pick_col(
+  c("sampleid", "sample_id", "#SampleID", "SampleID", "sample", "Run", "run"),
+  colnames(meta),
+  "sample_id"
+)
+
+family_col <- pick_col(
+  c("host_family", "Host_family", "family", "hostFamily"),
+  colnames(meta),
+  "host_family"
+)
+
+meta2 <- data.frame(
+  sample_id = clean_value(meta[[sample_col]]),
+  host_family = clean_value(meta[[family_col]]),
+  stringsAsFactors = FALSE
+) %>%
+  filter(
+    !is.na(sample_id),
+    !is.na(host_family),
+    host_family %in% host_family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  mutate(
+    host_family_cn = host_family_cn_map[host_family],
+    host_family_cn = factor(host_family_cn, levels = host_family_cn_map[host_family_order])
+  )
+
+cat("metadata 样本数：", nrow(meta2), "\n", sep = "")
+print(table(meta2$host_family))
+
+## =========================
+## 6. 读取 SH abundance table
+## =========================
+cat("\n读取 SH 丰度表 ...\n")
+
+ab <- data.table::fread(
+  abund_file,
+  sep = "\t",
+  header = TRUE,
+  skip = 1,
+  data.table = FALSE,
+  check.names = FALSE,
+  quote = ""
+)
+
+colnames(ab)[1] <- "OTU_ID"
+ab$OTU_ID <- as.character(ab$OTU_ID)
+
+sample_cols <- intersect(colnames(ab)[-1], meta2$sample_id)
+if (length(sample_cols) == 0) {
+  stop("SH 丰度表和 metadata 没有共同样本。")
+}
+
+meta_use <- meta2 %>%
+  filter(sample_id %in% sample_cols)
+
+meta_use <- meta_use[match(sample_cols, meta_use$sample_id), ]
+
+ab_mat <- as.matrix(ab[, sample_cols, drop = FALSE])
+storage.mode(ab_mat) <- "numeric"
+ab_mat[is.na(ab_mat)] <- 0
+
+sample_total_reads <- colSums(ab_mat, na.rm = TRUE)
+
+cat("共同样本数：", length(sample_cols), "\n", sep = "")
+cat("SH 数：", nrow(ab), "\n", sep = "")
+
+## =========================
+## 7. 读取 FUNGuild 结果
+## =========================
+cat("\n读取 FUNGuild 结果 ...\n")
+
+fg <- data.table::fread(
+  funguild_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE,
+  quote = ""
+)
+
+id_col <- pick_col(c("OTU_ID", "#OTU ID", "OTU ID"), colnames(fg), "OTU_ID")
+taxon_col <- pick_col(c("Taxon", "taxon"), colnames(fg), "Taxon")
+taxon_level_col <- pick_col(c("Taxon Level", "Taxon.Level", "taxonLevel"), colnames(fg), "Taxon Level")
+trophic_col <- pick_col(c("Trophic Mode", "Trophic.Mode"), colnames(fg), "Trophic Mode")
+guild_col <- pick_col(c("Guild", "guild"), colnames(fg), "Guild")
+conf_col <- pick_col(c("Confidence Ranking", "Confidence.Ranking"), colnames(fg), "Confidence Ranking")
+
+fg2 <- fg %>%
+  transmute(
+    OTU_ID = as.character(.data[[id_col]]),
+    Taxon = as.character(.data[[taxon_col]]),
+    Taxon_Level = as.character(.data[[taxon_level_col]]),
+    Trophic_Mode_raw = as.character(.data[[trophic_col]]),
+    Guild_raw = as.character(.data[[guild_col]]),
+    Confidence_Ranking = as.character(.data[[conf_col]])
+  ) %>%
+  distinct(OTU_ID, .keep_all = TRUE)
+
+cat("FUNGuild 注释条数：", nrow(fg2), "\n", sep = "")
+print(table(fg2$Confidence_Ranking, useNA = "ifany"))
+
+## =========================
+## 8. 合并 SH 与 FUNGuild 注释
+## =========================
+cat("\n合并 SH 与 FUNGuild 注释 ...\n")
+
+sh_anno <- data.frame(
+  OTU_ID = ab$OTU_ID,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(fg2, by = "OTU_ID") %>%
+  mutate(
+    keep_for_main = !is.na(Confidence_Ranking) & Confidence_Ranking %in% keep_confidence,
+    trophic_mode_cn = ifelse(
+      keep_for_main,
+      vapply(Trophic_Mode_raw, translate_trophic_mode, character(1)),
+      "未分类"
+    ),
+    guild_cn = ifelse(
+      keep_for_main,
+      vapply(Guild_raw, translate_guild, character(1)),
+      "未分类"
+    )
+  )
+
+sh_anno$trophic_mode_cn[is.na(sh_anno$trophic_mode_cn) | sh_anno$trophic_mode_cn == ""] <- "未分类"
+sh_anno$guild_cn[is.na(sh_anno$guild_cn) | sh_anno$guild_cn == ""] <- "未分类"
+
+write.csv(sh_anno, out_csv_sh_annotation, row.names = FALSE)
+
+## 覆盖率统计
+row_total_reads <- rowSums(ab_mat, na.rm = TRUE)
+total_reads_all <- sum(row_total_reads, na.rm = TRUE)
+
+sh_assigned_main <- sh_anno$keep_for_main
+assigned_sh_number <- sum(sh_assigned_main, na.rm = TRUE)
+assigned_sh_percent <- assigned_sh_number / nrow(sh_anno) * 100
+assigned_reads_percent <- sum(row_total_reads[sh_assigned_main], na.rm = TRUE) / total_reads_all * 100
+
+## =========================
+## 9. 汇总函数
+## =========================
+summarise_by_category <- function(category_vec, category_name) {
+  category_vec <- as.character(category_vec)
+  category_vec[is.na(category_vec) | category_vec == ""] <- "未分类"
+
+  group_abund <- rowsum(ab_mat, group = category_vec, reorder = FALSE, na.rm = TRUE)
+
+  rel_mat <- sweep(group_abund, 2, sample_total_reads, FUN = "/") * 100
+  rel_mat[, sample_total_reads <= 0] <- 0
+  rel_mat[is.na(rel_mat)] <- 0
+
+  sample_df <- as.data.frame(t(rel_mat), check.names = FALSE)
+  sample_df$sample_id <- rownames(sample_df)
+
+  sample_long <- sample_df %>%
+    pivot_longer(
+      cols = -sample_id,
+      names_to = category_name,
+      values_to = "relative_abundance"
+    ) %>%
+    left_join(meta_use, by = "sample_id")
+
+  family_mean <- sample_long %>%
+    group_by(host_family, host_family_cn, .data[[category_name]]) %>%
+    summarise(
+      mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      host_family = factor(host_family, levels = host_family_order),
+      host_family_cn = factor(host_family_cn, levels = host_family_cn_map[host_family_order])
+    ) %>%
+    arrange(host_family)
+
+  list(
+    sample_long = sample_long,
+    family_mean = family_mean
+  )
+}
+
+## =========================
+## 10. 营养型汇总
+## =========================
+cat("\n汇总营养型 ...\n")
+
+trophic_res <- summarise_by_category(sh_anno$trophic_mode_cn, "trophic_mode_cn")
+
+write.csv(trophic_res$sample_long, out_csv_sample_trophic, row.names = FALSE)
+
+trophic_family <- trophic_res$family_mean %>%
+  complete(
+    host_family = factor(host_family_order, levels = host_family_order),
+    host_family_cn = factor(host_family_cn_map[host_family_order], levels = host_family_cn_map[host_family_order]),
+    trophic_mode_cn = trophic_order_cn,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  arrange(host_family, match(trophic_mode_cn, trophic_order_cn))
+
+write.csv(trophic_family, out_csv_family_trophic, row.names = FALSE)
+
+## =========================
+## 11. 功能类群汇总
+## =========================
+cat("汇总功能类群 ...\n")
+
+guild_res <- summarise_by_category(sh_anno$guild_cn, "guild_cn")
+
+write.csv(guild_res$sample_long, out_csv_sample_guild, row.names = FALSE)
+write.csv(guild_res$family_mean, out_csv_family_guild_full, row.names = FALSE)
+
+guild_overall <- guild_res$family_mean %>%
+  group_by(guild_cn) %>%
+  summarise(
+    overall_mean = mean(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(overall_mean))
+
+top_guild_keep <- guild_overall %>%
+  filter(guild_cn != "未分类") %>%
+  slice_head(n = top_n_guild) %>%
+  pull(guild_cn)
+
+guild_family_plot <- guild_res$family_mean %>%
+  mutate(
+    guild_plot = case_when(
+      guild_cn %in% top_guild_keep ~ guild_cn,
+      guild_cn == "未分类" ~ "未分类",
+      TRUE ~ "其他功能类群"
+    )
+  ) %>%
+  group_by(host_family, host_family_cn, guild_plot) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    host_family = factor(host_family, levels = host_family_order),
+    host_family_cn = factor(host_family_cn, levels = host_family_cn_map[host_family_order])
+  )
+
+guild_order_plot <- guild_family_plot %>%
+  group_by(guild_plot) %>%
+  summarise(overall_mean = mean(mean_relative_abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(overall_mean)) %>%
+  pull(guild_plot)
+
+guild_order_plot <- c(
+  setdiff(guild_order_plot, c("其他功能类群", "未分类")),
+  intersect(c("其他功能类群", "未分类"), guild_order_plot)
+)
+
+guild_family_plot <- guild_family_plot %>%
+  complete(
+    host_family = factor(host_family_order, levels = host_family_order),
+    host_family_cn = factor(host_family_cn_map[host_family_order], levels = host_family_cn_map[host_family_order]),
+    guild_plot = guild_order_plot,
+    fill = list(mean_relative_abundance = 0)
+  ) %>%
+  arrange(host_family, match(guild_plot, guild_order_plot))
+
+write.csv(guild_family_plot, out_csv_family_guild, row.names = FALSE)
+
+## =========================
+## 12. 作图函数
+## =========================
+plot_stacked <- function(df, x_col, fill_col, y_col, fill_values, out_png, out_pdf,
+                         legend_text_size = 10.5, width_cm = 24, height_cm = 14) {
+
+  p <- ggplot(
+    df,
+    aes(
+      x = .data[[x_col]],
+      y = .data[[y_col]],
+      fill = .data[[fill_col]]
+    )
+  ) +
+    geom_col(
+      width = 0.72,
+      color = "grey35",
+      linewidth = 0.12
+    ) +
+    scale_fill_manual(
+      values = fill_values,
+      breaks = names(fill_values),
+      drop = FALSE
+    ) +
+    scale_y_continuous(
+      breaks = seq(0, 100, 20),
+      expand = expansion(mult = c(0, 0.01))
+    ) +
+    coord_cartesian(ylim = c(0, 100), clip = "off") +
+    labs(
+      x = NULL,
+      y = "平均相对多度（%）"
+    ) +
+    theme_classic(base_size = 15, base_family = base_family) +
+    theme(
+      axis.line = element_line(color = "black", linewidth = 0.8),
+      axis.ticks = element_line(color = "black", linewidth = 0.8),
+      axis.ticks.length = unit(0.20, "cm"),
+      axis.text.x = element_text(size = 16, color = "black", family = base_family),
+      axis.text.y = element_text(size = 13, color = "black", family = base_family),
+      axis.title.y = element_text(size = 16, color = "black", family = base_family),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = legend_text_size, color = "black", family = base_family),
+      legend.key.size = unit(0.42, "cm"),
+      legend.spacing.y = unit(0.03, "cm"),
+      legend.background = element_rect(fill = "white", colour = NA),
+      legend.key = element_rect(fill = "white", colour = NA),
+      plot.background = element_rect(fill = "white", colour = NA),
+      panel.background = element_rect(fill = "white", colour = NA),
+      plot.margin = margin(8, 8, 8, 8)
+    )
+
+  ggsave(out_png, p, width = width_cm, height = height_cm, units = "cm", dpi = 600, bg = "white")
+  ggsave(out_pdf, p, width = width_cm, height = height_cm, units = "cm", bg = "white")
+}
+
+## =========================
+## 13. 绘制营养型图
+## =========================
+cat("\n绘制营养型图 ...\n")
+
+trophic_family$host_family_cn <- factor(
+  trophic_family$host_family_cn,
+  levels = host_family_cn_map[host_family_order]
+)
+
+trophic_family$trophic_mode_cn <- factor(
+  trophic_family$trophic_mode_cn,
+  levels = trophic_order_cn
+)
+
+plot_stacked(
+  df = trophic_family,
+  x_col = "host_family_cn",
+  fill_col = "trophic_mode_cn",
+  y_col = "mean_relative_abundance",
+  fill_values = trophic_colors[trophic_order_cn[trophic_order_cn %in% unique(as.character(trophic_family$trophic_mode_cn))]],
+  out_png = out_png_trophic,
+  out_pdf = out_pdf_trophic,
+  legend_text_size = 10.5,
+  width_cm = 24,
+  height_cm = 14
+)
+
+## =========================
+## 14. 绘制功能类群图
+## =========================
+cat("绘制功能类群图 ...\n")
+
+guild_family_plot$host_family_cn <- factor(
+  guild_family_plot$host_family_cn,
+  levels = host_family_cn_map[host_family_order]
+)
+
+guild_family_plot$guild_plot <- factor(
+  guild_family_plot$guild_plot,
+  levels = guild_order_plot
+)
+
+guild_fill <- make_fill_colors(guild_order_plot)
+
+plot_stacked(
+  df = guild_family_plot,
+  x_col = "host_family_cn",
+  fill_col = "guild_plot",
+  y_col = "mean_relative_abundance",
+  fill_values = guild_fill[guild_order_plot],
+  out_png = out_png_guild,
+  out_pdf = out_pdf_guild,
+  legend_text_size = 9.5,
+  width_cm = 24,
+  height_cm = 14
+)
+
+## =========================
+## 15. 摘要输出
+## =========================
+cat("输出摘要 ...\n")
+
+con <- file(out_summary_txt, open = "wt", encoding = "UTF-8")
+
+writeLines("FUNGuild 营养型与功能类群组成分析摘要（no_elephant）", con)
+writeLines("====================================================", con)
+writeLines("", con)
+
+writeLines("一、输入文件", con)
+writeLines(paste0("metadata: ", metadata_file), con)
+writeLines(paste0("SH abundance table: ", abund_file), con)
+writeLines(paste0("FUNGuild result: ", funguild_file), con)
+writeLines("", con)
+
+writeLines("二、分析口径", con)
+writeLines("1. 仅保留 Confidence Ranking 为 Highly Probable 和 Probable 的注释。", con)
+writeLines("2. Possible、未匹配和空注释统一归为“未分类”。", con)
+writeLines("3. 每个样本内先按 SH 丰度计算相对多度，再按宿主科求平均。", con)
+writeLines("4. 营养型图展示全部 trophic mode。", con)
+writeLines(paste0("5. 功能类群图仅展示总体平均相对多度前 ", top_n_guild, " 个 guild，其余合并为“其他功能类群”。"), con)
+writeLines("", con)
+
+writeLines("三、覆盖率", con)
+writeLines(paste0("总 SH 数：", nrow(sh_anno)), con)
+writeLines(paste0("保留用于主分析的 SH 数：", assigned_sh_number), con)
+writeLines(paste0("按 SH 数量的保留比例：", sprintf("%.2f%%", assigned_sh_percent)), con)
+writeLines(paste0("按总 reads 的保留比例：", sprintf("%.2f%%", assigned_reads_percent)), con)
+writeLines("", con)
+
+write_summary_section("Confidence Ranking 统计：", table(sh_anno$Confidence_Ranking, useNA = "ifany"), con)
+write_summary_section("各宿主科样本数：", table(meta_use$host_family), con)
+
+write_summary_section(
+  "营养型图中各宿主科总和检查（应接近100）：",
+  trophic_family %>%
+    group_by(host_family_cn) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop"),
+  con
+)
+
+write_summary_section(
+  "功能类群图中各宿主科总和检查（应接近100）：",
+  guild_family_plot %>%
+    group_by(host_family_cn) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop"),
+  con
+)
+
+write_summary_section(
+  "总体平均相对多度前10个功能类群：",
+  guild_overall %>%
+    filter(guild_cn %in% top_guild_keep) %>%
+    arrange(desc(overall_mean)),
+  con
+)
+
+close(con)
+
+## =========================
+## 16. 完成
+## =========================
+cat("\n完成！\n")
+cat("营养型 PNG: ", out_png_trophic, "\n", sep = "")
+cat("营养型 PDF: ", out_pdf_trophic, "\n", sep = "")
+cat("功能类群 PNG: ", out_png_guild, "\n", sep = "")
+cat("功能类群 PDF: ", out_pdf_guild, "\n", sep = "")
+cat("营养型样本表: ", out_csv_sample_trophic, "\n", sep = "")
+cat("营养型宿主科表: ", out_csv_family_trophic, "\n", sep = "")
+cat("功能类群样本表: ", out_csv_sample_guild, "\n", sep = "")
+cat("功能类群宿主科表(top10): ", out_csv_family_guild, "\n", sep = "")
+cat("功能类群宿主科表(full): ", out_csv_family_guild_full, "\n", sep = "")
+cat("SH 注释表: ", out_csv_sh_annotation, "\n", sep = "")
+cat("摘要: ", out_summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/08_plot_host_family_FUNGuild_trophic_and_guild_no_elephant.R
+#问题已经定位到两个层面：
+#第一，PNG 文字不是数据或字体大小问题，而是位图设备渲染问题。PDF 正常，说明 ggplot 本身、中文标签、宋体字体都能正常生成；PNG 文字异常通常是 showtext 没有按 600 dpi 位图输出同步设置，或者 WSL 下 ggsave() 默认 PNG 设备对中文字体渲染不稳定。你这次 PDF 里文字是正常的，PNG 里文字几乎看不到，正符合这个问题。后面改成：showtext_opts(dpi = 600) + 显式使用 png(type = "cairo", res = 600) 输出 PNG，不再依赖 ggsave() 默认 PNG 设备。
+#第二，Animal Symbiotroph 没翻译，是因为上版翻译字典漏了这个 FUNGuild guild token。你的摘要里前 10 功能类群第 2 位就是 Animal Symbiotroph-植物腐生菌，说明它已经进入主图图例，需要补译为“动物共生菌-植物腐生菌”。
+#这次不重新计算 FUNGuild、不重新计算相对多度，只读取已经生成的宿主科组成 CSV，修正中文标签、图例换行和 PNG/PDF 输出设备，另存为新文件，不覆盖旧图。
+#直接运行下面整段：
+#先在 WSL 里运行下面整段：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/09_redraw_host_family_FUNGuild_figures_CN_fontfix_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 只重画 FUNGuild 营养型图和功能类群图，不重算丰度、不重跑 FUNGuild
+##
+## 修正内容：
+## 1. PNG 文字不显示/过小的问题：
+##    使用 showtext_opts(dpi = 600) + png(type = "cairo", res = 600)
+## 2. 补译 Animal Symbiotroph -> 动物共生菌
+## 3. 功能类群图例长文字自动换行
+## 4. 新输出文件名加 CN_fontfix，不覆盖旧图
+## ============================================================
+
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c("dplyr", "ggplot2", "stringr", "showtext", "sysfonts", "grid")
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(stringr)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_FUNGuild_no_elephant"
+)
+
+trophic_csv <- file.path(
+  in_dir,
+  "host_family_FUNGuild_trophic_mode_mean_relative_abundance_no_elephant.csv"
+)
+
+guild_csv <- file.path(
+  in_dir,
+  "host_family_FUNGuild_guild_mean_relative_abundance_no_elephant.csv"
+)
+
+out_trophic_csv <- file.path(
+  in_dir,
+  "host_family_FUNGuild_trophic_mode_mean_relative_abundance_no_elephant_CN_fontfix.csv"
+)
+
+out_guild_csv <- file.path(
+  in_dir,
+  "host_family_FUNGuild_guild_mean_relative_abundance_no_elephant_top10_CN_fontfix.csv"
+)
+
+out_trophic_png <- file.path(
+  in_dir,
+  "Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant_CN_fontfix.png"
+)
+
+out_trophic_pdf <- file.path(
+  in_dir,
+  "Fig3_5A_host_family_FUNGuild_trophic_mode_composition_no_elephant_CN_fontfix.pdf"
+)
+
+out_guild_png <- file.path(
+  in_dir,
+  "Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10_CN_fontfix.png"
+)
+
+out_guild_pdf <- file.path(
+  in_dir,
+  "Fig3_5B_host_family_FUNGuild_guild_composition_no_elephant_top10_CN_fontfix.pdf"
+)
+
+for (f in c(trophic_csv, guild_csv)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## -----------------------------
+## 2. 字体：固定宋体 + 600 dpi showtext
+## -----------------------------
+base_family <- "sans"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttf",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_path <- font_candidates[file.exists(font_candidates)][1]
+
+if (!is.na(font_path)) {
+  sysfonts::font_add("CNfont", regular = font_path)
+  base_family <- "CNfont"
+}
+
+## 关键修正：让 showtext 按 600 dpi 位图输出计算字号和字形
+showtext::showtext_auto(enable = TRUE)
+showtext::showtext_opts(dpi = 600)
+
+cat("使用字体：", base_family, "\n", sep = "")
+cat("字体文件：", ifelse(is.na(font_path), "未找到宋体，使用默认字体", font_path), "\n", sep = "")
+cat("R cairo capability：", capabilities("cairo"), "\n", sep = "")
+
+## -----------------------------
+## 3. 顺序和配色
+## -----------------------------
+host_family_order_cn <- c("牛科", "鹿科", "马科", "犀科", "猪科")
+
+trophic_order_cn <- c(
+  "腐生营养型",
+  "病理营养型",
+  "共生营养型",
+  "病理-腐生营养型",
+  "病理-共生营养型",
+  "腐生-共生营养型",
+  "病理-腐生-共生营养型",
+  "未分类"
+)
+
+trophic_colors <- c(
+  "腐生营养型" = "#E69F00",
+  "病理营养型" = "#D55E00",
+  "共生营养型" = "#009E73",
+  "病理-腐生营养型" = "#CC79A7",
+  "病理-共生营养型" = "#0072B2",
+  "腐生-共生营养型" = "#56B4E9",
+  "病理-腐生-共生营养型" = "#8E44AD",
+  "未分类" = "#D9D9D9"
+)
+
+## -----------------------------
+## 4. 标签修正
+## -----------------------------
+fix_guild_cn <- function(x) {
+  x <- as.character(x)
+
+  ## 补齐上版漏翻译的 FUNGuild guild token
+  x <- stringr::str_replace_all(x, fixed("Animal Symbiotroph"), "动物共生菌")
+  x <- stringr::str_replace_all(x, fixed("Plant Symbiotroph"), "植物共生菌")
+  x <- stringr::str_replace_all(x, fixed("Fungal Symbiotroph"), "真菌共生菌")
+  x <- stringr::str_replace_all(x, fixed("Algal Symbiotroph"), "藻类共生菌")
+  x <- stringr::str_replace_all(x, fixed("Bryophyte Symbiotroph"), "苔藓共生菌")
+
+  ## 保险：如果 CSV 中仍混入少数英文 token，也在重画时补译
+  x <- stringr::str_replace_all(x, fixed("Animal Pathogen"), "动物病原菌")
+  x <- stringr::str_replace_all(x, fixed("Animal Parasite"), "动物寄生菌")
+  x <- stringr::str_replace_all(x, fixed("Plant Pathogen"), "植物病原菌")
+  x <- stringr::str_replace_all(x, fixed("Plant Saprotroph"), "植物腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Undefined Saprotroph"), "未定义腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Wood Saprotroph"), "木材腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Dung Saprotroph"), "粪生腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Litter Saprotroph"), "凋落物腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Soil Saprotroph"), "土壤腐生菌")
+  x <- stringr::str_replace_all(x, fixed("Endophyte"), "内生菌")
+  x <- stringr::str_replace_all(x, fixed("Ectomycorrhizal"), "外生菌根菌")
+  x <- stringr::str_replace_all(x, fixed("Lichenized"), "地衣型真菌")
+
+  x
+}
+
+wrap_legend_label <- function(x, width = 24) {
+  ## 对中文/中英混合图例按字符宽度换行
+  ## width 越小，换行越积极
+  stringr::str_wrap(x, width = width)
+}
+
+make_guild_colors <- function(levels_use) {
+  cols <- grDevices::hcl.colors(length(levels_use), palette = "Dark 3")
+  names(cols) <- levels_use
+
+  if ("其他功能类群" %in% names(cols)) cols["其他功能类群"] <- "#9E9E9E"
+  if ("未分类" %in% names(cols)) cols["未分类"] <- "#D9D9D9"
+
+  cols
+}
+
+## -----------------------------
+## 5. 稳定输出 PNG / PDF
+## -----------------------------
+save_plot_cairo <- function(p, png_file, pdf_file, width_cm, height_cm, dpi = 600) {
+  ## PNG：不用 ggsave 默认 png，显式 cairo 位图设备
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      type = "cairo",
+      bg = "white"
+    )
+  } else {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+
+  ## PDF：优先 cairo_pdf，保证字体和中文更稳定
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::cairo_pdf(
+      filename = pdf_file,
+      width = width_cm / 2.54,
+      height = height_cm / 2.54,
+      bg = "white"
+    )
+  } else {
+    grDevices::pdf(
+      file = pdf_file,
+      width = width_cm / 2.54,
+      height = height_cm / 2.54,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+}
+
+## -----------------------------
+## 6. 读取并修正数据
+## -----------------------------
+trophic_df <- read.csv(
+  trophic_csv,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+guild_df <- read.csv(
+  guild_csv,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (!all(c("host_family_cn", "trophic_mode_cn", "mean_relative_abundance") %in% colnames(trophic_df))) {
+  stop("营养型 CSV 列名不符合预期。实际列名：", paste(colnames(trophic_df), collapse = ", "))
+}
+
+if (!all(c("host_family_cn", "guild_plot", "mean_relative_abundance") %in% colnames(guild_df))) {
+  stop("功能类群 CSV 列名不符合预期。实际列名：", paste(colnames(guild_df), collapse = ", "))
+}
+
+trophic_df <- trophic_df %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn),
+    trophic_mode_cn = factor(trophic_mode_cn, levels = trophic_order_cn)
+  ) %>%
+  arrange(host_family_cn, trophic_mode_cn)
+
+## 保留旧图中的功能类群图例顺序，但修正未翻译标签
+old_guild_order <- unique(as.character(guild_df$guild_plot))
+guild_order_fixed <- fix_guild_cn(old_guild_order)
+
+guild_df <- guild_df %>%
+  mutate(
+    guild_plot_old = as.character(guild_plot),
+    guild_plot = fix_guild_cn(guild_plot),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  group_by(host_family_cn, guild_plot) %>%
+  summarise(
+    mean_relative_abundance = sum(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 若两个英文标签修正后合并到同一中文名，需要重新生成顺序并保持“其他/未分类”在最后
+guild_order_fixed <- unique(guild_order_fixed)
+guild_order_fixed <- c(
+  setdiff(guild_order_fixed, c("其他功能类群", "未分类")),
+  intersect(c("其他功能类群", "未分类"), guild_order_fixed)
+)
+
+guild_df <- guild_df %>%
+  mutate(
+    guild_plot = factor(guild_plot, levels = guild_order_fixed)
+  ) %>%
+  arrange(host_family_cn, guild_plot)
+
+write.csv(trophic_df, out_trophic_csv, row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(guild_df, out_guild_csv, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("营养型加总检查：\n")
+print(
+  trophic_df %>%
+    group_by(host_family_cn) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop")
+)
+
+cat("功能类群加总检查：\n")
+print(
+  guild_df %>%
+    group_by(host_family_cn) %>%
+    summarise(total = sum(mean_relative_abundance), .groups = "drop")
+)
+
+## -----------------------------
+## 7. 画营养型图
+## -----------------------------
+trophic_fill <- trophic_colors[trophic_order_cn]
+trophic_fill <- trophic_fill[!is.na(trophic_fill)]
+
+p_trophic <- ggplot(
+  trophic_df,
+  aes(
+    x = host_family_cn,
+    y = mean_relative_abundance,
+    fill = trophic_mode_cn
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = "grey35",
+    linewidth = 0.12
+  ) +
+  scale_fill_manual(
+    values = trophic_fill,
+    breaks = trophic_order_cn,
+    labels = trophic_order_cn,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, 100), clip = "off") +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  theme_classic(base_size = 15, base_family = base_family) +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.20, "cm"),
+    axis.text.x = element_text(size = 16, color = "black", family = base_family),
+    axis.text.y = element_text(size = 13, color = "black", family = base_family),
+    axis.title.y = element_text(size = 16, color = "black", family = base_family),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11, color = "black", family = base_family),
+    legend.key.size = unit(0.42, "cm"),
+    legend.spacing.y = unit(0.03, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+## -----------------------------
+## 8. 画功能类群图，图例自动换行
+## -----------------------------
+guild_fill <- make_guild_colors(guild_order_fixed)
+
+guild_labels_wrapped <- setNames(
+  wrap_legend_label(guild_order_fixed, width = 24),
+  guild_order_fixed
+)
+
+p_guild <- ggplot(
+  guild_df,
+  aes(
+    x = host_family_cn,
+    y = mean_relative_abundance,
+    fill = guild_plot
+  )
+) +
+  geom_col(
+    width = 0.72,
+    color = "grey35",
+    linewidth = 0.12
+  ) +
+  scale_fill_manual(
+    values = guild_fill,
+    breaks = guild_order_fixed,
+    labels = guild_labels_wrapped,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, 100), clip = "off") +
+  labs(
+    x = NULL,
+    y = "平均相对多度（%）"
+  ) +
+  guides(
+    fill = guide_legend(
+      byrow = TRUE,
+      keyheight = unit(0.52, "cm"),
+      keywidth = unit(0.42, "cm"),
+      label.hjust = 0
+    )
+  ) +
+  theme_classic(base_size = 15, base_family = base_family) +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.20, "cm"),
+    axis.text.x = element_text(size = 16, color = "black", family = base_family),
+    axis.text.y = element_text(size = 13, color = "black", family = base_family),
+    axis.title.y = element_text(size = 16, color = "black", family = base_family),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 9.5,
+      color = "black",
+      family = base_family,
+      lineheight = 0.95
+    ),
+    legend.key.size = unit(0.42, "cm"),
+    legend.spacing.y = unit(0.10, "cm"),
+    legend.background = element_rect(fill = "white", colour = NA),
+    legend.key = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+## -----------------------------
+## 9. 输出
+## -----------------------------
+save_plot_cairo(
+  p = p_trophic,
+  png_file = out_trophic_png,
+  pdf_file = out_trophic_pdf,
+  width_cm = 24,
+  height_cm = 14,
+  dpi = 600
+)
+
+save_plot_cairo(
+  p = p_guild,
+  png_file = out_guild_png,
+  pdf_file = out_guild_pdf,
+  width_cm = 26,
+  height_cm = 14,
+  dpi = 600
+)
+
+cat("\n完成！新文件如下：\n")
+cat("营养型 PNG: ", out_trophic_png, "\n", sep = "")
+cat("营养型 PDF: ", out_trophic_pdf, "\n", sep = "")
+cat("功能类群 PNG: ", out_guild_png, "\n", sep = "")
+cat("功能类群 PDF: ", out_guild_pdf, "\n", sep = "")
+cat("营养型修正 CSV: ", out_trophic_csv, "\n", sep = "")
+cat("功能类群修正 CSV: ", out_guild_csv, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/09_redraw_host_family_FUNGuild_figures_CN_fontfix_no_elephant.R
