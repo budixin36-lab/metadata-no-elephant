@@ -1,0 +1,1428 @@
+#本次口径如下：
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/genus_abundance_table_no_elephant.tsv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/host_family_top20_genus_chord_matrix_no_elephant_CN_radial_labels_family_order_taxonomic.csv
+#是否重算：
+#不重算 taxonomy；
+#不重画 Fig3-4 弦图；
+#不重新筛选 Top20 属；
+#只读取最终弦图矩阵确定 Top20 属，再从 genus abundance table 计算样本水平相对多度用于统计检验。
+#统计单位：
+#每个样本内 Top20 属相对多度（%）
+#检验对象：
+#Fig3-4 最终弦图中展示的 Top20 属。
+#其中“真菌属分类地位未定类群”默认保留参与统计，因为它在最终 Fig3-4 中展示；论文解释时需要写成“属水平未定类群”，不要当成明确分类属解释。
+#统计方法：
+#每个属分别做 Kruskal-Wallis 检验；
+#Dunn’s test 做宿主科两两比较；
+#Dunn’s test 的 P 值使用 BH 校正；
+#字母标注基于 Dunn’s test 的 BH 校正 P 值，alpha = 0.05。
+#输出目录：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus
+#直接运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/16_top20_genus_host_family_Kruskal_Dunn_letters_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 不同宿主科肠道真菌 Top20 属相对多度差异检验
+##
+## 统计口径：
+## 1. 读取最终 Fig3-4 中文弦图矩阵，确定 Top20 属及顺序；
+## 2. 读取 no-elephant genus abundance table；
+## 3. 每个样本内先计算各属相对多度；
+## 4. 只提取 Fig3-4 中展示的 Top20 属；
+## 5. 每个属分别做 Kruskal-Wallis 检验；
+## 6. Dunn's test 做宿主科两两比较，P 值使用 BH 校正；
+## 7. 输出字母标注表，供后续柱状图或箱线图加字母使用。
+##
+## 不做内容：
+## 不重做 taxonomy；
+## 不重画 Fig3-4；
+## 不重新筛选 Top20 属；
+## 不覆盖原图。
+## ============================================================
+
+## -----------------------------
+## 0. R包路径与依赖
+## -----------------------------
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr", "tidyr", "stringr", "readr",
+  "dunn.test", "multcompView"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readr)
+  library(dunn.test)
+  library(multcompView)
+})
+
+## -----------------------------
+## 1. 输入输出路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+genus_table_file <- file.path(
+  base_dir,
+  "taxonomy/genus_abundance_table_no_elephant.tsv"
+)
+
+top20_matrix_file <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant/host_family_top20_genus_chord_matrix_no_elephant_CN_radial_labels_family_order_taxonomic.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_top20_map_csv <- file.path(
+  out_dir,
+  "Top20_genus_from_final_chord_matrix_mapping_no_elephant.csv"
+)
+
+out_sample_rel_csv <- file.path(
+  out_dir,
+  "Top20_genus_sample_relative_abundance_host_family_no_elephant.csv"
+)
+
+out_group_summary_csv <- file.path(
+  out_dir,
+  "Top20_genus_group_summary_host_family_no_elephant.csv"
+)
+
+out_kw_csv <- file.path(
+  out_dir,
+  "Top20_genus_Kruskal_Wallis_host_family_no_elephant.csv"
+)
+
+out_dunn_csv <- file.path(
+  out_dir,
+  "Top20_genus_Dunn_host_family_no_elephant.csv"
+)
+
+out_letters_csv <- file.path(
+  out_dir,
+  "Top20_genus_letters_host_family_no_elephant.csv"
+)
+
+out_summary_txt <- file.path(
+  out_dir,
+  "Top20_genus_Kruskal_Dunn_summary_no_elephant.txt"
+)
+
+for (f in c(metadata_file, genus_table_file, top20_matrix_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## -----------------------------
+## 2. 参数：顺序与中文名
+## -----------------------------
+host_family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+host_family_cn_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+host_family_order_cn <- unname(host_family_cn_map[host_family_order])
+
+## 英文属名 -> 中文属名，沿用最终 Fig3-4 代码
+genus_cn_map <- c(
+  "Kazachstania" = "哈萨克酵母属",
+  "Aspergillus" = "曲霉属",
+  "Thelebolus" = "寡囊盘菌属",
+  "Ascochyta" = "壳二孢菌属",
+  "Fungi gen Incertae sedis" = "真菌属分类地位未定类群",
+  "Fungi_gen_Incertae_sedis" = "真菌属分类地位未定类群",
+  "Caecomyces" = "隐菌属",
+  "Wallemia" = "节担菌属",
+  "Cladosporium" = "枝孢属",
+  "Sporormiella" = "小荚孢腔菌属",
+  "Penicillium" = "青霉属",
+  "Naganishia" = "永西酵母属",
+  "Khoyollomyces" = "Khoyollomyces",
+  "Fusarium" = "镰孢属",
+  "Saccharomyces" = "酵母属",
+  "Cladonia" = "石蕊属",
+  "Neocallimastix" = "新靓鞭菌属",
+  "Cortinarius" = "丝膜菌属",
+  "Vishniacozyma" = "维希尼克酵母属",
+  "Cutaneotrichosporon" = "皮肤丝孢酵母属",
+  "Alternaria" = "链格孢属"
+)
+
+## 中文属名 -> 候选英文属名
+## 对“真菌属分类地位未定类群”保留两个候选，脚本会优先匹配丰度表中真实存在的名称
+cn_to_genus_candidates <- list(
+  "哈萨克酵母属" = c("Kazachstania"),
+  "曲霉属" = c("Aspergillus"),
+  "寡囊盘菌属" = c("Thelebolus"),
+  "壳二孢菌属" = c("Ascochyta"),
+  "真菌属分类地位未定类群" = c("Fungi_gen_Incertae_sedis", "Fungi gen Incertae sedis"),
+  "隐菌属" = c("Caecomyces"),
+  "节担菌属" = c("Wallemia"),
+  "枝孢属" = c("Cladosporium"),
+  "小荚孢腔菌属" = c("Sporormiella"),
+  "青霉属" = c("Penicillium"),
+  "永西酵母属" = c("Naganishia"),
+  "Khoyollomyces" = c("Khoyollomyces"),
+  "镰孢属" = c("Fusarium"),
+  "酵母属" = c("Saccharomyces"),
+  "石蕊属" = c("Cladonia"),
+  "新靓鞭菌属" = c("Neocallimastix"),
+  "丝膜菌属" = c("Cortinarius"),
+  "维希尼克酵母属" = c("Vishniacozyma"),
+  "皮肤丝孢酵母属" = c("Cutaneotrichosporon"),
+  "链格孢属" = c("Alternaria")
+)
+
+alpha <- 0.05
+
+## 默认保留“真菌属分类地位未定类群”，因为它在最终 Fig3-4 中展示
+exclude_uncertain_genus <- FALSE
+uncertain_genus_cn <- "真菌属分类地位未定类群"
+
+## -----------------------------
+## 3. 工具函数
+## -----------------------------
+find_col <- function(df, patterns, label) {
+  nms <- colnames(df)
+  for (p in patterns) {
+    hit <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hit) >= 1) return(hit[1])
+  }
+  stop(
+    "无法识别列：", label,
+    "\n当前列名为：\n",
+    paste(nms, collapse = " | ")
+  )
+}
+
+clean_genus_name <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^g__", "", x)
+  x <- trimws(x)
+  x
+}
+
+norm_genus_name <- function(x) {
+  x <- clean_genus_name(x)
+  x <- gsub("_", " ", x)
+  x <- stringr::str_squish(x)
+  tolower(x)
+}
+
+p_to_sig <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "<0.001",
+    TRUE ~ sprintf("%.4f", p)
+  )
+}
+
+map_genus_cn_from_en <- function(x) {
+  x <- as.character(x)
+  ifelse(x %in% names(genus_cn_map), genus_cn_map[x], x)
+}
+
+resolve_cn_to_genus <- function(genus_cn, genus_table_names) {
+  genus_cn <- as.character(genus_cn)
+
+  candidates <- cn_to_genus_candidates[[genus_cn]]
+
+  if (is.null(candidates)) {
+    ## 如果中文名不在映射表中，尝试直接用中文名或原名匹配
+    candidates <- genus_cn
+  }
+
+  ## 1. 直接精确匹配
+  hit <- candidates[candidates %in% genus_table_names]
+  if (length(hit) >= 1) return(hit[1])
+
+  ## 2. 规范化匹配：处理空格/下划线差异
+  genus_norm <- norm_genus_name(genus_table_names)
+  cand_norm <- norm_genus_name(candidates)
+
+  idx <- match(cand_norm, genus_norm)
+  idx <- idx[!is.na(idx)]
+  if (length(idx) >= 1) return(genus_table_names[idx[1]])
+
+  ## 3. 匹配不到则返回 NA
+  NA_character_
+}
+
+make_letters_from_dunn <- function(dunn_df, groups, alpha = 0.05) {
+  groups <- as.character(groups)
+
+  if (length(groups) <= 1) {
+    return(setNames("a", groups))
+  }
+
+  if (is.null(dunn_df) || nrow(dunn_df) == 0) {
+    return(setNames(rep("a", length(groups)), groups))
+  }
+
+  p_vec <- dunn_df$p_adj_BH
+  names(p_vec) <- paste(dunn_df$group1, dunn_df$group2, sep = "-")
+
+  letters_obj <- multcompView::multcompLetters(
+    p_vec,
+    threshold = alpha,
+    Letters = letters
+  )
+
+  letters_raw <- letters_obj$Letters
+
+  missing_groups <- setdiff(groups, names(letters_raw))
+  if (length(missing_groups) > 0) {
+    letters_raw <- c(
+      letters_raw,
+      setNames(rep("a", length(missing_groups)), missing_groups)
+    )
+  }
+
+  letters_raw[groups]
+}
+
+run_dunn_one_genus <- function(df_one, genus_name) {
+  df_one <- df_one %>%
+    filter(!is.na(relative_abundance), !is.na(host_family_cn)) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- host_family_order_cn[host_family_order_cn %in% groups_present]
+
+  if (length(groups_present) < 2) {
+    return(data.frame())
+  }
+
+  dt <- dunn.test::dunn.test(
+    x = df_one$relative_abundance,
+    g = df_one$host_family_cn,
+    method = "bh",
+    kw = FALSE,
+    label = TRUE,
+    wrap = FALSE,
+    table = FALSE,
+    list = TRUE
+  )
+
+  dunn_out <- data.frame(
+    genus_cn = genus_name,
+    comparison = dt$comparisons,
+    Z = dt$Z,
+    p_value = dt$P,
+    p_adj_BH = dt$P.adjusted,
+    stringsAsFactors = FALSE
+  )
+
+  parts <- strsplit(dunn_out$comparison, " - ", fixed = TRUE)
+
+  dunn_out$group1 <- vapply(parts, function(x) x[1], character(1))
+  dunn_out$group2 <- vapply(parts, function(x) x[2], character(1))
+
+  dunn_out %>%
+    select(
+      genus_cn,
+      group1,
+      group2,
+      comparison,
+      Z,
+      p_value,
+      p_adj_BH
+    ) %>%
+    mutate(
+      p_value_format = format_p(p_value),
+      p_adj_BH_format = format_p(p_adj_BH),
+      significance = p_to_sig(p_adj_BH)
+    )
+}
+
+## -----------------------------
+## 4. 读取 metadata
+## -----------------------------
+cat("读取 metadata：\n", metadata_file, "\n\n", sep = "")
+
+meta <- readr::read_csv(
+  metadata_file,
+  show_col_types = FALSE
+)
+
+sample_col <- find_col(
+  meta,
+  c("^sampleid$", "^sample_id$", "^SampleID$", "^#SampleID$", "^sample$", "^Run$", "^run$"),
+  "sample_id"
+)
+
+family_col <- find_col(
+  meta,
+  c("^host_family$", "^Host_family$", "^family$", "^hostFamily$"),
+  "host_family"
+)
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(.data[[sample_col]]),
+    host_family = as.character(.data[[family_col]])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family %in% host_family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  mutate(
+    host_family_cn = host_family_cn_map[host_family],
+    host_family = factor(host_family, levels = host_family_order),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  )
+
+cat("metadata 样本数：", nrow(meta2), "\n", sep = "")
+cat("metadata 宿主科样本数：\n")
+print(table(meta2$host_family_cn))
+
+## -----------------------------
+## 5. 读取最终 Fig3-4 弦图矩阵，提取 Top20 属顺序
+## -----------------------------
+cat("\n读取最终 Fig3-4 弦图矩阵：\n", top20_matrix_file, "\n\n", sep = "")
+
+top20_mat <- read.csv(
+  top20_matrix_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (ncol(top20_mat) < 2) {
+  stop("最终弦图矩阵列数异常。")
+}
+
+## 第一列通常为“宿主科”
+top20_genus_cn <- colnames(top20_mat)[-1]
+top20_genus_cn <- top20_genus_cn[!is.na(top20_genus_cn) & top20_genus_cn != ""]
+
+if (exclude_uncertain_genus) {
+  top20_genus_cn <- setdiff(top20_genus_cn, uncertain_genus_cn)
+}
+
+cat("从最终弦图矩阵读取到的 Top 属数量：", length(top20_genus_cn), "\n", sep = "")
+cat("Top 属中文顺序：\n")
+print(top20_genus_cn)
+
+## -----------------------------
+## 6. 读取 genus abundance table
+## -----------------------------
+cat("\n读取 genus abundance table：\n", genus_table_file, "\n\n", sep = "")
+
+genus_tab <- read.delim(
+  genus_table_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+if (ncol(genus_tab) < 2) {
+  stop("genus abundance table 列数异常。")
+}
+
+colnames(genus_tab)[1] <- "genus"
+genus_tab$genus <- clean_genus_name(genus_tab$genus)
+
+sample_cols <- intersect(colnames(genus_tab)[-1], meta2$sample_id)
+
+if (length(sample_cols) == 0) {
+  stop("metadata 与 genus abundance table 没有共同样本。")
+}
+
+cat("共同样本数：", length(sample_cols), "\n", sep = "")
+
+## 合并重复属名，避免同一属多行
+genus_tab2 <- genus_tab %>%
+  mutate(genus = clean_genus_name(genus)) %>%
+  select(genus, all_of(sample_cols)) %>%
+  mutate(across(all_of(sample_cols), ~ suppressWarnings(as.numeric(.x)))) %>%
+  mutate(across(all_of(sample_cols), ~ ifelse(is.na(.x), 0, .x))) %>%
+  group_by(genus) %>%
+  summarise(
+    across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+genus_table_names <- genus_tab2$genus
+
+## 中文 Top20 属名 -> genus abundance table 中实际英文属名
+resolved_genus_en <- vapply(
+  top20_genus_cn,
+  resolve_cn_to_genus,
+  character(1),
+  genus_table_names = genus_table_names
+)
+
+top20_map_df <- data.frame(
+  genus_cn = top20_genus_cn,
+  genus_in_abundance_table = resolved_genus_en,
+  matched = !is.na(resolved_genus_en),
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  top20_map_df,
+  out_top20_map_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\nTop20 属映射结果：\n")
+print(top20_map_df)
+
+if (any(!top20_map_df$matched)) {
+  stop(
+    "有 Top20 属没有在 genus_abundance_table 中匹配到，请检查映射表：\n",
+    out_top20_map_csv
+  )
+}
+
+## -----------------------------
+## 7. 计算样本水平 Top20 属相对多度
+## -----------------------------
+## 注意：这里的总丰度使用所有属的总丰度作为分母，和组成图计算逻辑一致
+sample_total <- genus_tab2 %>%
+  select(all_of(sample_cols)) %>%
+  as.matrix()
+
+storage.mode(sample_total) <- "numeric"
+
+sample_total_reads <- colSums(sample_total, na.rm = TRUE)
+
+top20_genus_en <- top20_map_df$genus_in_abundance_table
+names(top20_genus_en) <- top20_map_df$genus_cn
+
+top20_tab <- genus_tab2 %>%
+  filter(genus %in% top20_genus_en)
+
+## 按 Top20 弦图顺序重排
+top20_tab <- top20_tab[match(top20_genus_en, top20_tab$genus), , drop = FALSE]
+
+## 替换为中文属名
+top20_tab$genus_cn <- names(top20_genus_en)[match(top20_tab$genus, top20_genus_en)]
+
+genus_long <- top20_tab %>%
+  select(genus, genus_cn, all_of(sample_cols)) %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    abundance = suppressWarnings(as.numeric(abundance)),
+    abundance = ifelse(is.na(abundance), 0, abundance)
+  ) %>%
+  left_join(
+    data.frame(
+      sample_id = names(sample_total_reads),
+      total_abundance = as.numeric(sample_total_reads),
+      stringsAsFactors = FALSE
+    ),
+    by = "sample_id"
+  ) %>%
+  filter(total_abundance > 0) %>%
+  mutate(
+    relative_abundance = abundance / total_abundance * 100
+  ) %>%
+  inner_join(
+    meta2 %>%
+      select(sample_id, host_family, host_family_cn),
+    by = "sample_id"
+  ) %>%
+  mutate(
+    genus_cn = factor(genus_cn, levels = top20_genus_cn),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(sample_id, genus_cn)
+
+write.csv(
+  genus_long,
+  out_sample_rel_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\n用于统计的 Top20 属数量：", length(unique(genus_long$genus_cn)), "\n", sep = "")
+
+## -----------------------------
+## 8. 组内描述性统计
+## -----------------------------
+group_summary <- genus_long %>%
+  group_by(genus_cn, host_family_cn) %>%
+  summarise(
+    n = n(),
+    mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+    sd_relative_abundance = sd(relative_abundance, na.rm = TRUE),
+    se_relative_abundance = sd_relative_abundance / sqrt(n),
+    median_relative_abundance = median(relative_abundance, na.rm = TRUE),
+    q1_relative_abundance = quantile(relative_abundance, 0.25, na.rm = TRUE),
+    q3_relative_abundance = quantile(relative_abundance, 0.75, na.rm = TRUE),
+    min_relative_abundance = min(relative_abundance, na.rm = TRUE),
+    max_relative_abundance = max(relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    genus_cn = factor(genus_cn, levels = top20_genus_cn),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(genus_cn, host_family_cn)
+
+write.csv(
+  group_summary,
+  out_group_summary_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+group_mean_wide <- group_summary %>%
+  select(genus_cn, host_family_cn, mean_relative_abundance) %>%
+  mutate(
+    mean_relative_abundance = sprintf("%.4f", mean_relative_abundance)
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = host_family_cn,
+    values_from = mean_relative_abundance
+  )
+
+## -----------------------------
+## 9. Kruskal-Wallis 检验
+## -----------------------------
+kw_list <- list()
+
+for (g in top20_genus_cn) {
+  df_one <- genus_long %>%
+    filter(as.character(genus_cn) == g) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- groups_present[!is.na(groups_present)]
+
+  if (length(groups_present) < 2) {
+    kw_list[[g]] <- data.frame(
+      genus_cn = g,
+      n_total = nrow(df_one),
+      group_number = length(groups_present),
+      statistic_H = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      stringsAsFactors = FALSE
+    )
+    next
+  }
+
+  kt <- kruskal.test(relative_abundance ~ host_family_cn, data = df_one)
+
+  kw_list[[g]] <- data.frame(
+    genus_cn = g,
+    n_total = nrow(df_one),
+    group_number = length(groups_present),
+    statistic_H = unname(kt$statistic),
+    df = unname(kt$parameter),
+    p_value = kt$p.value,
+    stringsAsFactors = FALSE
+  )
+}
+
+kw_df <- bind_rows(kw_list) %>%
+  mutate(
+    p_adj_BH_across_genera = p.adjust(p_value, method = "BH"),
+    p_value_format = format_p(p_value),
+    p_adj_BH_across_genera_format = format_p(p_adj_BH_across_genera),
+    significance_raw = p_to_sig(p_value),
+    significance_BH = p_to_sig(p_adj_BH_across_genera),
+    genus_cn = factor(genus_cn, levels = top20_genus_cn)
+  ) %>%
+  left_join(group_mean_wide, by = "genus_cn") %>%
+  arrange(genus_cn)
+
+write.csv(
+  kw_df,
+  out_kw_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 10. Dunn's test 两两比较
+## -----------------------------
+dunn_list <- list()
+
+for (g in top20_genus_cn) {
+  df_one <- genus_long %>%
+    filter(as.character(genus_cn) == g) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  dunn_list[[g]] <- run_dunn_one_genus(df_one, g)
+}
+
+dunn_df <- bind_rows(dunn_list) %>%
+  mutate(
+    genus_cn = factor(genus_cn, levels = top20_genus_cn),
+    group1 = factor(group1, levels = host_family_order_cn),
+    group2 = factor(group2, levels = host_family_order_cn)
+  ) %>%
+  arrange(genus_cn, group1, group2)
+
+write.csv(
+  dunn_df,
+  out_dunn_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 11. 字母标注
+## -----------------------------
+letters_list <- list()
+
+for (g in top20_genus_cn) {
+  df_one <- genus_long %>%
+    filter(as.character(genus_cn) == g) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- host_family_order_cn[host_family_order_cn %in% groups_present]
+
+  dunn_one <- dunn_df %>%
+    filter(as.character(genus_cn) == g) %>%
+    mutate(
+      group1 = as.character(group1),
+      group2 = as.character(group2)
+    )
+
+  letters_vec <- make_letters_from_dunn(
+    dunn_df = dunn_one,
+    groups = groups_present,
+    alpha = alpha
+  )
+
+  letters_df <- data.frame(
+    genus_cn = g,
+    host_family_cn = names(letters_vec),
+    letter = as.character(letters_vec),
+    stringsAsFactors = FALSE
+  )
+
+  letters_list[[g]] <- letters_df
+}
+
+letters_df <- bind_rows(letters_list) %>%
+  left_join(
+    group_summary %>%
+      mutate(
+        genus_cn = as.character(genus_cn),
+        host_family_cn = as.character(host_family_cn)
+      ) %>%
+      select(
+        genus_cn,
+        host_family_cn,
+        n,
+        mean_relative_abundance,
+        sd_relative_abundance,
+        se_relative_abundance,
+        median_relative_abundance,
+        q1_relative_abundance,
+        q3_relative_abundance,
+        max_relative_abundance
+      ),
+    by = c("genus_cn", "host_family_cn")
+  ) %>%
+  left_join(
+    kw_df %>%
+      mutate(genus_cn = as.character(genus_cn)) %>%
+      select(
+        genus_cn,
+        kruskal_p_value = p_value,
+        kruskal_p_adj_BH_across_genera = p_adj_BH_across_genera,
+        kruskal_significance_BH = significance_BH
+      ),
+    by = "genus_cn"
+  ) %>%
+  mutate(
+    genus_cn = factor(genus_cn, levels = top20_genus_cn),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(genus_cn, host_family_cn)
+
+write.csv(
+  letters_df,
+  out_letters_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 12. 摘要
+## -----------------------------
+sink(out_summary_txt)
+
+cat("不同宿主科肠道真菌 Top20 属相对多度差异检验摘要（no_elephant）\n")
+cat("=============================================================\n\n")
+
+cat("一、输入文件\n")
+cat("metadata: ", metadata_file, "\n", sep = "")
+cat("genus abundance table: ", genus_table_file, "\n", sep = "")
+cat("final Fig3-4 chord matrix: ", top20_matrix_file, "\n\n", sep = "")
+
+cat("二、统计口径\n")
+cat("1. 从最终 Fig3-4 中文弦图矩阵读取 Top20 属及顺序。\n")
+cat("2. 从 genus abundance table 计算每个样本内 Top20 属相对多度。\n")
+cat("3. 分组变量为 host_family，中文顺序为：牛科、猪科、鹿科、马科、犀科。\n")
+cat("4. 每个属分别进行 Kruskal-Wallis 检验。\n")
+cat("5. Dunn's test 用于宿主科两两比较，P 值使用 BH 校正。\n")
+cat("6. 字母标注基于 Dunn's test 的 BH 校正 P 值，alpha = 0.05。\n")
+cat("7. “真菌属分类地位未定类群”默认保留参与统计；论文解释时作为属水平未定类群处理。\n\n")
+
+cat("三、样本数\n")
+print(genus_long %>% distinct(sample_id, host_family_cn) %>% count(host_family_cn))
+cat("\n")
+
+cat("四、Top20 属映射表\n")
+print(top20_map_df)
+cat("\n")
+
+cat("五、Kruskal-Wallis 整体检验结果\n")
+print(
+  kw_df %>%
+    select(
+      genus_cn,
+      n_total,
+      statistic_H,
+      df,
+      p_value_format,
+      p_adj_BH_across_genera_format,
+      significance_BH
+    ),
+  row.names = FALSE
+)
+cat("\n")
+
+cat("六、字母标注表\n")
+print(
+  letters_df %>%
+    select(
+      genus_cn,
+      host_family_cn,
+      mean_relative_abundance,
+      median_relative_abundance,
+      letter
+    ),
+  row.names = FALSE
+)
+cat("\n")
+
+cat("七、输出文件\n")
+cat("Top20 mapping table: ", out_top20_map_csv, "\n", sep = "")
+cat("Sample relative abundance table: ", out_sample_rel_csv, "\n", sep = "")
+cat("Group summary table: ", out_group_summary_csv, "\n", sep = "")
+cat("Kruskal-Wallis table: ", out_kw_csv, "\n", sep = "")
+cat("Dunn test table: ", out_dunn_csv, "\n", sep = "")
+cat("Letters table: ", out_letters_csv, "\n", sep = "")
+
+sink()
+
+## -----------------------------
+## 13. 完成
+## -----------------------------
+cat("\n完成！\n")
+cat("Top20 属映射表: ", out_top20_map_csv, "\n", sep = "")
+cat("样本水平 Top20 属相对多度表: ", out_sample_rel_csv, "\n", sep = "")
+cat("组内描述统计表: ", out_group_summary_csv, "\n", sep = "")
+cat("Kruskal-Wallis 表: ", out_kw_csv, "\n", sep = "")
+cat("Dunn 两两比较表: ", out_dunn_csv, "\n", sep = "")
+cat("字母标注表: ", out_letters_csv, "\n", sep = "")
+cat("摘要: ", out_summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/16_top20_genus_host_family_Kruskal_Dunn_letters_no_elephant.R
+#运行完成后先看摘要：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/Top20_genus_Kruskal_Dunn_summary_no_elephant.txt
+#再看 Top20 属映射是否全部成功：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/Top20_genus_from_final_chord_matrix_mapping_no_elephant.csv
+#后续如果要画 Top20 属差异图，就用：
+#Top20_genus_group_summary_host_family_no_elephant.csv
+#Top20_genus_letters_host_family_no_elephant.csv
+#本次口径如下：
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/Top20_genus_group_summary_host_family_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/Top20_genus_letters_host_family_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/Top20_genus_Kruskal_Wallis_host_family_no_elephant.csv
+#是否重算：
+#不重新计算属水平相对多度；
+#不重做 Kruskal-Wallis；
+#不重做 Dunn’s test；
+#只读取已有统计结果，筛选并作图。
+#筛选口径：
+#1. 去除“真菌属分类地位未定类群”；
+#2. 只保留 Kruskal-Wallis BH 校正后显著的属；
+#3. 在显著属中按总体平均相对多度从高到低选前 10 个；
+#4. 柱高为 mean_relative_abundance；
+#5. 误差线为 mean ± SE；
+#6. 字母标注来自已有 Dunn’s test BH 校正结果。
+#输出尺寸：
+#190 × 130 mm
+#直接运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/17_plot_top10_significant_genus_host_family_barplot_meanSE_letters_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 不同宿主科肠道真菌显著差异优势属相对多度图
+##
+## 图形口径：
+## 1. 不重算属水平相对多度；
+## 2. 不重做 Kruskal-Wallis；
+## 3. 不重做 Dunn's test；
+## 4. 读取已有 group summary、letters、Kruskal-Wallis 结果；
+## 5. 去除“真菌属分类地位未定类群”；
+## 6. 只保留 Kruskal-Wallis BH 校正后显著的属；
+## 7. 在显著属中按总体平均相对多度选前 10 个；
+## 8. 柱高为 mean_relative_abundance；
+## 9. 误差线为 mean ± SE；
+## 10. 字母标注来自已有 Dunn's test BH 校正结果；
+## 11. 图尺寸 190 × 130 mm，与功能类群差异图一致。
+## ============================================================
+
+## -----------------------------
+## 0. R包路径与依赖
+## -----------------------------
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr", "readr", "stringr", "ggplot2",
+  "showtext", "sysfonts", "grid"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 输入输出路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus"
+)
+
+group_summary_file <- file.path(
+  in_dir,
+  "Top20_genus_group_summary_host_family_no_elephant.csv"
+)
+
+letters_file <- file.path(
+  in_dir,
+  "Top20_genus_letters_host_family_no_elephant.csv"
+)
+
+kw_file <- file.path(
+  in_dir,
+  "Top20_genus_Kruskal_Wallis_host_family_no_elephant.csv"
+)
+
+out_dir <- file.path(in_dir, "figures")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Top10_significant_genus_host_family_barplot_meanSE_letters_190x130mm.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Top10_significant_genus_host_family_barplot_meanSE_letters_190x130mm.pdf"
+)
+
+out_plotdata_csv <- file.path(
+  out_dir,
+  "Top10_significant_genus_host_family_barplot_meanSE_letters_190x130mm_plotdata.csv"
+)
+
+out_selected_csv <- file.path(
+  out_dir,
+  "Top10_significant_selected_genera_190x130mm.csv"
+)
+
+for (f in c(group_summary_file, letters_file, kw_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## -----------------------------
+## 2. 字体设置
+## -----------------------------
+base_family <- "sans"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttf",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_path <- font_candidates[file.exists(font_candidates)][1]
+
+if (!is.na(font_path)) {
+  sysfonts::font_add("CNfont", regular = font_path)
+  base_family <- "CNfont"
+}
+
+showtext::showtext_auto(enable = TRUE)
+showtext::showtext_opts(dpi = 600)
+
+cat("使用字体：", base_family, "\n", sep = "")
+cat("字体文件：", ifelse(is.na(font_path), "未找到宋体，使用默认字体", font_path), "\n", sep = "")
+
+## -----------------------------
+## 3. 参数
+## -----------------------------
+host_family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_colors <- c(
+  "牛科" = "#E69F00",
+  "猪科" = "#D55E00",
+  "鹿科" = "#009E73",
+  "马科" = "#56B4E9",
+  "犀科" = "#CC79A7"
+)
+
+exclude_genera <- c("真菌属分类地位未定类群")
+top_n <- 10
+alpha <- 0.05
+
+## -----------------------------
+## 4. 工具函数
+## -----------------------------
+save_plot_cairo <- function(p, png_file, pdf_file, width_mm, height_mm, dpi = 600) {
+  width_cm <- width_mm / 10
+  height_cm <- height_mm / 10
+
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      type = "cairo",
+      bg = "white"
+    )
+  } else {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::cairo_pdf(
+      filename = pdf_file,
+      width = width_mm / 25.4,
+      height = height_mm / 25.4,
+      bg = "white"
+    )
+  } else {
+    grDevices::pdf(
+      file = pdf_file,
+      width = width_mm / 25.4,
+      height = height_mm / 25.4,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+}
+
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "<0.001",
+    TRUE ~ sprintf("%.4f", p)
+  )
+}
+
+wrap_genus_label <- function(x) {
+  ## 目前 Top20 属中文名多数较短，默认不强制换行；
+  ## 只对特别长的中文名做轻微换行兜底。
+  x <- as.character(x)
+  x <- stringr::str_replace_all(x, "皮肤丝孢酵母属", "皮肤丝孢\n酵母属")
+  x <- stringr::str_replace_all(x, "维希尼克酵母属", "维希尼克\n酵母属")
+  x <- stringr::str_replace_all(x, "哈萨克酵母属", "哈萨克\n酵母属")
+  x <- stringr::str_replace_all(x, "小荚孢腔菌属", "小荚孢\n腔菌属")
+  x
+}
+
+## -----------------------------
+## 5. 读取数据
+## -----------------------------
+group_df <- read.csv(
+  group_summary_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+letters_df <- read.csv(
+  letters_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+kw_df <- read.csv(
+  kw_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+required_group_cols <- c(
+  "genus_cn", "host_family_cn", "n",
+  "mean_relative_abundance", "sd_relative_abundance"
+)
+
+missing_group_cols <- setdiff(required_group_cols, colnames(group_df))
+if (length(missing_group_cols) > 0) {
+  stop("group summary 表缺少列：", paste(missing_group_cols, collapse = ", "))
+}
+
+required_letter_cols <- c("genus_cn", "host_family_cn", "letter")
+missing_letter_cols <- setdiff(required_letter_cols, colnames(letters_df))
+if (length(missing_letter_cols) > 0) {
+  stop("letters 表缺少列：", paste(missing_letter_cols, collapse = ", "))
+}
+
+required_kw_cols <- c("genus_cn", "p_adj_BH_across_genera")
+missing_kw_cols <- setdiff(required_kw_cols, colnames(kw_df))
+if (length(missing_kw_cols) > 0) {
+  stop("Kruskal-Wallis 表缺少列：", paste(missing_kw_cols, collapse = ", "))
+}
+
+## -----------------------------
+## 6. 筛选显著差异前10个属
+## -----------------------------
+overall_mean <- group_df %>%
+  filter(!genus_cn %in% exclude_genera) %>%
+  group_by(genus_cn) %>%
+  summarise(
+    overall_mean_relative_abundance = mean(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+selected_genera_df <- kw_df %>%
+  filter(
+    !genus_cn %in% exclude_genera,
+    !is.na(p_adj_BH_across_genera),
+    p_adj_BH_across_genera < alpha
+  ) %>%
+  left_join(overall_mean, by = "genus_cn") %>%
+  arrange(desc(overall_mean_relative_abundance)) %>%
+  slice_head(n = top_n) %>%
+  mutate(
+    p_value_format = format_p(p_value),
+    p_adj_BH_across_genera_format = format_p(p_adj_BH_across_genera)
+  )
+
+if (nrow(selected_genera_df) == 0) {
+  stop("没有筛选到 BH 校正后显著的属。")
+}
+
+selected_genera <- selected_genera_df$genus_cn
+
+write.csv(
+  selected_genera_df,
+  out_selected_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("本次作图属类：\n")
+print(
+  selected_genera_df %>%
+    select(genus_cn, overall_mean_relative_abundance, p_value_format, p_adj_BH_across_genera_format)
+)
+
+## -----------------------------
+## 7. 合并作图数据
+## -----------------------------
+plot_df <- group_df %>%
+  filter(
+    genus_cn %in% selected_genera,
+    host_family_cn %in% host_family_order_cn
+  ) %>%
+  mutate(
+    host_family_cn = as.character(host_family_cn)
+  ) %>%
+  left_join(
+    letters_df %>%
+      filter(genus_cn %in% selected_genera) %>%
+      mutate(host_family_cn = as.character(host_family_cn)) %>%
+      select(genus_cn, host_family_cn, letter),
+    by = c("genus_cn", "host_family_cn")
+  ) %>%
+  left_join(
+    kw_df %>%
+      select(
+        genus_cn,
+        kruskal_p_value = p_value,
+        kruskal_p_adj_BH_across_genera = p_adj_BH_across_genera
+      ),
+    by = "genus_cn"
+  ) %>%
+  mutate(
+    se_relative_abundance = ifelse(
+      "se_relative_abundance" %in% colnames(.),
+      se_relative_abundance,
+      sd_relative_abundance / sqrt(n)
+    ),
+    genus_cn = factor(genus_cn, levels = rev(selected_genera)),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(genus_cn, host_family_cn)
+
+## 为字母标注预留偏移量
+max_x <- max(plot_df$mean_relative_abundance + plot_df$se_relative_abundance, na.rm = TRUE)
+label_offset <- max_x * 0.025
+
+plot_df <- plot_df %>%
+  mutate(
+    label_x = mean_relative_abundance + se_relative_abundance + label_offset,
+    letter = ifelse(is.na(letter), "", letter)
+  )
+
+write.csv(
+  plot_df,
+  out_plotdata_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\n作图数据预览：\n")
+print(
+  plot_df %>%
+    select(genus_cn, host_family_cn, mean_relative_abundance, se_relative_abundance, letter) %>%
+    head(30)
+)
+
+## -----------------------------
+## 8. 作图
+## -----------------------------
+pd <- position_dodge(width = 0.78)
+
+genus_labels_wrapped <- setNames(
+  wrap_genus_label(selected_genera),
+  selected_genera
+)
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = mean_relative_abundance,
+    y = genus_cn,
+    fill = host_family_cn
+  )
+) +
+  geom_col(
+    position = pd,
+    width = 0.68,
+    color = "grey30",
+    linewidth = 0.15
+  ) +
+  geom_errorbar(
+    aes(
+      xmin = pmax(mean_relative_abundance - se_relative_abundance, 0),
+      xmax = mean_relative_abundance + se_relative_abundance
+    ),
+    position = pd,
+    width = 0.18,
+    linewidth = 0.4,
+    color = "black"
+  ) +
+  geom_text(
+    aes(
+      x = label_x,
+      y = genus_cn,
+      label = letter,
+      group = host_family_cn
+    ),
+    position = pd,
+    hjust = 0,
+    size = 3.2,
+    family = base_family,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = family_colors,
+    breaks = host_family_order_cn,
+    drop = FALSE
+  ) +
+  scale_y_discrete(
+    labels = genus_labels_wrapped
+  ) +
+  scale_x_continuous(
+    expand = expansion(mult = c(0, 0.16))
+  ) +
+  labs(
+    x = "平均相对多度（%）",
+    y = NULL,
+    fill = NULL
+  ) +
+  theme_classic(base_size = 11, base_family = base_family) +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.18, "cm"),
+    axis.text.x = element_text(size = 10.5, color = "black", family = base_family),
+    axis.text.y = element_text(size = 10.2, color = "black", family = base_family, lineheight = 0.95),
+    axis.title.x = element_text(size = 11, color = "black", family = base_family),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black", family = base_family),
+    legend.key.size = unit(0.42, "cm"),
+    legend.spacing.x = unit(0.20, "cm"),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(6, 10, 6, 6)
+  )
+
+## -----------------------------
+## 9. 输出
+## -----------------------------
+save_plot_cairo(
+  p = p,
+  png_file = out_png,
+  pdf_file = out_pdf,
+  width_mm = 190,
+  height_mm = 130,
+  dpi = 600
+)
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("plot data: ", out_plotdata_csv, "\n", sep = "")
+cat("selected genera: ", out_selected_csv, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/17_plot_top10_significant_genus_host_family_barplot_meanSE_letters_no_elephant.R
+#运行后查看：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_top20_genus/figures/Top10_significant_genus_host_family_barplot_meanSE_letters_190x130mm.png
