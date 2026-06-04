@@ -1,0 +1,1168 @@
+#本次任务说明
+#输入文件
+#metadata
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#样本水平 alpha 多样性数据
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_alpha_diversity_no_elephant/alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+#是否重算
+#不重算 Alpha 多样性指数
+#不读取 BIOM
+#基于已有样本水平 Alpha 指数，按 continent 重新分组后：
+#重新做 one-way ANOVA
+#重新做 TukeyHSD
+#重新绘制四张箱线图
+#统计口径 / 计算单位
+#指标：ACE, Chao1, Shannon, Simpson
+#分组变量：continent
+#分组规则：
+#Asia → 亚洲
+#Europe → 欧洲
+#Africa → 非洲
+#North America + South America → Americas / 美洲
+#最终作图顺序：按样本量从大到小自动排序
+#输出目录
+#新建目录，不覆盖旧图：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter4_continent_alpha_diversity_no_elephant
+#输出内容
+#表格
+#合并地区后的样本水平 alpha 表
+#各地区样本数表
+#paper_table
+#mean_sd_detail
+#ANOVA
+#TukeyHSD_all
+#TukeyHSD_significant
+#汇总 Excel
+#图片
+#ACE 箱线图
+#Chao1 箱线图
+#Shannon 箱线图
+#Simpson 箱线图
+#第一步：新建脚本
+#在 WSL 终端运行：
+cd /mnt/d/ITS_SH_pipeline
+mkdir -p scripts/chapter4_continent_alpha
+nano scripts/chapter4_continent_alpha/01_continent_alpha_diversity_ANOVA_Tukey_boxplot_no_elephant.R
+#粘贴脚本
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 4 - Continent alpha diversity analysis, no-elephant
+##
+## 目的：
+##   基于已经计算好的样本水平 Alpha 多样性指数，
+##   按 metadata 中 continent 分组，分析不同地区有蹄类动物
+##   肠道真菌 Alpha 多样性差异。
+##
+## 数据版本：
+##   globalfungi_style_test_no_elephant
+##
+## 输入：
+##   1. metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+##   2. alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv
+##
+## 分组变量：
+##   metadata$continent
+##
+## 地区合并规则：
+##   North America + South America -> Americas
+##
+## 最终中文分组：
+##   亚洲、欧洲、非洲、美洲
+##
+## 分组顺序：
+##   按样本数量由多到少自动排序（在合并美洲后再排序）
+##
+## 统计方法：
+##   one-way ANOVA + TukeyHSD
+##
+## 作图：
+##   ACE、Chao1、Shannon、Simpson 四张单独箱线图；
+##   TukeyHSD 字母直接标注在箱线图上方；
+##   不加额外 I 形误差线；
+##   y 轴名不写“指数”；
+##   ANOVA 标注位置根据图中最大字母位置自动上移，尽量避免重叠。
+##
+## 注意：
+##   本脚本不重新计算 Alpha 多样性；
+##   本脚本不读取 BIOM；
+##   本脚本不使用旧含象科版本。
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(openxlsx)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+  library(tibble)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata",
+  "metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+alpha_file <- file.path(
+  base_dir,
+  "results",
+  "chapter3_alpha_diversity_no_elephant",
+  "alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter4_continent_alpha_diversity_no_elephant"
+)
+
+plot_dir <- file.path(out_dir, "boxplots_letters_v1")
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_continent_alpha <- file.path(
+  out_dir,
+  "continent_alpha_diversity_Observed_ACE_Chao1_Shannon_Simpson_no_elephant.csv"
+)
+
+out_sample_count <- file.path(
+  out_dir,
+  "continent_alpha_sample_count_no_elephant.csv"
+)
+
+out_paper_table <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_for_paper_no_elephant.csv"
+)
+
+out_mean_sd <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_mean_sd_detail_no_elephant.csv"
+)
+
+out_anova <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_ANOVA_no_elephant.csv"
+)
+
+out_tukey_all <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_TukeyHSD_all_no_elephant.csv"
+)
+
+out_tukey_sig <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_TukeyHSD_significant_no_elephant.csv"
+)
+
+out_xlsx <- file.path(
+  out_dir,
+  "Table4_x_continent_alpha_indices_ANOVA_TukeyHSD_no_elephant.xlsx"
+)
+
+out_log <- file.path(
+  out_dir,
+  "continent_alpha_diversity_analysis_log_no_elephant.txt"
+)
+
+plot_files_png <- c(
+  "ACE" = file.path(plot_dir, "Fig4_x_continent_alpha_ACE_boxplot_letters_no_elephant_CN_v1.png"),
+  "Chao1" = file.path(plot_dir, "Fig4_x_continent_alpha_Chao1_boxplot_letters_no_elephant_CN_v1.png"),
+  "Shannon" = file.path(plot_dir, "Fig4_x_continent_alpha_Shannon_boxplot_letters_no_elephant_CN_v1.png"),
+  "Simpson" = file.path(plot_dir, "Fig4_x_continent_alpha_Simpson_boxplot_letters_no_elephant_CN_v1.png")
+)
+
+input_files <- data.frame(
+  file_label = c("metadata", "sample_alpha"),
+  file_path = c(metadata_file, alpha_file),
+  exists = file.exists(c(metadata_file, alpha_file)),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (any(!input_files$exists)) {
+  stop("有输入文件不存在，请检查路径。")
+}
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+sysfonts::font_add("songti", regular = font_path)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 600)
+
+cat("\n使用中文字体：", font_path, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+
+metrics_for_table <- c("ACE", "Chao1", "Shannon", "Simpson")
+metrics_all <- c("Observed_SH", metrics_for_table)
+
+continent_cn_map <- c(
+  "asia" = "亚洲",
+  "europe" = "欧洲",
+  "africa" = "非洲",
+  "americas" = "美洲"
+)
+
+continent_colors <- c(
+  "亚洲" = "#E64B35",
+  "欧洲" = "#4DBBD5",
+  "非洲" = "#00A087",
+  "美洲" = "#3C5488"
+)
+
+metric_y_labels <- c(
+  "ACE" = "ACE",
+  "Chao1" = "Chao1",
+  "Shannon" = "Shannon",
+  "Simpson" = "Simpson"
+)
+
+## =========================
+## 4. 工具函数
+## =========================
+
+clean_value <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c(
+    "",
+    "NA", "N/A", "na", "n/a",
+    "missing", "Missing", "MISSING",
+    "not_recorded", "not recorded",
+    "not_reported", "not reported",
+    "unknown", "Unknown", "UNKNOWN",
+    "null", "NULL", "Null"
+  )] <- NA_character_
+  x
+}
+
+normalize_continent <- function(x) {
+  x <- clean_value(x)
+  x <- tolower(x)
+  x <- gsub("_", " ", x)
+  x <- gsub("-", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("asia") ~ "asia",
+    x %in% c("europe") ~ "europe",
+    x %in% c("africa") ~ "africa",
+    x %in% c("north america", "south america", "americas", "america") ~ "americas",
+    TRUE ~ NA_character_
+  )
+}
+
+format_p_for_paper <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001***",
+      ifelse(
+        p < 0.01,
+        sprintf("%.4f**", p),
+        ifelse(
+          p < 0.05,
+          sprintf("%.4f*", p),
+          sprintf("%.4f", p)
+        )
+      )
+    )
+  )
+}
+
+format_p_plain <- function(p) {
+  ifelse(
+    is.na(p),
+    NA_character_,
+    ifelse(
+      p < 0.001,
+      "<0.001",
+      sprintf("%.4f", p)
+    )
+  )
+}
+
+format_anova_label <- function(p) {
+  if (length(p) == 0 || is.na(p)) {
+    return("ANOVA: P = NA")
+  }
+
+  if (p < 0.001) {
+    return("ANOVA: P < 0.001")
+  }
+
+  paste0("ANOVA: P = ", sprintf("%.4f", p))
+}
+
+sig_label <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+get_upper_whisker <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  boxplot.stats(x)$stats[5]
+}
+
+make_tukey_letters_no_package <- function(df, group_col, metric, alpha = 0.05) {
+  dat <- df %>%
+    select(
+      group = all_of(group_col),
+      value = all_of(metric)
+    ) %>%
+    filter(!is.na(group), !is.na(value))
+
+  dat$group <- factor(dat$group)
+
+  groups_ordered <- dat %>%
+    group_by(group) %>%
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(mean_value)) %>%
+    pull(group) %>%
+    as.character()
+
+  if (length(groups_ordered) == 1) {
+    return(setNames("a", groups_ordered))
+  }
+
+  fit <- aov(value ~ group, data = dat)
+  tk <- TukeyHSD(fit)$group
+
+  sig_mat <- matrix(
+    FALSE,
+    nrow = length(groups_ordered),
+    ncol = length(groups_ordered),
+    dimnames = list(groups_ordered, groups_ordered)
+  )
+
+  for (comp in rownames(tk)) {
+    p <- tk[comp, "p adj"]
+    parts <- strsplit(comp, "-", fixed = TRUE)[[1]]
+
+    if (length(parts) == 2) {
+      g1 <- parts[1]
+      g2 <- parts[2]
+
+      if (g1 %in% groups_ordered && g2 %in% groups_ordered) {
+        if (!is.na(p) && p < alpha) {
+          sig_mat[g1, g2] <- TRUE
+          sig_mat[g2, g1] <- TRUE
+        }
+      }
+    }
+  }
+
+  letters_pool <- c(
+    letters,
+    paste0("a", letters),
+    paste0("b", letters),
+    paste0("c", letters)
+  )
+
+  group_letters <- setNames(rep("", length(groups_ordered)), groups_ordered)
+  letter_groups <- list()
+
+  for (g in groups_ordered) {
+    assigned <- FALSE
+
+    if (length(letter_groups) > 0) {
+      for (li in seq_along(letter_groups)) {
+        members <- letter_groups[[li]]
+        can_share <- all(!sig_mat[g, members])
+
+        if (can_share) {
+          letter_groups[[li]] <- c(members, g)
+          group_letters[g] <- paste0(group_letters[g], letters_pool[li])
+          assigned <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!assigned) {
+      new_i <- length(letter_groups) + 1
+      letter_groups[[new_i]] <- g
+      group_letters[g] <- paste0(group_letters[g], letters_pool[new_i])
+    }
+  }
+
+  for (i in seq_along(groups_ordered)) {
+    for (j in seq_along(groups_ordered)) {
+      if (j <= i) next
+
+      g1 <- groups_ordered[i]
+      g2 <- groups_ordered[j]
+
+      if (!sig_mat[g1, g2]) {
+        chars1 <- unlist(strsplit(group_letters[g1], split = ""))
+        chars2 <- unlist(strsplit(group_letters[g2], split = ""))
+
+        shared <- length(intersect(chars1, chars2)) > 0
+
+        if (!shared) {
+          added <- FALSE
+
+          for (li in seq_along(letter_groups)) {
+            members <- letter_groups[[li]]
+
+            if (g1 %in% members && !(g2 %in% members)) {
+              can_add <- all(!sig_mat[g2, members])
+
+              if (can_add) {
+                letter_groups[[li]] <- c(members, g2)
+                group_letters[g2] <- paste0(group_letters[g2], letters_pool[li])
+                added <- TRUE
+                break
+              }
+            }
+          }
+
+          if (!added) {
+            for (li in seq_along(letter_groups)) {
+              members <- letter_groups[[li]]
+
+              if (g2 %in% members && !(g1 %in% members)) {
+                can_add <- all(!sig_mat[g1, members])
+
+                if (can_add) {
+                  letter_groups[[li]] <- c(members, g1)
+                  group_letters[g1] <- paste0(group_letters[g1], letters_pool[li])
+                  added <- TRUE
+                  break
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  group_letters
+}
+
+run_anova_table <- function(df, group_col, metrics) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    sm <- summary(fit)[[1]]
+
+    p <- sm["group", "Pr(>F)"]
+
+    out[[m]] <- data.frame(
+      metric = m,
+      group_variable = group_col,
+      Df_between = sm["group", "Df"],
+      Df_within = sm["Residuals", "Df"],
+      F_value = sm["group", "F value"],
+      P_value_raw = p,
+      P_value_for_paper = format_p_for_paper(p),
+      P_value_plain = format_p_plain(p),
+      significance = sig_label(p),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  bind_rows(out)
+}
+
+run_tukey_table <- function(df, group_col, metrics, only_significant = FALSE) {
+  out <- list()
+
+  for (m in metrics) {
+    dat <- df %>%
+      select(
+        group = all_of(group_col),
+        value = all_of(m)
+      ) %>%
+      filter(!is.na(group), !is.na(value))
+
+    dat$group <- factor(dat$group)
+
+    fit <- aov(value ~ group, data = dat)
+    tk <- TukeyHSD(fit)$group
+
+    tk_df <- as.data.frame(tk) %>%
+      tibble::rownames_to_column("comparison") %>%
+      mutate(
+        metric = m,
+        group_variable = group_col,
+        p_adj_raw = `p adj`,
+        p_adj_for_paper = format_p_for_paper(`p adj`),
+        p_adj_plain = format_p_plain(`p adj`),
+        significance = sig_label(`p adj`)
+      ) %>%
+      select(
+        metric,
+        group_variable,
+        comparison,
+        diff,
+        lwr,
+        upr,
+        p_adj_raw,
+        p_adj_for_paper,
+        p_adj_plain,
+        significance
+      )
+
+    if (only_significant) {
+      tk_df <- tk_df %>% filter(p_adj_raw < 0.05)
+    }
+
+    out[[m]] <- tk_df
+  }
+
+  bind_rows(out)
+}
+
+make_mean_sd_detail <- function(df, group_col, metrics, group_order = NULL) {
+  out <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      n = n(),
+      across(
+        all_of(metrics),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE)
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  for (m in metrics) {
+    mean_col <- paste0(m, "_mean")
+    sd_col <- paste0(m, "_sd")
+    mean_sd_col <- paste0(m, "_mean_sd")
+
+    if (m %in% c("Shannon", "Simpson")) {
+      out[[mean_sd_col]] <- sprintf(
+        "%.2f ± %.2f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    } else {
+      out[[mean_sd_col]] <- sprintf(
+        "%.2f ± %.2f",
+        out[[mean_col]],
+        out[[sd_col]]
+      )
+    }
+  }
+
+  if (!is.null(group_order)) {
+    out <- out %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  out
+}
+
+make_paper_table <- function(df, group_col, metrics, anova_table, group_order = NULL) {
+  sample_count <- df %>%
+    count(.data[[group_col]], name = "n") %>%
+    rename(group = all_of(group_col))
+
+  mean_table <- df %>%
+    group_by(.data[[group_col]]) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    ) %>%
+    rename(group = all_of(group_col))
+
+  paper <- sample_count %>%
+    left_join(mean_table, by = "group")
+
+  for (m in metrics) {
+    letter_vec <- make_tukey_letters_no_package(df, group_col, m, alpha = 0.05)
+    mean_col <- paste0(m, "_mean")
+
+    paper[[m]] <- paste0(
+      sprintf("%.2f", paper[[mean_col]]),
+      letter_vec[as.character(paper$group)]
+    )
+  }
+
+  if (!is.null(group_order)) {
+    paper <- paper %>%
+      mutate(group = factor(group, levels = group_order)) %>%
+      arrange(group) %>%
+      mutate(group = as.character(group))
+  }
+
+  paper <- paper %>%
+    select(group, n, all_of(metrics))
+
+  anova_row <- data.frame(
+    group = "ANOVA（P-value）",
+    n = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+
+  for (m in metrics) {
+    p_show <- anova_table %>%
+      filter(metric == m) %>%
+      pull(P_value_for_paper)
+
+    anova_row[[m]] <- ifelse(length(p_show) == 1, p_show, NA_character_)
+  }
+
+  bind_rows(paper, anova_row)
+}
+
+save_workbook_with_auto_width <- function(wb, file) {
+  sheets <- names(wb)
+
+  for (s in sheets) {
+    try(
+      setColWidths(wb, sheet = s, cols = 1:80, widths = "auto"),
+      silent = TRUE
+    )
+  }
+
+  saveWorkbook(wb, file, overwrite = TRUE)
+}
+
+plot_alpha_box_letters <- function(alpha_df, letters_df, anova_df, metric, out_png, group_order) {
+
+  dat <- alpha_df %>%
+    select(continent_CN, value = all_of(metric)) %>%
+    filter(!is.na(continent_CN), !is.na(value), continent_CN %in% group_order)
+
+  dat$continent_CN <- factor(dat$continent_CN, levels = group_order)
+
+  letter_dat <- letters_df %>%
+    select(group, letter = all_of(metric)) %>%
+    rename(continent_CN = group) %>%
+    filter(continent_CN %in% group_order)
+
+  letter_dat$continent_CN <- factor(letter_dat$continent_CN, levels = group_order)
+
+  letter_pos_df <- dat %>%
+    group_by(continent_CN) %>%
+    summarise(
+      upper_whisker = get_upper_whisker(value),
+      .groups = "drop"
+    ) %>%
+    left_join(letter_dat, by = "continent_CN") %>%
+    arrange(continent_CN)
+
+  y_min <- min(dat$value, na.rm = TRUE)
+  y_max <- max(dat$value, na.rm = TRUE)
+  y_range <- y_max - y_min
+
+  if (!is.finite(y_range) || y_range == 0) {
+    y_range <- max(abs(y_max), 1)
+  }
+
+  letter_pos_df <- letter_pos_df %>%
+    mutate(
+      letter_y = upper_whisker + 0.05 * y_range
+    )
+
+  max_letter_y <- max(letter_pos_df$letter_y, na.rm = TRUE)
+
+  anova_p <- anova_df %>%
+    filter(metric == !!metric) %>%
+    pull(P_value_raw)
+
+  anova_label <- format_anova_label(anova_p[1])
+
+  ## 根据箱线图最高字母位置自动上移，避免重叠
+  anova_y <- max_letter_y + 0.14 * y_range
+  y_top <- anova_y + 0.10 * y_range
+
+  p <- ggplot(
+    dat,
+    aes(
+      x = continent_CN,
+      y = value,
+      fill = continent_CN
+    )
+  ) +
+    geom_boxplot(
+      width = 0.56,
+      outlier.shape = NA,
+      linewidth = 0.40,
+      color = "black"
+    ) +
+    geom_text(
+      data = letter_pos_df,
+      aes(
+        x = continent_CN,
+        y = letter_y,
+        label = letter
+      ),
+      family = "songti",
+      size = 3.3,
+      vjust = 0,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(
+      values = continent_colors,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_top),
+      clip = "off"
+    ) +
+    labs(
+      x = NULL,
+      y = metric_y_labels[[metric]]
+    ) +
+    theme_classic(base_family = "songti") +
+    theme(
+      axis.title.y = element_text(
+        size = 10.5,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 10,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 9,
+        family = "songti",
+        colour = "black"
+      ),
+      axis.line = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      axis.ticks = element_line(
+        linewidth = 0.40,
+        colour = "black"
+      ),
+      legend.position = "none",
+      plot.margin = margin(t = 8, r = 8, b = 6, l = 8)
+    ) +
+    annotate(
+      "text",
+      x = 0.60,
+      y = anova_y,
+      label = anova_label,
+      hjust = 0,
+      vjust = 1,
+      family = "songti",
+      size = 2.8
+    )
+
+  ggsave(
+    filename = out_png,
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    filename = sub("\\.png$", ".pdf", out_png),
+    plot = p,
+    width = 7.1,
+    height = 5.2,
+    units = "cm",
+    bg = "white"
+  )
+}
+
+## =========================
+## 5. 读取 metadata
+## =========================
+
+cat("\n读取 metadata ...\n")
+
+meta <- read.csv(
+  metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+possible_sample_cols <- c(
+  "sample_id", "SampleID", "sampleid", "sample_name", "id", "#SampleID"
+)
+
+sample_col <- possible_sample_cols[possible_sample_cols %in% colnames(meta)][1]
+
+if (is.na(sample_col)) {
+  stop("metadata 中没有找到样本 ID 列。")
+}
+
+if (!"continent" %in% colnames(meta)) {
+  stop("metadata 中没有 continent 列。")
+}
+
+meta_continent <- meta %>%
+  transmute(
+    sample_id = as.character(.data[[sample_col]]),
+    continent_original = clean_value(continent),
+    continent_std = normalize_continent(continent_original),
+    continent_CN = unname(continent_cn_map[continent_std])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(continent_CN)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+cat("metadata 中 continent 有效样本数：", nrow(meta_continent), "\n", sep = "")
+
+## =========================
+## 6. 读取样本水平 alpha 数据并合并 continent
+## =========================
+
+cat("\n读取样本水平 Alpha 多样性数据 ...\n")
+
+alpha_df <- read.csv(
+  alpha_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_alpha_cols <- c(
+  "sample_id",
+  metrics_all
+)
+
+missing_alpha_cols <- setdiff(needed_alpha_cols, colnames(alpha_df))
+
+if (length(missing_alpha_cols) > 0) {
+  stop("alpha 文件缺少列：", paste(missing_alpha_cols, collapse = ", "))
+}
+
+continent_alpha <- alpha_df %>%
+  mutate(sample_id = as.character(sample_id)) %>%
+  select(sample_id, all_of(metrics_all)) %>%
+  inner_join(
+    meta_continent %>% select(sample_id, continent_CN, continent_original, continent_std),
+    by = "sample_id"
+  ) %>%
+  relocate(sample_id, continent_CN, continent_original, continent_std)
+
+## 合并后按样本量从大到小排序
+continent_sample_count <- continent_alpha %>%
+  count(continent_CN, name = "n") %>%
+  arrange(desc(n), continent_CN)
+
+continent_order <- continent_sample_count$continent_CN
+
+continent_alpha$continent_CN <- factor(continent_alpha$continent_CN, levels = continent_order)
+
+continent_sample_count <- continent_sample_count %>%
+  mutate(continent_CN = factor(continent_CN, levels = continent_order)) %>%
+  arrange(continent_CN) %>%
+  mutate(continent_CN = as.character(continent_CN))
+
+cat("进入 continent Alpha 分析的样本数：", nrow(continent_alpha), "\n", sep = "")
+cat("进入分析的 continent 样本数：\n")
+print(continent_sample_count)
+cat("continent 作图顺序（按样本量从大到小）：\n")
+print(continent_order)
+
+write.csv(
+  continent_alpha,
+  out_continent_alpha,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_sample_count,
+  out_sample_count,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 统计检验与表格
+## =========================
+
+cat("\n进行 ANOVA + TukeyHSD ...\n")
+
+continent_anova <- run_anova_table(
+  continent_alpha,
+  "continent_CN",
+  metrics_for_table
+)
+
+continent_tukey_all <- run_tukey_table(
+  continent_alpha,
+  "continent_CN",
+  metrics_for_table,
+  only_significant = FALSE
+)
+
+continent_tukey_sig <- run_tukey_table(
+  continent_alpha,
+  "continent_CN",
+  metrics_for_table,
+  only_significant = TRUE
+)
+
+continent_mean_sd <- make_mean_sd_detail(
+  continent_alpha,
+  "continent_CN",
+  metrics_all,
+  group_order = continent_order
+)
+
+continent_paper_table <- make_paper_table(
+  continent_alpha,
+  "continent_CN",
+  metrics_for_table,
+  continent_anova,
+  group_order = continent_order
+)
+
+write.csv(
+  continent_paper_table,
+  out_paper_table,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_mean_sd,
+  out_mean_sd,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_anova,
+  out_anova,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_tukey_all,
+  out_tukey_all,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  continent_tukey_sig,
+  out_tukey_sig,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 8. Excel 汇总
+## =========================
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "paper_table")
+addWorksheet(wb, "mean_sd_detail")
+addWorksheet(wb, "ANOVA")
+addWorksheet(wb, "TukeyHSD_significant")
+addWorksheet(wb, "TukeyHSD_all")
+addWorksheet(wb, "sample_count")
+addWorksheet(wb, "sample_alpha_continent")
+
+writeData(wb, "paper_table", continent_paper_table)
+writeData(wb, "mean_sd_detail", continent_mean_sd)
+writeData(wb, "ANOVA", continent_anova)
+writeData(wb, "TukeyHSD_significant", continent_tukey_sig)
+writeData(wb, "TukeyHSD_all", continent_tukey_all)
+writeData(wb, "sample_count", continent_sample_count)
+writeData(wb, "sample_alpha_continent", continent_alpha)
+
+save_workbook_with_auto_width(wb, out_xlsx)
+
+## =========================
+## 9. 绘制四张箱线图
+## =========================
+
+cat("\n绘制 Alpha 多样性箱线图 ...\n")
+
+letters_df <- continent_paper_table %>%
+  filter(
+    !is.na(group),
+    group != "",
+    !grepl("^ANOVA", group)
+  ) %>%
+  select(group, all_of(metrics_for_table))
+
+for (m in metrics_for_table) {
+  letters_df[[m]] <- stringr::str_extract(
+    as.character(letters_df[[m]]),
+    "[A-Za-z]+$"
+  )
+}
+
+for (m in metrics_for_table) {
+  plot_alpha_box_letters(
+    alpha_df = continent_alpha,
+    letters_df = letters_df,
+    anova_df = continent_anova,
+    metric = m,
+    out_png = plot_files_png[[m]],
+    group_order = continent_order
+  )
+}
+
+## =========================
+## 10. 日志
+## =========================
+
+sink(out_log)
+
+cat("Continent alpha diversity analysis, no-elephant version\n")
+cat("======================================================\n\n")
+
+cat("Input metadata:\n")
+cat(metadata_file, "\n\n")
+
+cat("Input sample-level alpha diversity file:\n")
+cat(alpha_file, "\n\n")
+
+cat("No alpha diversity recomputation performed.\n")
+cat("BIOM file was not read.\n")
+cat("ANOVA + TukeyHSD were recalculated for continent grouping.\n\n")
+
+cat("Data version:\n")
+cat("globalfungi_style_test_no_elephant only\n\n")
+
+cat("Grouping variable:\n")
+cat("metadata$continent\n\n")
+
+cat("Continent merging rule:\n")
+cat("North America + South America -> Americas\n\n")
+
+cat("Continent Chinese labels:\n")
+cat("Asia -> 亚洲\n")
+cat("Europe -> 欧洲\n")
+cat("Africa -> 非洲\n")
+cat("Americas -> 美洲\n\n")
+
+cat("Continent order (descending by sample size after merging):\n")
+print(continent_order)
+
+cat("\nSample number used:\n")
+cat(nrow(continent_alpha), "\n\n")
+
+cat("Continent sample counts:\n")
+print(continent_sample_count)
+
+cat("\nANOVA:\n")
+print(continent_anova)
+
+cat("\nSignificant TukeyHSD results:\n")
+print(continent_tukey_sig)
+
+cat("\nPaper table:\n")
+print(continent_paper_table)
+
+cat("\nOutput files:\n")
+cat("Continent alpha sample table:", out_continent_alpha, "\n")
+cat("Sample count:", out_sample_count, "\n")
+cat("Paper table:", out_paper_table, "\n")
+cat("Mean SD:", out_mean_sd, "\n")
+cat("ANOVA:", out_anova, "\n")
+cat("Tukey all:", out_tukey_all, "\n")
+cat("Tukey significant:", out_tukey_sig, "\n")
+cat("Excel:", out_xlsx, "\n")
+
+cat("\nPlots:\n")
+print(plot_files_png)
+
+sink()
+
+## =========================
+## 11. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n", sep = "")
+cat("Plot directory:\n", plot_dir, "\n\n", sep = "")
+
+cat("Sample number used:", nrow(continent_alpha), "\n")
+cat("Continent sample counts:\n")
+print(continent_sample_count)
+
+cat("\nContinent plot order:\n")
+print(continent_order)
+
+cat("\nKey tables:\n")
+cat(out_paper_table, "\n")
+cat(out_mean_sd, "\n")
+cat(out_anova, "\n")
+cat(out_tukey_all, "\n")
+cat(out_xlsx, "\n\n")
+
+cat("Boxplots:\n")
+cat(plot_files_png[["ACE"]], "\n")
+cat(plot_files_png[["Chao1"]], "\n")
+cat(plot_files_png[["Shannon"]], "\n")
+cat(plot_files_png[["Simpson"]], "\n\n")
+
+cat("Log:\n")
+cat(out_log, "\n")
+#运行
+Rscript scripts/chapter4_continent_alpha/01_continent_alpha_diversity_ANOVA_Tukey_boxplot_no_elephant.R
