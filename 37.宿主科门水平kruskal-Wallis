@@ -1,0 +1,1252 @@
+#本次任务说明
+#输入文件：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/taxonomy/phylum_abundance_table_no_elephant.tsv
+#是否重算：
+#不重做 taxonomy；
+#不重做 Fig3-3 作图；
+#只从 phylum abundance table 重新计算样本水平门相对多度，用于统计检验。
+#统计单位：
+#每个样本内各真菌门相对多度（%）
+#检验对象：
+#Fig3-3 中展示的全部门类；
+#“真菌门分类地位未定类群”参与统计，但后续论文解释时要作为“门水平未定类群”谨慎描述。
+#统计方法：
+#每个门分别做 Kruskal-Wallis 检验；
+#Dunn’s test 做宿主科两两比较；
+#Dunn’s test 的 P 值使用 BH 校正；
+#字母标注基于 Dunn’s test 的 BH 校正 P 值，alpha = 0.05。
+#输出目录：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum
+#输出文件：
+#Phylum_sample_relative_abundance_host_family_no_elephant.csv
+#Phylum_group_summary_host_family_no_elephant.csv
+#Phylum_Kruskal_Wallis_host_family_no_elephant.csv
+#Phylum_Dunn_host_family_no_elephant.csv
+#Phylum_letters_host_family_no_elephant.csv
+#Phylum_Kruskal_Dunn_summary_no_elephant.txt
+#完整脚本
+#直接复制整段到 WSL 运行：
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/14_phylum_host_family_Kruskal_Dunn_letters_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 不同宿主科肠道真菌门水平相对多度差异检验
+##
+## 统计口径：
+## 1. 读取 no-elephant metadata；
+## 2. 读取 no-elephant phylum abundance table；
+## 3. 每个样本内先计算各真菌门相对多度；
+## 4. 每个真菌门分别做 Kruskal-Wallis 检验；
+## 5. Dunn's test 做宿主科两两比较，P值用 BH 校正；
+## 6. 输出字母标注表，供后续柱状图或箱线图加字母使用。
+##
+## 不做内容：
+## 不重做 taxonomy；
+## 不重画 Fig3-3；
+## 不覆盖原图。
+## ============================================================
+
+## -----------------------------
+## 0. R包路径与依赖
+## -----------------------------
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr", "tidyr", "stringr", "readr",
+  "dunn.test", "multcompView"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readr)
+  library(dunn.test)
+  library(multcompView)
+})
+
+## -----------------------------
+## 1. 输入输出路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+metadata_file <- file.path(
+  base_dir,
+  "metadata/metadata_valid_globalfungi_SH_nozero_no_elephant.csv"
+)
+
+phylum_table_file <- file.path(
+  base_dir,
+  "taxonomy/phylum_abundance_table_no_elephant.tsv"
+)
+
+out_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum"
+)
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_sample_rel_csv <- file.path(
+  out_dir,
+  "Phylum_sample_relative_abundance_host_family_no_elephant.csv"
+)
+
+out_group_summary_csv <- file.path(
+  out_dir,
+  "Phylum_group_summary_host_family_no_elephant.csv"
+)
+
+out_kw_csv <- file.path(
+  out_dir,
+  "Phylum_Kruskal_Wallis_host_family_no_elephant.csv"
+)
+
+out_dunn_csv <- file.path(
+  out_dir,
+  "Phylum_Dunn_host_family_no_elephant.csv"
+)
+
+out_letters_csv <- file.path(
+  out_dir,
+  "Phylum_letters_host_family_no_elephant.csv"
+)
+
+out_summary_txt <- file.path(
+  out_dir,
+  "Phylum_Kruskal_Dunn_summary_no_elephant.txt"
+)
+
+for (f in c(metadata_file, phylum_table_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## -----------------------------
+## 2. 参数：顺序与中文名
+## -----------------------------
+host_family_order <- c(
+  "Bovidae",
+  "Suidae",
+  "Cervidae",
+  "Equidae",
+  "Rhinocerotidae"
+)
+
+host_family_cn_map <- c(
+  "Bovidae" = "牛科",
+  "Suidae" = "猪科",
+  "Cervidae" = "鹿科",
+  "Equidae" = "马科",
+  "Rhinocerotidae" = "犀科"
+)
+
+host_family_order_cn <- unname(host_family_cn_map[host_family_order])
+
+phylum_map <- c(
+  "Ascomycota" = "子囊菌门",
+  "Basidiomycota" = "担子菌门",
+  "Neocallimastigomycota" = "新靓鞭菌门",
+  "Fungi_phy_Incertae_sedis" = "真菌门分类地位未定类群",
+  "Fungi phy Incertae sedis" = "真菌门分类地位未定类群",
+  "Mucoromycota" = "毛霉门",
+  "Mortierellomycota" = "被孢霉门",
+  "Chytridiomycota" = "壶菌门",
+  "Rozellomycota" = "罗兹菌门",
+  "Olpidiomycota" = "油壶菌门",
+  "Glomeromycota" = "球囊霉门",
+  "Zoopagomycota" = "捕虫霉门",
+  "Aphelidiomycota" = "远日菌门",
+  "Blastocladiomycota" = "芽枝霉门",
+  "Basidiobolomycota" = "蛙粪霉门",
+  "Kickxellomycota" = "梳霉门",
+  "Monoblepharomycota" = "单毛菌门",
+  "Sanchytriomycota" = "Sanchytriomycota",
+  "Entorrhizomycota" = "根肿黑粉菌门",
+  "Calcarisporiellomycota" = "小齿梗孢门"
+)
+
+phylum_order_cn <- c(
+  "子囊菌门",
+  "担子菌门",
+  "新靓鞭菌门",
+  "真菌门分类地位未定类群",
+  "毛霉门",
+  "被孢霉门",
+  "壶菌门",
+  "罗兹菌门",
+  "油壶菌门",
+  "球囊霉门",
+  "捕虫霉门",
+  "远日菌门",
+  "芽枝霉门",
+  "蛙粪霉门",
+  "梳霉门",
+  "单毛菌门",
+  "Sanchytriomycota",
+  "根肿黑粉菌门",
+  "小齿梗孢门"
+)
+
+alpha <- 0.05
+
+## -----------------------------
+## 3. 工具函数
+## -----------------------------
+find_col <- function(df, patterns, label) {
+  nms <- colnames(df)
+  for (p in patterns) {
+    hit <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hit) >= 1) return(hit[1])
+  }
+  stop(
+    "无法识别列：", label,
+    "\n当前列名为：\n",
+    paste(nms, collapse = " | ")
+  )
+}
+
+p_to_sig <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "<0.001",
+    TRUE ~ sprintf("%.4f", p)
+  )
+}
+
+map_phylum_cn <- function(x) {
+  x <- as.character(x)
+  ifelse(x %in% names(phylum_map), phylum_map[x], x)
+}
+
+make_letters_from_dunn <- function(dunn_df, groups, alpha = 0.05) {
+  groups <- as.character(groups)
+
+  if (length(groups) <= 1) {
+    return(setNames("a", groups))
+  }
+
+  if (is.null(dunn_df) || nrow(dunn_df) == 0) {
+    return(setNames(rep("a", length(groups)), groups))
+  }
+
+  p_vec <- dunn_df$p_adj_BH
+  names(p_vec) <- paste(dunn_df$group1, dunn_df$group2, sep = "-")
+
+  letters_obj <- multcompView::multcompLetters(
+    p_vec,
+    threshold = alpha,
+    Letters = letters
+  )
+
+  letters_raw <- letters_obj$Letters
+
+  missing_groups <- setdiff(groups, names(letters_raw))
+  if (length(missing_groups) > 0) {
+    letters_raw <- c(
+      letters_raw,
+      setNames(rep("a", length(missing_groups)), missing_groups)
+    )
+  }
+
+  letters_raw[groups]
+}
+
+run_dunn_one_phylum <- function(df_one, phylum_name) {
+  df_one <- df_one %>%
+    filter(!is.na(relative_abundance), !is.na(host_family_cn)) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- host_family_order_cn[host_family_order_cn %in% groups_present]
+
+  if (length(groups_present) < 2) {
+    return(data.frame())
+  }
+
+  dt <- dunn.test::dunn.test(
+    x = df_one$relative_abundance,
+    g = df_one$host_family_cn,
+    method = "bh",
+    kw = FALSE,
+    label = TRUE,
+    wrap = FALSE,
+    table = FALSE,
+    list = TRUE
+  )
+
+  dunn_out <- data.frame(
+    phylum_cn = phylum_name,
+    comparison = dt$comparisons,
+    Z = dt$Z,
+    p_value = dt$P,
+    p_adj_BH = dt$P.adjusted,
+    stringsAsFactors = FALSE
+  )
+
+  parts <- strsplit(dunn_out$comparison, " - ", fixed = TRUE)
+
+  dunn_out$group1 <- vapply(parts, function(x) x[1], character(1))
+  dunn_out$group2 <- vapply(parts, function(x) x[2], character(1))
+
+  dunn_out %>%
+    select(
+      phylum_cn,
+      group1,
+      group2,
+      comparison,
+      Z,
+      p_value,
+      p_adj_BH
+    ) %>%
+    mutate(
+      p_value_format = format_p(p_value),
+      p_adj_BH_format = format_p(p_adj_BH),
+      significance = p_to_sig(p_adj_BH)
+    )
+}
+
+## -----------------------------
+## 4. 读取 metadata
+## -----------------------------
+cat("读取 metadata：\n", metadata_file, "\n\n", sep = "")
+
+meta <- readr::read_csv(
+  metadata_file,
+  show_col_types = FALSE
+)
+
+sample_col <- find_col(
+  meta,
+  c("^sampleid$", "^sample_id$", "^SampleID$", "^#SampleID$", "^sample$", "^Run$", "^run$"),
+  "sample_id"
+)
+
+family_col <- find_col(
+  meta,
+  c("^host_family$", "^Host_family$", "^family$", "^hostFamily$"),
+  "host_family"
+)
+
+meta2 <- meta %>%
+  transmute(
+    sample_id = as.character(.data[[sample_col]]),
+    host_family = as.character(.data[[family_col]])
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    sample_id != "",
+    !is.na(host_family),
+    host_family != "",
+    host_family %in% host_family_order
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE) %>%
+  mutate(
+    host_family_cn = host_family_cn_map[host_family],
+    host_family = factor(host_family, levels = host_family_order),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  )
+
+cat("metadata 样本数：", nrow(meta2), "\n", sep = "")
+cat("metadata 宿主科样本数：\n")
+print(table(meta2$host_family_cn))
+
+## -----------------------------
+## 5. 读取 phylum abundance table 并计算样本相对多度
+## -----------------------------
+cat("\n读取 phylum abundance table：\n", phylum_table_file, "\n\n", sep = "")
+
+phylum_tab <- read.delim(
+  phylum_table_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+if (ncol(phylum_tab) < 2) {
+  stop("phylum abundance table 列数异常。")
+}
+
+colnames(phylum_tab)[1] <- "phylum"
+
+sample_cols <- intersect(colnames(phylum_tab)[-1], meta2$sample_id)
+
+if (length(sample_cols) == 0) {
+  stop("metadata 与 phylum abundance table 没有共同样本。")
+}
+
+cat("共同样本数：", length(sample_cols), "\n", sep = "")
+
+phylum_long <- phylum_tab %>%
+  select(phylum, all_of(sample_cols)) %>%
+  pivot_longer(
+    cols = -phylum,
+    names_to = "sample_id",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    abundance = suppressWarnings(as.numeric(abundance)),
+    abundance = ifelse(is.na(abundance), 0, abundance),
+    phylum_cn = map_phylum_cn(phylum)
+  ) %>%
+  inner_join(
+    meta2 %>%
+      select(sample_id, host_family, host_family_cn),
+    by = "sample_id"
+  )
+
+sample_total <- phylum_long %>%
+  group_by(sample_id) %>%
+  summarise(
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+phylum_rel <- phylum_long %>%
+  left_join(sample_total, by = "sample_id") %>%
+  filter(total_abundance > 0) %>%
+  mutate(
+    relative_abundance = abundance / total_abundance * 100
+  ) %>%
+  select(
+    sample_id,
+    host_family,
+    host_family_cn,
+    phylum,
+    phylum_cn,
+    abundance,
+    total_abundance,
+    relative_abundance
+  )
+
+present_phyla <- phylum_order_cn[phylum_order_cn %in% unique(phylum_rel$phylum_cn)]
+
+## 只保留 Fig3-3 中映射到的门类顺序；避免混入图中未显示的异常名称
+phylum_rel <- phylum_rel %>%
+  filter(
+    phylum_cn %in% present_phyla,
+    host_family_cn %in% host_family_order_cn
+  ) %>%
+  mutate(
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  arrange(sample_id, phylum_cn)
+
+write.csv(
+  phylum_rel,
+  out_sample_rel_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("用于统计的门类数：", length(present_phyla), "\n", sep = "")
+cat("门类顺序：\n")
+print(present_phyla)
+
+## -----------------------------
+## 6. 组内描述性统计
+## -----------------------------
+group_summary <- phylum_rel %>%
+  group_by(phylum_cn, host_family_cn) %>%
+  summarise(
+    n = n(),
+    mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+    sd_relative_abundance = sd(relative_abundance, na.rm = TRUE),
+    se_relative_abundance = sd_relative_abundance / sqrt(n),
+    median_relative_abundance = median(relative_abundance, na.rm = TRUE),
+    q1_relative_abundance = quantile(relative_abundance, 0.25, na.rm = TRUE),
+    q3_relative_abundance = quantile(relative_abundance, 0.75, na.rm = TRUE),
+    min_relative_abundance = min(relative_abundance, na.rm = TRUE),
+    max_relative_abundance = max(relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    phylum_cn = factor(phylum_cn, levels = present_phyla),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(phylum_cn, host_family_cn)
+
+write.csv(
+  group_summary,
+  out_group_summary_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## 宽表均值，方便合并进 KW 结果
+group_mean_wide <- group_summary %>%
+  select(phylum_cn, host_family_cn, mean_relative_abundance) %>%
+  mutate(
+    mean_relative_abundance = sprintf("%.4f", mean_relative_abundance)
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = host_family_cn,
+    values_from = mean_relative_abundance
+  )
+
+## -----------------------------
+## 7. Kruskal-Wallis 检验
+## -----------------------------
+kw_list <- list()
+
+for (p in present_phyla) {
+  df_one <- phylum_rel %>%
+    filter(as.character(phylum_cn) == p) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- groups_present[!is.na(groups_present)]
+
+  if (length(groups_present) < 2) {
+    kw_list[[p]] <- data.frame(
+      phylum_cn = p,
+      n_total = nrow(df_one),
+      group_number = length(groups_present),
+      statistic_H = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      stringsAsFactors = FALSE
+    )
+    next
+  }
+
+  kt <- kruskal.test(relative_abundance ~ host_family_cn, data = df_one)
+
+  kw_list[[p]] <- data.frame(
+    phylum_cn = p,
+    n_total = nrow(df_one),
+    group_number = length(groups_present),
+    statistic_H = unname(kt$statistic),
+    df = unname(kt$parameter),
+    p_value = kt$p.value,
+    stringsAsFactors = FALSE
+  )
+}
+
+kw_df <- bind_rows(kw_list) %>%
+  mutate(
+    p_adj_BH_across_phyla = p.adjust(p_value, method = "BH"),
+    p_value_format = format_p(p_value),
+    p_adj_BH_across_phyla_format = format_p(p_adj_BH_across_phyla),
+    significance_raw = p_to_sig(p_value),
+    significance_BH = p_to_sig(p_adj_BH_across_phyla),
+    phylum_cn = factor(phylum_cn, levels = present_phyla)
+  ) %>%
+  left_join(group_mean_wide, by = "phylum_cn") %>%
+  arrange(phylum_cn)
+
+write.csv(
+  kw_df,
+  out_kw_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 8. Dunn's test 两两比较
+## -----------------------------
+dunn_list <- list()
+
+for (p in present_phyla) {
+  df_one <- phylum_rel %>%
+    filter(as.character(phylum_cn) == p) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  dunn_list[[p]] <- run_dunn_one_phylum(df_one, p)
+}
+
+dunn_df <- bind_rows(dunn_list) %>%
+  mutate(
+    phylum_cn = factor(phylum_cn, levels = present_phyla),
+    group1 = factor(group1, levels = host_family_order_cn),
+    group2 = factor(group2, levels = host_family_order_cn)
+  ) %>%
+  arrange(phylum_cn, group1, group2)
+
+write.csv(
+  dunn_df,
+  out_dunn_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 9. 字母标注
+## -----------------------------
+letters_list <- list()
+
+for (p in present_phyla) {
+  df_one <- phylum_rel %>%
+    filter(as.character(phylum_cn) == p) %>%
+    mutate(
+      host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+    )
+
+  groups_present <- df_one %>%
+    pull(host_family_cn) %>%
+    as.character() %>%
+    unique()
+
+  groups_present <- host_family_order_cn[host_family_order_cn %in% groups_present]
+
+  dunn_one <- dunn_df %>%
+    filter(as.character(phylum_cn) == p) %>%
+    mutate(
+      group1 = as.character(group1),
+      group2 = as.character(group2)
+    )
+
+  letters_vec <- make_letters_from_dunn(
+    dunn_df = dunn_one,
+    groups = groups_present,
+    alpha = alpha
+  )
+
+  letters_df <- data.frame(
+    phylum_cn = p,
+    host_family_cn = names(letters_vec),
+    letter = as.character(letters_vec),
+    stringsAsFactors = FALSE
+  )
+
+  letters_list[[p]] <- letters_df
+}
+
+letters_df <- bind_rows(letters_list) %>%
+  left_join(
+    group_summary %>%
+      mutate(
+        phylum_cn = as.character(phylum_cn),
+        host_family_cn = as.character(host_family_cn)
+      ) %>%
+      select(
+        phylum_cn,
+        host_family_cn,
+        n,
+        mean_relative_abundance,
+        sd_relative_abundance,
+        se_relative_abundance,
+        median_relative_abundance,
+        q1_relative_abundance,
+        q3_relative_abundance,
+        max_relative_abundance
+      ),
+    by = c("phylum_cn", "host_family_cn")
+  ) %>%
+  left_join(
+    kw_df %>%
+      mutate(phylum_cn = as.character(phylum_cn)) %>%
+      select(
+        phylum_cn,
+        kruskal_p_value = p_value,
+        kruskal_p_adj_BH_across_phyla = p_adj_BH_across_phyla,
+        kruskal_significance_BH = significance_BH
+      ),
+    by = "phylum_cn"
+  ) %>%
+  mutate(
+    phylum_cn = factor(phylum_cn, levels = present_phyla),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(phylum_cn, host_family_cn)
+
+write.csv(
+  letters_df,
+  out_letters_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## -----------------------------
+## 10. 摘要
+## -----------------------------
+sink(out_summary_txt)
+
+cat("不同宿主科肠道真菌门水平相对多度差异检验摘要（no_elephant）\n")
+cat("============================================================\n\n")
+
+cat("一、输入文件\n")
+cat("metadata: ", metadata_file, "\n", sep = "")
+cat("phylum abundance table: ", phylum_table_file, "\n\n", sep = "")
+
+cat("二、统计口径\n")
+cat("1. 从 phylum abundance table 计算每个样本内各真菌门相对多度。\n")
+cat("2. 分组变量为 host_family，中文顺序为：牛科、猪科、鹿科、马科、犀科。\n")
+cat("3. 每个真菌门分别进行 Kruskal-Wallis 检验。\n")
+cat("4. Dunn's test 用于宿主科两两比较，P 值使用 BH 校正。\n")
+cat("5. 字母标注基于 Dunn's test 的 BH 校正 P 值，alpha = 0.05。\n")
+cat("6. “真菌门分类地位未定类群”参与统计，但论文解释时作为门水平未定类群处理。\n\n")
+
+cat("三、样本数\n")
+print(phylum_rel %>% distinct(sample_id, host_family_cn) %>% count(host_family_cn))
+cat("\n")
+
+cat("四、检验门类\n")
+for (i in seq_along(present_phyla)) {
+  cat(i, ". ", present_phyla[i], "\n", sep = "")
+}
+cat("\n")
+
+cat("五、Kruskal-Wallis 整体检验结果\n")
+print(
+  kw_df %>%
+    select(
+      phylum_cn,
+      n_total,
+      statistic_H,
+      df,
+      p_value_format,
+      p_adj_BH_across_phyla_format,
+      significance_BH
+    ),
+  row.names = FALSE
+)
+cat("\n")
+
+cat("六、字母标注表\n")
+print(
+  letters_df %>%
+    select(
+      phylum_cn,
+      host_family_cn,
+      mean_relative_abundance,
+      median_relative_abundance,
+      letter
+    ),
+  row.names = FALSE
+)
+cat("\n")
+
+cat("七、输出文件\n")
+cat("Sample relative abundance table: ", out_sample_rel_csv, "\n", sep = "")
+cat("Group summary table: ", out_group_summary_csv, "\n", sep = "")
+cat("Kruskal-Wallis table: ", out_kw_csv, "\n", sep = "")
+cat("Dunn test table: ", out_dunn_csv, "\n", sep = "")
+cat("Letters table: ", out_letters_csv, "\n", sep = "")
+
+sink()
+
+## -----------------------------
+## 11. 完成
+## -----------------------------
+cat("\n完成！\n")
+cat("样本水平门相对多度表: ", out_sample_rel_csv, "\n", sep = "")
+cat("组内描述统计表: ", out_group_summary_csv, "\n", sep = "")
+cat("Kruskal-Wallis 表: ", out_kw_csv, "\n", sep = "")
+cat("Dunn 两两比较表: ", out_dunn_csv, "\n", sep = "")
+cat("字母标注表: ", out_letters_csv, "\n", sep = "")
+cat("摘要: ", out_summary_txt, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/14_phylum_host_family_Kruskal_Dunn_letters_no_elephant.R
+#运行完成后，优先查看摘要：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum/Phylum_Kruskal_Dunn_summary_no_elephant.txt
+#再查看字母标注表前几行：
+column -s, -t < /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum/Phylum_letters_host_family_no_elephant.csv | head -n 120
+#后续如果要画门水平差异图，就用这两个文件：
+#Phylum_group_summary_host_family_no_elephant.csv
+#Phylum_letters_host_family_no_elephant.csv
+#下面这版脚本只读取你已经生成的门水平统计结果，筛选 去除“真菌门分类地位未定类群”后、Kruskal-Wallis BH 校正显著、总体平均相对多度最高的前 5 个真菌门，画一张与功能类群差异图风格一致的横向分组柱状图。
+#本次不重算 phylum 相对多度、不重做 Kruskal-Wallis、不重做 Dunn’s test，只计算作图用的 SE 和筛选前 5 个门。
+cd /mnt/d/ITS_SH_pipeline
+
+cat > /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/15_plot_phylum_top5_significant_host_family_barplot_meanSE_letters_no_elephant.R <<'EOF'
+#!/usr/bin/env Rscript
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+## ============================================================
+## 不同宿主科肠道真菌显著差异优势门相对多度图
+##
+## 图形口径：
+## 1. 不重算门水平相对多度；
+## 2. 不重做 Kruskal-Wallis；
+## 3. 不重做 Dunn's test；
+## 4. 读取已有 group summary、letters、Kruskal-Wallis 结果；
+## 5. 去除“真菌门分类地位未定类群”；
+## 6. 只保留 Kruskal-Wallis BH 校正后显著的门；
+## 7. 在显著门中按总体平均相对多度选前 5 个；
+## 8. 柱高为 mean_relative_abundance；
+## 9. 误差线为 mean ± SE；
+## 10. 字母标注来自已有 Dunn's test BH 校正结果；
+## 11. 图尺寸 190 × 70 mm，与功能类群差异图保持同一宽度，高度约一半。
+## ============================================================
+
+## -----------------------------
+## 0. R包路径与依赖
+## -----------------------------
+RVER <- paste0(R.version$major, ".", strsplit(R.version$minor, "\\.")[[1]][1])
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr", "readr", "stringr", "ggplot2",
+  "showtext", "sysfonts", "grid"
+)
+
+for (pkg in need_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    install.packages(pkg, lib = user_lib, repos = "https://cloud.r-project.org")
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+})
+
+## -----------------------------
+## 1. 输入输出路径
+## -----------------------------
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+in_dir <- file.path(
+  base_dir,
+  "results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum"
+)
+
+group_summary_file <- file.path(
+  in_dir,
+  "Phylum_group_summary_host_family_no_elephant.csv"
+)
+
+letters_file <- file.path(
+  in_dir,
+  "Phylum_letters_host_family_no_elephant.csv"
+)
+
+kw_file <- file.path(
+  in_dir,
+  "Phylum_Kruskal_Wallis_host_family_no_elephant.csv"
+)
+
+out_dir <- file.path(in_dir, "figures")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_png <- file.path(
+  out_dir,
+  "Phylum_top5_significant_host_family_barplot_meanSE_letters_190x70mm.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Phylum_top5_significant_host_family_barplot_meanSE_letters_190x70mm.pdf"
+)
+
+out_plotdata_csv <- file.path(
+  out_dir,
+  "Phylum_top5_significant_host_family_barplot_meanSE_letters_190x70mm_plotdata.csv"
+)
+
+out_selected_csv <- file.path(
+  out_dir,
+  "Phylum_top5_significant_selected_phyla_190x70mm.csv"
+)
+
+for (f in c(group_summary_file, letters_file, kw_file)) {
+  if (!file.exists(f)) stop("找不到输入文件：", f)
+}
+
+## -----------------------------
+## 2. 字体设置
+## -----------------------------
+base_family <- "sans"
+
+font_candidates <- c(
+  "/mnt/c/Windows/Fonts/simsun.ttc",
+  "/mnt/c/Windows/Fonts/simsun.ttf",
+  "/mnt/c/Windows/Fonts/simhei.ttf",
+  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+)
+
+font_path <- font_candidates[file.exists(font_candidates)][1]
+
+if (!is.na(font_path)) {
+  sysfonts::font_add("CNfont", regular = font_path)
+  base_family <- "CNfont"
+}
+
+showtext::showtext_auto(enable = TRUE)
+showtext::showtext_opts(dpi = 600)
+
+cat("使用字体：", base_family, "\n", sep = "")
+cat("字体文件：", ifelse(is.na(font_path), "未找到宋体，使用默认字体", font_path), "\n", sep = "")
+
+## -----------------------------
+## 3. 参数
+## -----------------------------
+host_family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_colors <- c(
+  "牛科" = "#E69F00",
+  "猪科" = "#D55E00",
+  "鹿科" = "#009E73",
+  "马科" = "#56B4E9",
+  "犀科" = "#CC79A7"
+)
+
+exclude_phyla <- c("真菌门分类地位未定类群")
+top_n <- 5
+alpha <- 0.05
+
+## -----------------------------
+## 4. 工具函数
+## -----------------------------
+save_plot_cairo <- function(p, png_file, pdf_file, width_mm, height_mm, dpi = 600) {
+  width_cm <- width_mm / 10
+  height_cm <- height_mm / 10
+
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      type = "cairo",
+      bg = "white"
+    )
+  } else {
+    grDevices::png(
+      filename = png_file,
+      width = width_cm,
+      height = height_cm,
+      units = "cm",
+      res = dpi,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+
+  if (isTRUE(capabilities("cairo"))) {
+    grDevices::cairo_pdf(
+      filename = pdf_file,
+      width = width_mm / 25.4,
+      height = height_mm / 25.4,
+      bg = "white"
+    )
+  } else {
+    grDevices::pdf(
+      file = pdf_file,
+      width = width_mm / 25.4,
+      height = height_mm / 25.4,
+      bg = "white"
+    )
+  }
+  print(p)
+  grDevices::dev.off()
+}
+
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ NA_character_,
+    p < 0.001 ~ "<0.001",
+    TRUE ~ sprintf("%.4f", p)
+  )
+}
+
+## -----------------------------
+## 5. 读取数据
+## -----------------------------
+group_df <- read.csv(
+  group_summary_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+letters_df <- read.csv(
+  letters_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+kw_df <- read.csv(
+  kw_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+required_group_cols <- c(
+  "phylum_cn", "host_family_cn", "n",
+  "mean_relative_abundance", "sd_relative_abundance"
+)
+
+missing_group_cols <- setdiff(required_group_cols, colnames(group_df))
+if (length(missing_group_cols) > 0) {
+  stop("group summary 表缺少列：", paste(missing_group_cols, collapse = ", "))
+}
+
+required_letter_cols <- c("phylum_cn", "host_family_cn", "letter")
+missing_letter_cols <- setdiff(required_letter_cols, colnames(letters_df))
+if (length(missing_letter_cols) > 0) {
+  stop("letters 表缺少列：", paste(missing_letter_cols, collapse = ", "))
+}
+
+required_kw_cols <- c("phylum_cn", "p_adj_BH_across_phyla")
+missing_kw_cols <- setdiff(required_kw_cols, colnames(kw_df))
+if (length(missing_kw_cols) > 0) {
+  stop("Kruskal-Wallis 表缺少列：", paste(missing_kw_cols, collapse = ", "))
+}
+
+## -----------------------------
+## 6. 筛选显著差异前5个门
+## -----------------------------
+overall_mean <- group_df %>%
+  filter(!phylum_cn %in% exclude_phyla) %>%
+  group_by(phylum_cn) %>%
+  summarise(
+    overall_mean_relative_abundance = mean(mean_relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+selected_phyla_df <- kw_df %>%
+  filter(
+    !phylum_cn %in% exclude_phyla,
+    !is.na(p_adj_BH_across_phyla),
+    p_adj_BH_across_phyla < alpha
+  ) %>%
+  left_join(overall_mean, by = "phylum_cn") %>%
+  arrange(desc(overall_mean_relative_abundance)) %>%
+  slice_head(n = top_n) %>%
+  mutate(
+    p_value_format = format_p(p_value),
+    p_adj_BH_across_phyla_format = format_p(p_adj_BH_across_phyla)
+  )
+
+if (nrow(selected_phyla_df) == 0) {
+  stop("没有筛选到 BH 校正后显著的门。")
+}
+
+selected_phyla <- selected_phyla_df$phylum_cn
+
+write.csv(
+  selected_phyla_df,
+  out_selected_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("本次作图门类：\n")
+print(selected_phyla_df %>%
+  select(phylum_cn, overall_mean_relative_abundance, p_value_format, p_adj_BH_across_phyla_format))
+
+## -----------------------------
+## 7. 合并作图数据
+## -----------------------------
+plot_df <- group_df %>%
+  filter(
+    phylum_cn %in% selected_phyla,
+    host_family_cn %in% host_family_order_cn
+  ) %>%
+  mutate(
+    host_family_cn = as.character(host_family_cn)
+  ) %>%
+  left_join(
+    letters_df %>%
+      filter(phylum_cn %in% selected_phyla) %>%
+      mutate(host_family_cn = as.character(host_family_cn)) %>%
+      select(phylum_cn, host_family_cn, letter),
+    by = c("phylum_cn", "host_family_cn")
+  ) %>%
+  left_join(
+    kw_df %>%
+      select(
+        phylum_cn,
+        kruskal_p_value = p_value,
+        kruskal_p_adj_BH_across_phyla = p_adj_BH_across_phyla
+      ),
+    by = "phylum_cn"
+  ) %>%
+  mutate(
+    se_relative_abundance = sd_relative_abundance / sqrt(n),
+    phylum_cn = factor(phylum_cn, levels = rev(selected_phyla)),
+    host_family_cn = factor(host_family_cn, levels = host_family_order_cn)
+  ) %>%
+  arrange(phylum_cn, host_family_cn)
+
+## 为字母标注预留偏移量
+max_x <- max(plot_df$mean_relative_abundance + plot_df$se_relative_abundance, na.rm = TRUE)
+label_offset <- max_x * 0.025
+
+plot_df <- plot_df %>%
+  mutate(
+    label_x = mean_relative_abundance + se_relative_abundance + label_offset,
+    letter = ifelse(is.na(letter), "", letter)
+  )
+
+write.csv(
+  plot_df,
+  out_plotdata_csv,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\n作图数据加总/预览：\n")
+print(plot_df %>% select(phylum_cn, host_family_cn, mean_relative_abundance, se_relative_abundance, letter) %>% head(20))
+
+## -----------------------------
+## 8. 作图
+## -----------------------------
+pd <- position_dodge(width = 0.78)
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = mean_relative_abundance,
+    y = phylum_cn,
+    fill = host_family_cn
+  )
+) +
+  geom_col(
+    position = pd,
+    width = 0.68,
+    color = "grey30",
+    linewidth = 0.15
+  ) +
+  geom_errorbar(
+    aes(
+      xmin = pmax(mean_relative_abundance - se_relative_abundance, 0),
+      xmax = mean_relative_abundance + se_relative_abundance
+    ),
+    position = pd,
+    width = 0.18,
+    linewidth = 0.4,
+    color = "black"
+  ) +
+  geom_text(
+    aes(
+      x = label_x,
+      y = phylum_cn,
+      label = letter,
+      group = host_family_cn
+    ),
+    position = pd,
+    hjust = 0,
+    size = 3.2,
+    family = base_family,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = family_colors,
+    breaks = host_family_order_cn,
+    drop = FALSE
+  ) +
+  scale_x_continuous(
+    expand = expansion(mult = c(0, 0.16))
+  ) +
+  labs(
+    x = "平均相对多度（%）",
+    y = NULL,
+    fill = NULL
+  ) +
+  theme_classic(base_size = 11, base_family = base_family) +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.8),
+    axis.ticks.length = unit(0.18, "cm"),
+    axis.text.x = element_text(size = 10.5, color = "black", family = base_family),
+    axis.text.y = element_text(size = 10.5, color = "black", family = base_family),
+    axis.title.x = element_text(size = 11, color = "black", family = base_family),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10, color = "black", family = base_family),
+    legend.key.size = unit(0.42, "cm"),
+    legend.spacing.x = unit(0.20, "cm"),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(5, 10, 5, 5)
+  )
+
+## -----------------------------
+## 9. 输出
+## -----------------------------
+save_plot_cairo(
+  p = p,
+  png_file = out_png,
+  pdf_file = out_pdf,
+  width_mm = 190,
+  height_mm = 70,
+  dpi = 600
+)
+
+cat("\n完成！\n")
+cat("PNG: ", out_png, "\n", sep = "")
+cat("PDF: ", out_pdf, "\n", sep = "")
+cat("plot data: ", out_plotdata_csv, "\n", sep = "")
+cat("selected phyla: ", out_selected_csv, "\n", sep = "")
+EOF
+
+Rscript /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/scripts/15_plot_phylum_top5_significant_host_family_barplot_meanSE_letters_no_elephant.R
+#运行后查看：
+#/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum/figures/Phylum_top5_significant_host_family_barplot_meanSE_letters_190x70mm.png
+#同时看一下筛选出来的是哪 5 个门：
+cat /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant/results/chapter3_family_composition_no_elephant/statistics_Kruskal_Dunn_phylum/figures/Phylum_top5_significant_selected_phyla_190x70mm.csv
