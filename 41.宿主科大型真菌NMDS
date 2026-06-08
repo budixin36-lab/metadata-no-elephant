@@ -1,0 +1,768 @@
+#下面给你完整新版脚本。
+#这版只改两点：
+#坐标轴刻度格式改为：
+#先去掉尾零，再按该轴最大所需小数位统一补齐。
+#例如某轴刻度去尾零后最多需要 3 位小数，则该轴全部刻度统一显示为 3 位小数。
+#删掉 stress 值下面那一行说明文字，只保留：Bray-Curtis NMDS stress = ...
+#你直接复制到 WSL 终端运行即可：
+cd /mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant
+
+cat > scripts/chapter5_macrofungi/22_host_family_macrofungi_NMDS_centroid_ellipse_5IQR_v2.R <<'RSCRIPT'
+#!/usr/bin/env Rscript
+
+############################################################
+## Chapter 5
+## 不同宿主科食源大型真菌 Beta 多样性 NMDS 图重绘
+##
+## 图形版本：
+##   5×IQR 主体放大 + 彩色质心 + 95%置信椭圆
+##
+## 本版修改：
+##   1. 坐标轴刻度：先去尾零，再按该轴最大所需小数位统一补齐
+##   2. 删除 stress 值下面的说明文字，仅保留 stress 一行
+############################################################
+
+rm(list = ls())
+
+options(stringsAsFactors = FALSE)
+options(scipen = 999)
+
+cat("============================================================\n")
+cat("Chapter 5 - Host family macrofungi NMDS centroid ellipse 5IQR v2\n")
+cat("============================================================\n\n")
+
+## =========================
+## 0. 依赖包
+## =========================
+
+RVER <- paste0(
+  R.version$major,
+  ".",
+  strsplit(R.version$minor, "\\.")[[1]][1]
+)
+
+user_lib <- file.path(Sys.getenv("HOME"), "Rlibs", paste0("R-", RVER))
+
+.libPaths(c(
+  user_lib,
+  "/mnt/d/Rlibs",
+  "/usr/local/lib/R/site-library",
+  "/usr/lib/R/site-library",
+  "/usr/lib/R/library"
+))
+
+need_pkgs <- c(
+  "dplyr",
+  "readr",
+  "tibble",
+  "ggplot2",
+  "showtext",
+  "sysfonts",
+  "grid",
+  "stringr"
+)
+
+pkg_check <- data.frame(
+  package = need_pkgs,
+  installed = sapply(need_pkgs, requireNamespace, quietly = TRUE),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Package check ==========\n")
+print(pkg_check)
+
+if (any(!pkg_check$installed)) {
+  cat("\n以下 R 包尚未安装，请先安装后再运行本脚本：\n")
+  print(pkg_check$package[!pkg_check$installed])
+  stop("Package check failed.")
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(tibble)
+  library(ggplot2)
+  library(showtext)
+  library(sysfonts)
+  library(grid)
+  library(stringr)
+})
+
+## =========================
+## 1. 路径
+## =========================
+
+base_dir <- "/mnt/d/ITS_SH_pipeline/globalfungi_style_test_no_elephant"
+
+out_dir <- file.path(
+  base_dir,
+  "results",
+  "chapter5_macrofungi_no_elephant",
+  "host_family_macrofungi_beta_diversity_v1"
+)
+
+scores_file <- file.path(
+  out_dir,
+  "macrofungi_NMDS_bray_curtis_scores_host_family_no_elephant.csv"
+)
+
+adonis_file <- file.path(
+  out_dir,
+  "host_family_macrofungi_adonis2_bray_curtis_no_elephant.csv"
+)
+
+summary_file <- file.path(
+  out_dir,
+  "host_family_macrofungi_beta_diversity_summary_no_elephant.txt"
+)
+
+out_display_scores <- file.path(
+  out_dir,
+  "macrofungi_NMDS_scores_host_family_no_elephant_display_5IQR_v2.csv"
+)
+
+out_excluded_scores <- file.path(
+  out_dir,
+  "macrofungi_NMDS_scores_host_family_no_elephant_excluded_by_5IQR_v2.csv"
+)
+
+out_centroids <- file.path(
+  out_dir,
+  "macrofungi_NMDS_host_family_centroids_5IQR_v2.csv"
+)
+
+out_png <- file.path(
+  out_dir,
+  "Fig5_x_host_family_macrofungi_BrayCurtis_NMDS_no_elephant_CN_centroid_ellipse_5IQR_v2.png"
+)
+
+out_pdf <- file.path(
+  out_dir,
+  "Fig5_x_host_family_macrofungi_BrayCurtis_NMDS_no_elephant_CN_centroid_ellipse_5IQR_v2.pdf"
+)
+
+out_summary <- file.path(
+  out_dir,
+  "host_family_macrofungi_beta_diversity_plotonly_5IQR_summary_v2.txt"
+)
+
+input_files <- data.frame(
+  file_label = c("NMDS_scores", "Adonis2_result", "analysis_summary_optional"),
+  file_path = c(scores_file, adonis_file, summary_file),
+  exists = file.exists(c(scores_file, adonis_file, summary_file)),
+  stringsAsFactors = FALSE
+)
+
+cat("========== Input files ==========\n")
+print(input_files)
+
+if (!file.exists(scores_file)) {
+  stop("找不到 NMDS scores 文件：", scores_file)
+}
+
+if (!file.exists(adonis_file)) {
+  stop("找不到 Adonis 结果文件：", adonis_file)
+}
+
+cat("\nOutput directory:\n")
+cat(out_dir, "\n\n")
+
+## =========================
+## 2. 字体
+## =========================
+
+font_path <- "/mnt/c/Windows/Fonts/simsun.ttc"
+
+if (!file.exists(font_path)) {
+  stop("找不到宋体字体文件：", font_path)
+}
+
+font_add("songti", regular = font_path)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+cat("使用中文字体：", font_path, "\n", sep = "")
+
+## =========================
+## 3. 参数
+## =========================
+
+family_order_cn <- c("牛科", "猪科", "鹿科", "马科", "犀科")
+
+family_colors <- c(
+  "牛科" = "#C73E3A",
+  "猪科" = "#E69F00",
+  "鹿科" = "#009E73",
+  "马科" = "#0072B2",
+  "犀科" = "#6A3D9A"
+)
+
+iqr_multiplier <- 5
+ellipse_level <- 0.95
+ellipse_alpha <- 0.18
+ellipse_linewidth <- 0.95
+centroid_size <- 5.2
+centroid_stroke <- 0.95
+axis_padding <- 0.10
+
+## =========================
+## 4. 工具函数
+## =========================
+
+format_p <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  sprintf("%.3f", p)
+}
+
+## 关键函数：
+## 对某一轴当前所有刻度值：
+## 1) 先去掉尾零
+## 2) 再找该轴最大所需小数位
+## 3) 最后全部按该最大位数统一补齐
+format_axis_trim_pad <- function(x, max_digits_cap = 10) {
+  if (length(x) == 0) return(character(0))
+
+  x2 <- x
+  x2[abs(x2) < 1e-12] <- 0
+
+  raw <- sprintf(paste0("%.", max_digits_cap, "f"), x2)
+  trimmed <- sub("0+$", "", raw)
+  trimmed <- sub("\\.$", "", trimmed)
+
+  dec_digits <- ifelse(
+    grepl("\\.", trimmed),
+    nchar(sub("^.*\\.", "", trimmed)),
+    0
+  )
+
+  keep_digits <- max(dec_digits, na.rm = TRUE)
+
+  if (!is.finite(keep_digits)) keep_digits <- 0
+
+  sprintf(paste0("%.", keep_digits, "f"), x2)
+}
+
+get_iqr_range <- function(x, multiplier = 5) {
+  q1 <- as.numeric(stats::quantile(x, probs = 0.25, na.rm = TRUE, names = FALSE))
+  q3 <- as.numeric(stats::quantile(x, probs = 0.75, na.rm = TRUE, names = FALSE))
+  iqr <- q3 - q1
+
+  lower <- q1 - multiplier * iqr
+  upper <- q3 + multiplier * iqr
+
+  data.frame(
+    Q1 = q1,
+    Q3 = q3,
+    IQR = iqr,
+    multiplier = multiplier,
+    lower = lower,
+    upper = upper,
+    stringsAsFactors = FALSE
+  )
+}
+
+get_padded_range <- function(x, padding = 0.10) {
+  r <- range(x, na.rm = TRUE)
+  d <- diff(r)
+
+  if (is.na(d) || d == 0) {
+    d <- max(abs(r), 1e-6)
+  }
+
+  c(
+    lower = r[1] - padding * d,
+    upper = r[2] + padding * d
+  )
+}
+
+read_stress_from_summary <- function(summary_file) {
+  if (!file.exists(summary_file)) {
+    return(NA_real_)
+  }
+
+  txt <- readLines(summary_file, warn = FALSE, encoding = "UTF-8")
+
+  hit1 <- grep("Bray-Curtis NMDS stress", txt, value = TRUE)
+  if (length(hit1) > 0) {
+    val <- sub(".*stress\\s*=\\s*([0-9.]+).*", "\\1", hit1[1])
+    val <- suppressWarnings(as.numeric(val))
+    if (!is.na(val)) return(val)
+  }
+
+  idx <- grep("^NMDS stress", txt)
+  if (length(idx) > 0 && idx[1] < length(txt)) {
+    next_line <- txt[idx[1] + 1]
+    val <- suppressWarnings(as.numeric(gsub("[^0-9.]", "", next_line)))
+    if (!is.na(val)) return(val)
+  }
+
+  return(NA_real_)
+}
+
+## =========================
+## 5. 读取 NMDS scores
+## =========================
+
+cat("\n读取 NMDS scores ...\n")
+
+scores_df <- read.csv(
+  scores_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+needed_cols <- c("sample_id", "host_family_CN", "NMDS1", "NMDS2")
+missing_cols <- setdiff(needed_cols, colnames(scores_df))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "NMDS scores 文件缺少必要列：",
+    paste(missing_cols, collapse = ", "),
+    "\n当前列名为：",
+    paste(colnames(scores_df), collapse = " | ")
+  )
+}
+
+scores_df <- scores_df %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    host_family_CN = as.character(host_family_CN),
+    NMDS1 = as.numeric(NMDS1),
+    NMDS2 = as.numeric(NMDS2)
+  ) %>%
+  filter(
+    !is.na(sample_id),
+    !is.na(host_family_CN),
+    host_family_CN %in% family_order_cn,
+    !is.na(NMDS1),
+    !is.na(NMDS2)
+  )
+
+scores_df$host_family_CN <- factor(scores_df$host_family_CN, levels = family_order_cn)
+
+cat("原始 NMDS scores 样本数：", nrow(scores_df), "\n", sep = "")
+cat("原始宿主科样本数：\n")
+print(table(scores_df$host_family_CN))
+
+## =========================
+## 6. 计算 5×IQR 显示范围
+## =========================
+
+cat("\n计算 5×IQR 主体显示范围 ...\n")
+
+range_x <- get_iqr_range(scores_df$NMDS1, multiplier = iqr_multiplier)
+range_y <- get_iqr_range(scores_df$NMDS2, multiplier = iqr_multiplier)
+
+iqr_range_df <- bind_rows(
+  data.frame(axis = "NMDS1", range_x, stringsAsFactors = FALSE),
+  data.frame(axis = "NMDS2", range_y, stringsAsFactors = FALSE)
+)
+
+print(iqr_range_df)
+
+display_df <- scores_df %>%
+  mutate(
+    in_5IQR_NMDS1 = NMDS1 >= range_x$lower & NMDS1 <= range_x$upper,
+    in_5IQR_NMDS2 = NMDS2 >= range_y$lower & NMDS2 <= range_y$upper,
+    in_5IQR_display = in_5IQR_NMDS1 & in_5IQR_NMDS2
+  )
+
+plot_df <- display_df %>%
+  filter(in_5IQR_display)
+
+excluded_df <- display_df %>%
+  filter(!in_5IQR_display)
+
+cat("\n5×IQR 后用于显示的样本数：", nrow(plot_df), "\n", sep = "")
+cat("5×IQR 隐藏的极端点样本数：", nrow(excluded_df), "\n", sep = "")
+cat("隐藏比例：", sprintf("%.2f%%", 100 * nrow(excluded_df) / nrow(display_df)), "\n", sep = "")
+
+cat("\n显示样本的宿主科样本数：\n")
+print(table(plot_df$host_family_CN))
+
+cat("\n隐藏样本的宿主科样本数：\n")
+print(table(excluded_df$host_family_CN))
+
+write.csv(
+  plot_df,
+  out_display_scores,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+write.csv(
+  excluded_df,
+  out_excluded_scores,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+## =========================
+## 7. 计算显示样本质心
+## =========================
+
+centroid_df <- plot_df %>%
+  group_by(host_family_CN) %>%
+  summarise(
+    n_display = n(),
+    centroid_NMDS1 = mean(NMDS1, na.rm = TRUE),
+    centroid_NMDS2 = mean(NMDS2, na.rm = TRUE),
+    sd_NMDS1 = sd(NMDS1, na.rm = TRUE),
+    sd_NMDS2 = sd(NMDS2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    host_family_CN = factor(host_family_CN, levels = family_order_cn)
+  ) %>%
+  arrange(host_family_CN)
+
+write.csv(
+  centroid_df,
+  out_centroids,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\n各宿主科质心坐标：\n")
+print(centroid_df)
+
+## =========================
+## 8. 读取 Adonis 结果和 stress
+## =========================
+
+cat("\n读取 Adonis 结果 ...\n")
+
+adonis_df <- read.csv(
+  adonis_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+if (!all(c("term", "R2") %in% colnames(adonis_df))) {
+  stop("Adonis 结果文件缺少 term 或 R2 列。")
+}
+
+p_col <- grep("^Pr", colnames(adonis_df), value = TRUE)[1]
+
+if (is.na(p_col)) {
+  stop("Adonis 结果文件中找不到 Pr 开头的 P 值列。")
+}
+
+if ("host_family_CN" %in% adonis_df$term) {
+  main_idx <- which(adonis_df$term == "host_family_CN")[1]
+} else if ("Model" %in% adonis_df$term) {
+  main_idx <- which(adonis_df$term == "Model")[1]
+} else {
+  main_idx <- 1
+}
+
+adonis_r2 <- adonis_df$R2[main_idx]
+adonis_p <- adonis_df[[p_col]][main_idx]
+
+adonis_label <- paste0(
+  "Adonis: R² = ",
+  sprintf("%.3f", adonis_r2),
+  ", P = ",
+  format_p(adonis_p)
+)
+
+stress_value <- read_stress_from_summary(summary_file)
+
+if (is.na(stress_value)) {
+  stress_label <- "Bray-Curtis NMDS stress = NA"
+} else {
+  stress_label <- paste0(
+    "Bray-Curtis NMDS stress = ",
+    sprintf("%.3f", stress_value)
+  )
+}
+
+cat("Adonis 标注：", adonis_label, "\n", sep = "")
+cat("Stress 标注：", stress_label, "\n", sep = "")
+
+## =========================
+## 9. 绘图
+## =========================
+
+cat("\n绘图 ...\n")
+
+x_range <- get_padded_range(plot_df$NMDS1, axis_padding)
+y_range <- get_padded_range(plot_df$NMDS2, axis_padding)
+
+x_anno <- x_range["lower"] + 0.04 * diff(x_range)
+y_anno <- y_range["upper"] - 0.06 * diff(y_range)
+
+p <- ggplot() +
+  stat_ellipse(
+    data = plot_df,
+    aes(
+      x = NMDS1,
+      y = NMDS2,
+      group = host_family_CN,
+      fill = host_family_CN
+    ),
+    geom = "polygon",
+    type = "t",
+    level = ellipse_level,
+    alpha = ellipse_alpha,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    data = plot_df,
+    aes(
+      x = NMDS1,
+      y = NMDS2,
+      group = host_family_CN,
+      color = host_family_CN
+    ),
+    type = "t",
+    level = ellipse_level,
+    linewidth = ellipse_linewidth,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = centroid_df,
+    aes(
+      x = centroid_NMDS1,
+      y = centroid_NMDS2,
+      fill = host_family_CN,
+      color = host_family_CN
+    ),
+    shape = 21,
+    size = centroid_size,
+    stroke = centroid_stroke,
+    alpha = 1,
+    show.legend = TRUE
+  ) +
+  annotate(
+    "text",
+    x = x_anno,
+    y = y_anno,
+    label = adonis_label,
+    hjust = 0,
+    vjust = 1,
+    size = 4.6,
+    family = "songti",
+    color = "black"
+  ) +
+  scale_color_manual(
+    values = family_colors,
+    breaks = family_order_cn,
+    drop = FALSE,
+    name = NULL
+  ) +
+  scale_fill_manual(
+    values = family_colors,
+    breaks = family_order_cn,
+    drop = FALSE,
+    name = NULL
+  ) +
+  scale_x_continuous(
+    labels = format_axis_trim_pad,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_y_continuous(
+    labels = format_axis_trim_pad,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "NMDS1",
+    y = "NMDS2",
+    color = NULL,
+    fill = NULL,
+    caption = stress_label
+  ) +
+  coord_cartesian(
+    xlim = x_range,
+    ylim = y_range,
+    clip = "off"
+  ) +
+  theme_bw(base_size = 14, base_family = "songti") +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_blank(),
+
+    axis.title = element_text(
+      size = 19,
+      colour = "black",
+      family = "songti"
+    ),
+    axis.text = element_text(
+      size = 13,
+      colour = "black",
+      family = "songti"
+    ),
+
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 16,
+      colour = "black",
+      family = "songti"
+    ),
+    legend.key = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.key.height = unit(0.62, "cm"),
+    legend.key.width = unit(0.62, "cm"),
+    legend.spacing.y = unit(0.14, "cm"),
+    legend.position = "right",
+
+    plot.caption = element_text(
+      size = 12.5,
+      hjust = 0,
+      colour = "black",
+      family = "songti",
+      lineheight = 1.15
+    ),
+    plot.caption.position = "plot",
+
+    plot.margin = margin(
+      t = 10,
+      r = 28,
+      b = 34,
+      l = 12
+    )
+  ) +
+  guides(
+    color = "none",
+    fill = guide_legend(
+      ncol = 1,
+      byrow = TRUE,
+      override.aes = list(
+        shape = 21,
+        size = 4.8,
+        alpha = 1
+      )
+    )
+  )
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+ggsave(
+  filename = out_pdf,
+  plot = p,
+  width = 9.2,
+  height = 7.0,
+  device = cairo_pdf,
+  bg = "white",
+  limitsize = FALSE
+)
+
+## =========================
+## 10. summary
+## =========================
+
+sink(out_summary)
+
+cat("Host family macrofungi NMDS centroid ellipse 5IQR plot-only version v2\n")
+cat("=======================================================================\n\n")
+
+cat("Input NMDS scores:\n")
+cat(scores_file, "\n\n")
+
+cat("Input Adonis2 result:\n")
+cat(adonis_file, "\n\n")
+
+cat("Analysis version:\n")
+cat("globalfungi_style_test_no_elephant\n\n")
+
+cat("Important note:\n")
+cat("This script does not recalculate Bray-Curtis distance, NMDS, Adonis2 or betadisper.\n")
+cat("It only redraws the existing host-family macrofungi NMDS results.\n\n")
+
+cat("Plot-only 5IQR display rule:\n")
+cat("Q1 and Q3 were calculated separately for NMDS1 and NMDS2 using all NMDS score samples.\n")
+cat("IQR = Q3 - Q1.\n")
+cat("Display range = Q1 - 5 × IQR to Q3 + 5 × IQR.\n")
+cat("Samples outside this range on either NMDS1 or NMDS2 were hidden only in this plot.\n\n")
+
+cat("IQR ranges:\n")
+print(iqr_range_df)
+
+cat("\nOriginal sample number:\n")
+cat(nrow(scores_df), "\n\n")
+
+cat("Displayed sample number:\n")
+cat(nrow(plot_df), "\n\n")
+
+cat("Hidden sample number:\n")
+cat(nrow(excluded_df), "\n\n")
+
+cat("Hidden proportion:\n")
+cat(sprintf("%.2f%%", 100 * nrow(excluded_df) / nrow(display_df)), "\n\n")
+
+cat("Displayed host-family sample counts:\n")
+print(as.data.frame(table(plot_df$host_family_CN)))
+
+cat("\nHidden host-family sample counts:\n")
+print(as.data.frame(table(excluded_df$host_family_CN)))
+
+cat("\nCentroids based on displayed 5IQR samples:\n")
+print(centroid_df)
+
+cat("\nAdonis2 result table:\n")
+print(adonis_df)
+
+cat("\nAdonis label:\n")
+cat(adonis_label, "\n\n")
+
+cat("Stress label:\n")
+cat(stress_label, "\n\n")
+
+cat("Output files:\n")
+cat("Displayed scores:", out_display_scores, "\n")
+cat("Excluded scores:", out_excluded_scores, "\n")
+cat("Centroids:", out_centroids, "\n")
+cat("PNG:", out_png, "\n")
+cat("PDF:", out_pdf, "\n")
+cat("Summary:", out_summary, "\n")
+
+sink()
+
+## =========================
+## 11. 控制台输出
+## =========================
+
+cat("\nDone!\n")
+cat("Output directory:\n", out_dir, "\n\n")
+
+cat("Original NMDS sample number:", nrow(scores_df), "\n")
+cat("Displayed 5IQR sample number:", nrow(plot_df), "\n")
+cat("Hidden by 5IQR sample number:", nrow(excluded_df), "\n")
+cat("Hidden proportion:", sprintf("%.2f%%", 100 * nrow(excluded_df) / nrow(display_df)), "\n\n")
+
+cat("IQR ranges:\n")
+print(iqr_range_df)
+
+cat("\nCentroids:\n")
+print(centroid_df)
+
+cat("\nAdonis label:\n")
+cat(adonis_label, "\n")
+
+cat("Stress label:\n")
+cat(stress_label, "\n\n")
+
+cat("Key output files:\n")
+cat("1. ", out_png, "\n", sep = "")
+cat("2. ", out_pdf, "\n", sep = "")
+cat("3. ", out_display_scores, "\n", sep = "")
+cat("4. ", out_excluded_scores, "\n", sep = "")
+cat("5. ", out_centroids, "\n", sep = "")
+cat("6. ", out_summary, "\n", sep = "")
+RSCRIPT
+
+Rscript scripts/chapter5_macrofungi/22_host_family_macrofungi_NMDS_centroid_ellipse_5IQR_v2.R \
+2>&1 | tee results/chapter5_macrofungi_no_elephant/host_family_macrofungi_beta_diversity_v1/run_plot_centroid_ellipse_5IQR_v2.log
